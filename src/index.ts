@@ -185,8 +185,8 @@ export class YASD {
     return this.cache.restore(entries);
   }
 
-  /** Clear only the cache (tables untouched). */
-  clearCache(): void {
+  /** Clear cached entries (tables untouched; use reset() for everything). */
+  clear(): void {
     this.cache.clear();
   }
 
