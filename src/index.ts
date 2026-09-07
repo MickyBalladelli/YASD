@@ -3,7 +3,8 @@
 // path (for Echo hot feeds, channel lists, presence/typing, rate limits).
 
 import { Executor } from './executor';
-import { KVCache, KVOptions, KVStats, DEFAULT_NAMESPACE_TTLS } from './cache';
+import { KVCache, KVOptions, KVStats, KVBatchEntry, SnapshotEntry, DEFAULT_NAMESPACE_TTLS } from './cache';
+import { PubSubHub, PubSubListener, INVALIDATE_CHANNEL, InvalidationEvent } from './pubsub';
 import { parse } from './parser';
 import {
   QueryResult,
@@ -25,10 +26,32 @@ export type {
   TableSchema,
   SqlStatement,
   KVOptions,
-  KVStats
+  KVStats,
+  KVBatchEntry,
+  SnapshotEntry,
+  PubSubListener,
+  InvalidationEvent
 };
 
-export { parse, KVCache, DEFAULT_NAMESPACE_TTLS };
+export { parse, KVCache, DEFAULT_NAMESPACE_TTLS, PubSubHub, INVALIDATE_CHANNEL };
+export { YasdServer, serverOptionsFromEnv, DEFAULT_PORT } from './server';
+export type { YasdServerOptions, ServerInfo } from './server';
+export { YasdClient, parseCacheUrl } from './client';
+export type { YasdClientOptions, ParsedCacheUrl, SubscribeHandler } from './client';
+export { saveSnapshot, loadSnapshot, AofLog, applyAofOp } from './persistence';
+export type { SnapshotFile, AofOp } from './persistence';
+export {
+  RespDecoder,
+  encodeCommand,
+  encodeReply,
+  encodeSimple,
+  encodeError,
+  encodeInt,
+  encodeBulk,
+  encodeArray,
+  requestArgv,
+} from './protocol';
+export type { RespReply } from './protocol';
 
 /**
  * YASD Database class
@@ -39,10 +62,12 @@ export { parse, KVCache, DEFAULT_NAMESPACE_TTLS };
 export class YASD {
   private executor: Executor;
   private cache: KVCache;
+  private hub: PubSubHub;
 
   constructor(cacheOptions?: KVOptions) {
     this.executor = new Executor();
     this.cache = new KVCache(cacheOptions);
+    this.hub = new PubSubHub();
   }
 
   /**
@@ -119,6 +144,62 @@ export class YASD {
   /** Synchronously evict expired keys. Returns the number removed. */
   cacheSweep(): number {
     return this.cache.sweep();
+  }
+
+  // ---- atomic counters (rate limits, unread/like counts) ----
+
+  /**
+   * Atomic increment (missing key counts from 0, TTL preserved).
+   * Throws on non-numeric values. Returns the new value.
+   */
+  incr(key: string, by = 1): number {
+    return this.cache.incr(key, by);
+  }
+
+  /** Atomic decrement. Returns the new value. */
+  decr(key: string, by = 1): number {
+    return this.cache.decr(key, by);
+  }
+
+  // ---- batch ops (feed hydration) ----
+
+  /** Batch read; values in key order (`undefined` on miss). */
+  mget(keys: string[]): Array<Value | undefined> {
+    return this.cache.mget(keys);
+  }
+
+  /** Batch write; returns the number of entries written. */
+  mset(entries: KVBatchEntry[]): number {
+    return this.cache.mset(entries);
+  }
+
+  // ---- persistence helpers (snapshot/restore the embedded cache) ----
+
+  /** Live entries for snapshots (expired keys skipped). */
+  dump(): SnapshotEntry[] {
+    return this.cache.dump();
+  }
+
+  /** Restore snapshot entries (absolute expiry preserved). */
+  restore(entries: SnapshotEntry[]): number {
+    return this.cache.restore(entries);
+  }
+
+  // ---- pub/sub (invalidation, presence/typing) ----
+
+  /** Publish a string message; returns the subscriber count. */
+  publish(channel: string, message: string): number {
+    return this.hub.publish(channel, message);
+  }
+
+  /** Subscribe; returns an unsubscribe function. */
+  subscribe(channel: string, listener: PubSubListener): () => void {
+    return this.hub.subscribe(channel, listener);
+  }
+
+  /** Subscriber count (optionally for one channel). */
+  subscriberCount(channel?: string): number {
+    return this.hub.subscriberCount(channel);
   }
 
   // ---- tables ----

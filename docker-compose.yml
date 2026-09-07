@@ -1,0 +1,44 @@
+# Example: shared YASD cache for multi-replica Echo (Socket.IO scaling).
+# Run `npm run build` first so ./dist exists, then:
+#   docker compose up --build
+services:
+  yasd:
+    build: .
+    container_name: yasd
+    ports:
+      # Single port serves the RESP-like protocol AND http://:7379/healthz
+      - "7379:7379"
+    environment:
+      YASD_PORT: "7379"
+      YASD_HOST: "0.0.0.0"
+      YASD_SNAPSHOT: "/data/snapshot.json"
+      YASD_AOF: "/data/appendonly.aof"
+      YASD_AUTO_SAVE_MS: "60000"
+      CACHE_MAX_ENTRIES: "50000"
+      CACHE_MAX_BYTES: "268435456" # 256 MiB
+      # Per-namespace TTL defaults (ms): feeds 15s, popular 60s, channels 30s
+      CACHE_NAMESPACE_TTLS: '{"feeds":15000,"popular":60000,"channels":30000,"presence":30000,"typing":10000}'
+    volumes:
+      - yasd-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:7379/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # Example Echo API replica wiring (illustrative — replace with the real
+  # Echo server image). Every replica shares the cache via CACHE_URL:
+  #
+  # echo-api:
+  #   image: echo-server:latest
+  #   depends_on:
+  #     yasd:
+  #       condition: service_healthy
+  #   environment:
+  #     CACHE_URL: "yasd://yasd:7379?poolSize=8"
+  #   deploy:
+  #     replicas: 3
+
+volumes:
+  yasd-data:

@@ -170,6 +170,52 @@ DROP TABLE table_name
 - OR: `age > 25 OR name = 'John'`
 - NOT: `NOT (age > 25)`
 
+## Cache server, counters, batch, pub/sub, persistence (P1)
+
+For multi-instance Echo (Socket.IO scaling), run YASD standalone and share
+it via `CACHE_URL=yasd://host:7379?poolSize=4`. One TCP port serves the
+RESP-like protocol **and** `GET /healthz` (JSON: entries, hits/misses, …).
+
+```bash
+npm run build
+node dist/cli.js --port 7379 --snapshot ./data/snapshot.json \
+  --aof ./data/appendonly.aof --auto-save-ms 60000
+# or: docker compose up --build
+```
+
+```javascript
+const { YasdServer, YasdClient } = require('yasd');
+
+// Embedded or standalone server
+const server = new YasdServer({ port: 7379, snapshotPath: './data/snapshot.json' });
+await server.start();
+
+// Pooled client (pipelining-safe). Values round-trip as JSON.
+const client = YasdClient.fromEnv(); // CACHE_URL
+await client.connect();
+await client.set('feeds:home', { posts: [] }, 15_000);
+await client.mset([{ key: 'a', value: 1 }, { key: 'b', value: [2] }]);
+await client.mget(['a', 'b']); // [1, [2]]
+
+// Atomic counters (rate limits, unread/like counts). TTL is preserved.
+await client.incr('ratelimit:post:alice');
+await client.expire('ratelimit:post:alice', 60_000);
+
+// Pub/sub (invalidation, presence/typing). The server also publishes every
+// mutation on `__yasd__:invalidate` for other replicas to consume.
+const stop = await client.subscribe('presence', (ch, msg) => console.log(ch, msg));
+await client.publish('presence', JSON.stringify({ user: 'bob' }));
+
+await client.healthcheck(); // { status: 'ok', entries, ... }
+await client.save();        // snapshot now (also truncates the AOF)
+await stop();
+await client.close();
+await server.close();       // graceful: drains sockets, final SAVE
+```
+
+Protocol commands: `PING GET SET[M PX] MGET MSET DEL CLEAR TTL EXPIRE
+PERSIST INCR[BY] DECR[BY] PUBLISH SUBSCRIBE UNSUBSCRIBE INFO SAVE LOAD QUIT`.
+
 ## Test Server
 
 A test server is included in the `test/` directory. Run it to see YASD in action:

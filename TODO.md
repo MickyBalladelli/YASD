@@ -18,18 +18,18 @@ Echo seam to target: `cacheKey(namespace, value) / cacheGet(key) / cacheSet(key,
   - Fix `DELETE` re-index loop (currently O(n²)) — replaced with single-pass `rebuildIndexes`.
 - [x] Unify parser path — `Executor.execute()` now uses `parse()` from `src/parser.ts` only; the `parseSimple` duplicate is deleted (plus tokenizer fixes so the real parser actually works)
 
-## P1 — Needed for production Echo
+## P1 — Needed for production Echo (done)
 
-- [ ] Server mode for multi-instance (Socket.IO scaling)
+- [x] Server mode for multi-instance (Socket.IO scaling) — `src/server.ts` (`YasdServer`), `src/protocol.ts` (RESP2 subset), `src/client.ts` (`YasdClient` pool + `CACHE_URL` + `fromEnv()`), `src/cli.ts` (`yasd-server` bin), `Dockerfile` + `docker-compose.yml` + `examples/server.js`
   - Standalone TCP/HTTP + simple RESP-like protocol, Node client with pool + `CACHE_URL`, healthcheck, graceful shutdown, `docker-compose` example.
-  - Without this YASD stays single-process (fine for 1-replica Echo only).
-- [ ] Persistence (optional for cache)
+  - Single port serves RESP + `GET /healthz`; graceful `close()` drains sockets, final SAVE, stops timers.
+- [x] Persistence (optional for cache) — `src/persistence.ts`: `saveSnapshot`/`loadSnapshot` (atomic tmp+rename), `AofLog` append/replay/truncate, `SAVE`/`LOAD`, startup restore + periodic autosave + save-on-shutdown.
   - Snapshot + AOF/log, `SAVE`/`LOAD`, startup restore. Cache can be ephemeral but restart storm protection helps.
-- [ ] Atomic counters
+- [x] Atomic counters — `KVCache.incr/decr` (missing→0, TTL preserved, non-numeric throws), on `YASD` + protocol `INCR/DECR` + client.
   - `INCR/DECR` for rate limits, unread counts, like counts.
-- [ ] Pub/sub + invalidation
+- [x] Pub/sub + invalidation — `src/pubsub.ts` (`PubSubHub`), on `YASD` (`publish/subscribe`) + protocol `PUBLISH/SUBSCRIBE/UNSUBSCRIBE` (dedicated multiplexed client conn); server auto-publishes mutations on `__yasd__:invalidate`.
   - Channels for cache invalidation, presence/typing, `PUBLISH/SUBSCRIBE`.
-- [ ] Pipelining / batch ops
+- [x] Pipelining / batch ops — `KVCache.mget/mset` (+ `YASD`, protocol `MGET/MSET`, client); TCP streaming + per-connection FIFO gives real pipelining.
   - `MGET/MSET`, batched writes for feed hydration.
 
 ## P2 — Nice to have

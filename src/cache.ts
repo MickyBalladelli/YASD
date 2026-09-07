@@ -53,6 +53,20 @@ export interface KVStats {
   bytes: number;
 }
 
+/** One restorable cache entry (absolute expiry, for snapshots). */
+export interface SnapshotEntry {
+  key: string;
+  value: Value;
+  expiresAt?: number; // epoch ms; undefined = persists
+}
+
+/** One batched write for `mset` (feed hydration). */
+export interface KVBatchEntry {
+  key: string;
+  value: Value;
+  ttlMs?: number;
+}
+
 interface Entry {
   value: Value;
   expiresAt?: number; // epoch ms; undefined = persists
@@ -253,6 +267,126 @@ export class KVCache {
   clear(): void {
     this.map.clear();
     this.bytes = 0;
+  }
+
+  /**
+   * Batch read for feed hydration. Each element mirrors `get` (lazy expiry
+   * + LRU touch per key). Returns values in key order (`undefined` on miss).
+   */
+  mget(keys: string[]): Array<Value | undefined> {
+    return keys.map(k => this.get(k));
+  }
+
+  /**
+   * Batch write for feed hydration. Applies `set` per entry (same TTL
+   * resolution, validation, and size-aware LRU eviction).
+   * Returns the number of entries written.
+   */
+  mset(entries: KVBatchEntry[]): number {
+    for (const e of entries) {
+      if (!e || typeof e.key !== 'string') {
+        throw new Error('mset entries must be { key: string, value, ttlMs? }');
+      }
+      this.set(e.key, e.value, e.ttlMs);
+    }
+    return entries.length;
+  }
+
+  /**
+   * Atomic counter add (single-threaded: read-modify-write is uninterrupted).
+   * Missing key counts from 0; existing value must be a finite number.
+   * TTL is preserved. Returns the new value.
+   */
+  incr(key: string, by = 1): number {
+    if (typeof by !== 'number' || !Number.isFinite(by)) {
+      throw new Error(`incr delta must be a finite number, got ${String(by)}`);
+    }
+    const now = Date.now();
+    const entry = this.map.get(key);
+    let base = 0;
+    let expiresAt: number | undefined;
+    if (entry) {
+      if (this.isExpired(entry, now)) {
+        this.removeExpired(key, entry);
+      } else {
+        if (typeof entry.value !== 'number' || !Number.isFinite(entry.value)) {
+          throw new Error(`INCR requires a numeric value at '${key}'`);
+        }
+        base = entry.value;
+        expiresAt = entry.expiresAt;
+      }
+    }
+    const next = base + by;
+    if (!Number.isFinite(next)) {
+      throw new Error(`INCR overflow at '${key}'`);
+    }
+    const live = this.map.get(key);
+    if (live && !this.isExpired(live, Date.now())) {
+      this.bytes -= live.size;
+      this.map.delete(key);
+    }
+    const size = estimateSize(key, next);
+    this.map.set(key, { value: next, expiresAt, size });
+    this.bytes += size;
+    this.evictIfNeeded(key);
+    return next;
+  }
+
+  /** Atomic counter subtract. See `incr`. Returns the new value. */
+  decr(key: string, by = 1): number {
+    return this.incr(key, -by);
+  }
+
+  /**
+   * Export live entries for snapshots. Skips already-expired keys.
+   * Values are shared by reference — stringify before storing.
+   */
+  dump(): SnapshotEntry[] {
+    const now = Date.now();
+    const out: SnapshotEntry[] = [];
+    for (const [key, entry] of this.map) {
+      if (entry.expiresAt !== undefined && entry.expiresAt <= now) continue;
+      if (entry.value === undefined) continue;
+      out.push(
+        entry.expiresAt === undefined
+          ? { key, value: entry.value }
+          : { key, value: entry.value, expiresAt: entry.expiresAt }
+      );
+    }
+    return out;
+  }
+
+  /**
+   * Restore entries from a snapshot (absolute `expiresAt` preserved).
+   * Already-expired entries are skipped. Returns the number restored.
+   */
+  restore(entries: SnapshotEntry[]): number {
+    const now = Date.now();
+    let count = 0;
+    for (const e of entries) {
+      if (!e || typeof e.key !== 'string' || e.value === undefined) continue;
+      if (e.expiresAt !== undefined && e.expiresAt <= now) continue;
+      const old = this.map.get(e.key);
+      if (old) {
+        this.bytes -= old.size;
+        this.map.delete(e.key);
+      }
+      const size = estimateSize(e.key, e.value);
+      this.map.set(e.key, { value: e.value, expiresAt: e.expiresAt, size });
+      this.bytes += size;
+      count++;
+    }
+    while ((this.map.size > this.maxEntries || this.bytes > this.maxBytes) && this.map.size > 0) {
+      const oldest = this.map.keys().next();
+      if (oldest.done) break;
+      const k = oldest.value as string;
+      const en = this.map.get(k);
+      if (!en) break;
+      this.map.delete(k);
+      this.bytes -= en.size;
+      this.evictions++;
+    }
+    return count;
   }
 
   /** Ms remaining; -1 = persists; -2 = missing/expired. */

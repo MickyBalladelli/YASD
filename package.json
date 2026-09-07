@@ -4,9 +4,13 @@
   "description": "A simple SQL-like in-memory database for Node.js",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "yasd-server": "dist/cli.js"
+  },
   "scripts": {
     "build": "tsc",
-    "test": "node test/basic.test.js && node test/kv.test.js",
+    "test": "node test/basic.test.js && node test/kv.test.js && node test/p1.test.js",
+    "serve": "node dist/cli.js",
     "dev": "node test/server.js",
     "prepublish": "npm run build"
   },
