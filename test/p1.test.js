@@ -163,7 +163,8 @@ async function runTests() {
     ]);
     const replies = new RespDecoder().push(buf);
     assert.strictEqual(replies.length, 4);
-    assert.deepStrictEqual(replies[3], { kind: 'array', items: [{ kind: 'bulk', value: 'x' }, null] });
+    // No null array elements on the wire: nil arrives as nil bulk.
+    assert.deepStrictEqual(replies[3], { kind: 'array', items: [{ kind: 'bulk', value: 'x' }, { kind: 'bulk', value: null }] });
   });
 
   await test('CACHE_URL parsing + fromEnv', async () => {

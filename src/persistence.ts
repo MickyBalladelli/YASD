@@ -69,8 +69,8 @@ export async function loadSnapshot(
   if (!file || !Array.isArray(file.entries)) {
     throw new Error(`invalid snapshot file: ${filePath}`);
   }
-  if (clearFirst) cache.clear();
-  return cache.restore(file.entries);
+  if (clearFirst) store.clear();
+  return store.restore(file.entries);
 }
 
 /** Apply one AOF op without producing further log output. */

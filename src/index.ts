@@ -185,6 +185,11 @@ export class YASD {
     return this.cache.restore(entries);
   }
 
+  /** Clear only the cache (tables untouched). */
+  clearCache(): void {
+    this.cache.clear();
+  }
+
   // ---- pub/sub (invalidation, presence/typing) ----
 
   /** Publish a string message; returns the subscriber count. */
