@@ -34,7 +34,20 @@ Echo seam to target: `cacheKey(namespace, value) / cacheGet(key) / cacheSet(key,
 
 ## P2 — Nice to have
 
-- [ ] Transactions / CAS for read-modify-write.
+- [x] Transactions / CAS for read-modify-write.
+  - Single-key: `KVCache.cas` (+ `YASD.cas`, protocol `CAS`, client `cas`).
+  - Multi-key optimistic: per-key versions (`getVersion`, bumped on every
+    mutation incl. expiry/eviction) + `KVCache.multi()` → `KVTransaction`
+    (`watch/unwatch/get/set/mset/del/clearPrefix/expire/persist/incr/decr/cas`,
+    `exec()` → results or null on conflict, `discard()`, commit-time
+    validation + rollback for all-or-nothing) + `runTransaction(keys, fn)`
+    retry helper on `KVCache`/`YASD`.
+  - Server: `WATCH/UNWATCH/MULTI/EXEC/DISCARD` (KV ops + PING queueable,
+    abort returns nil `*-1`, commits reuse the write path so AOF +
+    invalidation fanout apply). Client: one-shot `YasdTransaction` on a
+    dedicated connection (first write auto-sends MULTI, reads rejected after
+    MULTI) + `YasdClient.runTransaction()`. Tests: `test/transactions.test.js`
+    (21 tests, wired into `npm test`).
 - [ ] Metrics: hits/misses, evictions, expiries, memory bytes, slow-query log.
 - [ ] Query profiling for `WHERE/ORDER BY/LIMIT` paths.
 - [ ] Auth + TLS for server mode.
