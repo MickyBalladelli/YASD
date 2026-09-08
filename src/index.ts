@@ -2,8 +2,8 @@
 // A SQL-like in-memory database for Node.js, plus an O(1) KV cache fast
 // path (for Echo hot feeds, channel lists, presence/typing, rate limits).
 
-import { Executor } from './executor';
-import { KVCache, KVOptions, KVStats, KVBatchEntry, SnapshotEntry, DEFAULT_NAMESPACE_TTLS } from './cache';
+import { Executor, SlowQueryEntry, QueryPlan, QueryProfile } from './executor';
+import { KVCache, KVOptions, KVStats, KVBatchEntry, KVTransaction, TransactionError, TxResult, SnapshotEntry, DEFAULT_NAMESPACE_TTLS } from './cache';
 import { PubSubHub, PubSubListener, INVALIDATE_CHANNEL, InvalidationEvent } from './pubsub';
 import { parse } from './parser';
 import {
@@ -28,18 +28,20 @@ export type {
   KVOptions,
   KVStats,
   KVBatchEntry,
+  TxResult,
   SnapshotEntry,
   PubSubListener,
   InvalidationEvent
 };
 
-export { parse, KVCache, DEFAULT_NAMESPACE_TTLS, PubSubHub, INVALIDATE_CHANNEL };
+export { parse, KVCache, KVTransaction, TransactionError, DEFAULT_NAMESPACE_TTLS, PubSubHub, INVALIDATE_CHANNEL };
 export { YasdServer, serverOptionsFromEnv, DEFAULT_PORT } from './server';
 export type { YasdServerOptions, ServerInfo } from './server';
 export { YasdClient, parseCacheUrl } from './client';
-export type { YasdClientOptions, ParsedCacheUrl, SubscribeHandler } from './client';
+export type { YasdClientOptions, ParsedCacheUrl, SubscribeHandler, TxExecResult, YasdTransactionOptions } from './client';
+export { YasdTransaction } from './client';
 export { saveSnapshot, loadSnapshot, AofLog, applyAofOp } from './persistence';
-export type { SnapshotFile, AofOp } from './persistence';
+export type { SnapshotFile, SnapshotStore, AofOp } from './persistence';
 export {
   RespDecoder,
   encodeCommand,
@@ -54,6 +56,21 @@ export {
 export type { RespReply } from './protocol';
 
 /**
+ * YASD constructor options: KV cache tuning plus SQL observability.
+ * The legacy single-arg form `new YASD(kvOptions)` still works.
+ */
+export interface YasdOptions extends KVOptions {
+  /** Log SQL queries slower than this (ms) into the slow-query log. 0 = off. */
+  slowQueryMs?: number;
+}
+
+export type {
+  SlowQueryEntry,
+  QueryPlan,
+  QueryProfile,
+};
+
+/**
  * YASD Database class
  * Provides a SQL-like interface for in-memory database operations, plus a
  * fast KV cache (`get/set/del/clearPrefix`) that never touches the SQL
@@ -66,7 +83,11 @@ export class YASD {
 
   constructor(cacheOptions?: KVOptions) {
     this.executor = new Executor();
+    const opts = cacheOptions as YasdOptions | undefined;
     this.cache = new KVCache(cacheOptions);
+    if (opts?.slowQueryMs !== undefined) {
+      this.executor.setSlowQueryThreshold(opts.slowQueryMs);
+    }
     this.hub = new PubSubHub();
   }
 
@@ -85,6 +106,32 @@ export class YASD {
    */
   query(sql: string): QueryResult {
     return this.executor.query(sql);
+  }
+
+  /**
+   * Explain how a SELECT is served (index-scan vs full-scan) without running it.
+   */
+  explain(sql: string): QueryPlan {
+    return this.executor.explain(sql);
+  }
+
+  /** Run a query and report timing + shape (plan, rows, duration). */
+  profile(sql: string): QueryProfile {
+    return this.executor.profile(sql);
+  }
+
+  /** Log SQL slower than this (ms); 0 disables. */
+  setSlowQueryThreshold(ms: number): void {
+    this.executor.setSlowQueryThreshold(ms);
+  }
+
+  /** Newest-first slow-query ring (capped at 100). */
+  slowLog(): SlowQueryEntry[] {
+    return this.executor.getSlowLog();
+  }
+
+  clearSlowLog(): void {
+    this.executor.clearSlowLog();
   }
 
   // ---- KV fast path (O(1), no SQL parsing) ----
@@ -161,6 +208,16 @@ export class YASD {
     return this.cache.decr(key, by);
   }
 
+  /**
+   * Compare-and-set for read-modify-write. Succeeds when the live value
+   * deep-equals `expected` (`undefined` asserts absence). Returns true on
+   * success, false leaving state untouched. Explicit `ttlMs` wins, else the
+   * existing TTL is preserved.
+   */
+  cas(key: string, expected: Value | undefined, value: Value, ttlMs?: number): boolean {
+    return this.cache.cas(key, expected, value, ttlMs);
+  }
+
   // ---- batch ops (feed hydration) ----
 
   /** Batch read; values in key order (`undefined` on miss). */
@@ -171,6 +228,39 @@ export class YASD {
   /** Batch write; returns the number of entries written. */
   mset(entries: KVBatchEntry[]): number {
     return this.cache.mset(entries);
+  }
+
+  // ---- transactions (multi-key read-modify-write) ----
+
+  /**
+   * Start an optimistic transaction. Watch keys, read, queue writes, commit:
+   * ```typescript
+   * const tx = db.multi();
+   * tx.watch('likes:1');
+   * const likes = (tx.get('likes:1') as number) ?? 0;
+   * tx.set('likes:1', likes + 1);
+   * const results = tx.exec(); // null = conflict, retry
+   * ```
+   */
+  multi(): KVTransaction {
+    return this.cache.multi();
+  }
+
+  /**
+   * Watch-then-commit loop with retries (see `KVCache.runTransaction`).
+   * Retries the whole read-modify-write on conflict up to `maxRetries` times.
+   */
+  runTransaction<T>(
+    keys: string[],
+    fn: (tx: KVTransaction) => T | Promise<T>,
+    maxRetries = 3
+  ): Promise<{ committed: boolean; attempts: number; results: TxResult[] | null; value: T | undefined }> {
+    return this.cache.runTransaction(keys, fn, maxRetries);
+  }
+
+  /** Mutation generation for `key` (0 = never written) — WATCH plumbing. */
+  keyVersion(key: string): number {
+    return this.cache.getVersion(key);
   }
 
   // ---- persistence helpers (snapshot/restore the embedded cache) ----
@@ -264,7 +354,7 @@ export class YASD {
 /**
  * Create a new YASD database instance
  */
-export function createDatabase(cacheOptions?: KVOptions): YASD {
+export function createDatabase(cacheOptions?: YasdOptions): YASD {
   return new YASD(cacheOptions);
 }
 

@@ -3,16 +3,28 @@
 // Multi-instance Echo replicas point at it via YasdClient + CACHE_URL.
 //
 // Wire protocol (RESP2 subset, commands are arrays of bulk strings):
-//   PING [msg] | GET key | SET key <json> [PX ms] | MSET k <json> ...
-//   MGET k ... | DEL k ... | CLEAR prefix | TTL key | EXPIRE key ms
-//   PERSIST key | INCR key [by] | DECR key [by]
+//   PING [msg] | AUTH password | GET key | SET key <json> [PX ms]
+//   CAS key <expectedJson|empty=missing> <valueJson> [PX ms]
+//   MSET k <json> ... | MGET k ... | DEL k ... | CLEAR prefix
+//   TTL key | EXPIRE key ms | PERSIST key | INCR key [by] | DECR key [by]
+//   WATCH k ... | UNWATCH | MULTI | EXEC | DISCARD
 //   PUBLISH channel msg | SUBSCRIBE ch ... | UNSUBSCRIBE [ch ...]
 //   INFO | SAVE [path] | LOAD [path] | QUIT
 // Cache values travel as JSON bulk strings (objects/arrays supported).
 // Mutations are appended to the AOF (when configured) and published as
 // invalidation events on `__yasd__:invalidate` for other replicas.
+//
+// Transactions (multi-key read-modify-write, Redis-style optimistic):
+//   WATCH k ...   snapshot versions; EXEC aborts when any watched key changed
+//   MULTI         start queueing (only KV ops + PING may be queued)
+//   EXEC          commit atomically; array of per-op replies, or nil (*-1)
+//                 when a watched key was modified (nothing applied)
+//   DISCARD       drop the queue (and the watches) without committing
+// EXEC always clears watches, committed or not. DISCARD clears them too.
 
 import * as net from 'net';
+import * as tls from 'tls';
+import * as fs from 'fs';
 import {
   KVCache,
   KVOptions,
@@ -31,6 +43,23 @@ import {
 
 export const DEFAULT_PORT = 7379;
 
+/** Commands that may be queued between MULTI and EXEC (KV ops + PING). */
+const TX_QUEUEABLE = new Set([
+  'PING',
+  'GET',
+  'MGET',
+  'SET',
+  'MSET',
+  'DEL',
+  'CLEAR',
+  'TTL',
+  'EXPIRE',
+  'PERSIST',
+  'INCR',
+  'DECR',
+  'CAS',
+]);
+
 export interface YasdServerOptions {
   host?: string;
   port?: number;
@@ -43,6 +72,14 @@ export interface YasdServerOptions {
   saveOnShutdown?: boolean;
   /** Periodic SAVE interval in ms. Default 0 (off). */
   autoSaveMs?: number;
+  /**
+   * Password for the AUTH command. When set, every command except AUTH/QUIT
+   * is rejected with NOAUTH until authenticated. HTTP /healthz stays open
+   * (load balancers shouldn't need the secret).
+   */
+  password?: string;
+  /** TLS identity (PEM contents). When set the port serves TLS. */
+  tls?: { key: string | Buffer; cert: string | Buffer };
 }
 
 export interface ServerInfo {
@@ -50,6 +87,8 @@ export interface ServerInfo {
   version: string;
   uptimeMs: number;
   connections: number;
+  tls: boolean;
+  auth: boolean;
   entries: number;
   bytes: number;
   hits: number;
@@ -66,6 +105,11 @@ interface ConnState {
   httpBuf: Buffer | null; // non-null once HTTP detected
   subs: Map<string, PubSubListener>; // active subscriptions (empty = normal mode, null = never-subscribed?)
   subMode: boolean;
+  authed: boolean;
+  /** Watched key versions (WATCH), cleared by EXEC/DISCARD/UNWATCH. */
+  watchVersions: Map<string, number> | null;
+  /** Queued commands between MULTI and EXEC (null = not in MULTI). */
+  txQueue: Array<{ cmd: string; args: string[] }> | null;
 }
 
 function parsePort(value: string | undefined, fallback: number): number {
@@ -97,6 +141,19 @@ export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Yasd
   if (env.YASD_AUTO_SAVE_MS !== undefined) opts.autoSaveMs = parseInt(env.YASD_AUTO_SAVE_MS, 10);
   if (env.YASD_LOAD_ON_START !== undefined) opts.loadOnStart = env.YASD_LOAD_ON_START !== '0';
   if (env.YASD_SAVE_ON_SHUTDOWN !== undefined) opts.saveOnShutdown = env.YASD_SAVE_ON_SHUTDOWN !== '0';
+  const password = env.YASD_PASSWORD ?? env.YASD_REQUIREPASS;
+  if (password !== undefined && password.length > 0) opts.password = password;
+  const tlsKeyPath = env.YASD_TLS_KEY;
+  const tlsCertPath = env.YASD_TLS_CERT;
+  if (tlsKeyPath || tlsCertPath) {
+    if (!tlsKeyPath || !tlsCertPath) {
+      throw new Error('YASD_TLS_KEY and YASD_TLS_CERT must both be set');
+    }
+    opts.tls = {
+      key: fs.readFileSync(tlsKeyPath, 'utf8'),
+      cert: fs.readFileSync(tlsCertPath, 'utf8'),
+    };
+  }
   return opts;
 }
 
@@ -117,6 +174,10 @@ export class YasdServer {
   readonly loadOnStart: boolean;
   readonly saveOnShutdown: boolean;
   readonly autoSaveMs: number;
+  readonly authRequired: boolean;
+  readonly tlsEnabled: boolean;
+  private password: string | undefined;
+  private tlsOptions: { key: string | Buffer; cert: string | Buffer } | undefined;
 
   constructor(options: YasdServerOptions = {}) {
     this.host = options.host ?? '0.0.0.0';
@@ -128,6 +189,10 @@ export class YasdServer {
     this.loadOnStart = options.loadOnStart ?? true;
     this.saveOnShutdown = options.saveOnShutdown ?? options.snapshotPath !== undefined;
     this.autoSaveMs = options.autoSaveMs ?? 0;
+    this.password = options.password && options.password.length > 0 ? options.password : undefined;
+    this.authRequired = this.password !== undefined;
+    this.tlsOptions = options.tls;
+    this.tlsEnabled = options.tls !== undefined;
   }
 
   /** Direct access to the underlying cache (embedded use, tests). */
@@ -146,6 +211,8 @@ export class YasdServer {
       version: '1.0.0',
       uptimeMs: Date.now() - this.startedAt,
       connections: this.sockets.size,
+    tls: this.tlsEnabled,
+    auth: this.authRequired,
       entries: s.entries,
       bytes: s.bytes,
       hits: s.hits,
@@ -173,7 +240,11 @@ export class YasdServer {
       }
       await this.aof.replay(this.kv);
     }
-    this.netServer = net.createServer(socket => this.onConnection(socket));
+    this.netServer = this.tlsOptions
+      ? tls.createServer({ key: this.tlsOptions.key, cert: this.tlsOptions.cert }, socket =>
+          this.onConnection(socket)
+        )
+      : net.createServer(socket => this.onConnection(socket));
     await new Promise<void>((resolve, reject) => {
       const onError = (err: Error): void => {
         this.netServer?.off('listening', onListening);
@@ -262,6 +333,9 @@ export class YasdServer {
       httpBuf: null,
       subs: new Map(),
       subMode: false,
+      authed: !this.authRequired,
+      watchVersions: null,
+      txQueue: null,
     };
     socket.on('data', chunk => {
       try {
@@ -352,9 +426,15 @@ export class YasdServer {
       return 'ok';
     }
     const cmd = (argv[0] ?? '').toUpperCase();
-    if (state.subMode && cmd !== 'SUBSCRIBE' && cmd !== 'UNSUBSCRIBE' && cmd !== 'PING' && cmd !== 'QUIT') {
+    if (!state.authed && cmd !== 'AUTH' && cmd !== 'QUIT') {
       state.socket.write(
-        encodeReply({ kind: 'error', message: 'ERR only SUBSCRIBE/UNSUBSCRIBE/PING/QUIT allowed in subscriber mode' })
+        encodeReply({ kind: 'error', message: 'NOAUTH Authentication required (send AUTH first)' })
+      );
+      return 'ok';
+    }
+    if (state.subMode && cmd !== 'SUBSCRIBE' && cmd !== 'UNSUBSCRIBE' && cmd !== 'PING' && cmd !== 'QUIT' && cmd !== 'AUTH') {
+      state.socket.write(
+        encodeReply({ kind: 'error', message: 'ERR only AUTH/SUBSCRIBE/UNSUBSCRIBE/PING/QUIT allowed in subscriber mode' })
       );
       return 'ok';
     }
@@ -394,7 +474,95 @@ export class YasdServer {
     return JSON.parse(json) as SnapshotEntry['value'];
   }
 
+  /**
+   * Transaction entry point: WATCH/UNWATCH/MULTI/EXEC/DISCARD plus queueing
+   * while in MULTI. Everything else delegates to `executeCommand`.
+   */
   private dispatch(state: ConnState, cmd: string, args: string[]): RespReply | 'silent' | 'close' {
+    switch (cmd) {
+      case 'WATCH': {
+        if (state.subMode) throw new Error('WATCH not allowed in subscriber mode');
+        if (state.txQueue !== null) throw new Error('WATCH inside MULTI is not allowed');
+        this.requireArgs(cmd, args, 1, Infinity);
+        if (state.watchVersions === null) state.watchVersions = new Map();
+        for (const key of args) state.watchVersions.set(key, this.kv.getVersion(key));
+        return { kind: 'simple', value: 'OK' };
+      }
+      case 'UNWATCH': {
+        if (args.length > 0) throw new Error('UNWATCH takes no arguments');
+        state.watchVersions = null;
+        return { kind: 'simple', value: 'OK' };
+      }
+      case 'MULTI': {
+        if (args.length > 0) throw new Error('MULTI takes no arguments');
+        if (state.subMode) throw new Error('MULTI not allowed in subscriber mode');
+        if (state.txQueue !== null) throw new Error('MULTI calls cannot nest');
+        state.txQueue = [];
+        return { kind: 'simple', value: 'OK' };
+      }
+      case 'DISCARD': {
+        if (args.length > 0) throw new Error('DISCARD takes no arguments');
+        if (state.txQueue === null) throw new Error('DISCARD without MULTI');
+        state.txQueue = null;
+        state.watchVersions = null;
+        return { kind: 'simple', value: 'OK' };
+      }
+      case 'EXEC': {
+        if (args.length > 0) throw new Error('EXEC takes no arguments');
+        if (state.txQueue === null) throw new Error('EXEC without MULTI');
+        return this.execTransaction(state);
+      }
+      default: {
+        // Inside MULTI only the KV ops (plus PING) queue; everything else
+        // (AUTH, SUBSCRIBE, SAVE/LOAD, ...) is rejected so a commit stays
+        // a synchronous, atomic KV batch.
+        if (state.txQueue !== null) {
+          if (!TX_QUEUEABLE.has(cmd)) {
+            throw new Error(`${cmd} not allowed inside MULTI`);
+          }
+          state.txQueue.push({ cmd, args });
+          return { kind: 'simple', value: 'QUEUED' };
+        }
+        return this.executeCommand(state, cmd, args);
+      }
+    }
+  }
+
+  /**
+   * Commit the queued transaction. Returns an array of per-op replies, or
+   * nil (`*-1`) when a watched key changed — in which case nothing is
+   * applied. Watches clear either way. Single-threaded dispatch makes the
+   * apply loop uninterrupted (atomic).
+   */
+  private execTransaction(state: ConnState): RespReply {
+    const queue = state.txQueue ?? [];
+    const watched = state.watchVersions;
+    state.txQueue = null;
+    state.watchVersions = null;
+    if (watched !== null) {
+      for (const [key, version] of watched) {
+        if (this.kv.getVersion(key) !== version) {
+          return { kind: 'nil' };
+        }
+      }
+    }
+    const items: Array<RespReply | null> = [];
+    for (const op of queue) {
+      try {
+        const reply = this.executeCommand(state, op.cmd, op.args);
+        if (reply === 'silent' || reply === 'close') {
+          items.push({ kind: 'error', message: `${op.cmd} cannot run inside MULTI` });
+        } else {
+          items.push(reply);
+        }
+      } catch (err) {
+        items.push({ kind: 'error', message: `ERR ${(err as Error).message}` });
+      }
+    }
+    return { kind: 'array', items };
+  }
+
+  private executeCommand(state: ConnState, cmd: string, args: string[]): RespReply | 'silent' | 'close' {
     switch (cmd) {
       case 'PING':
         return args.length > 0
@@ -403,6 +571,42 @@ export class YasdServer {
 
       case 'QUIT':
         return 'close';
+
+      case 'AUTH': {
+        if (args.length > 1) throw new Error('AUTH takes an optional password');
+        if (!this.authRequired) return { kind: 'simple', value: 'OK' };
+        if (args[0] === this.password) {
+          state.authed = true;
+          return { kind: 'simple', value: 'OK' };
+        }
+        throw new Error('invalid password');
+      }
+
+      case 'CAS': {
+        // CAS key <expectedJson|empty=assert-missing> <valueJson> [PX ms]
+        if (args.length < 3 || args.length > 5) {
+          throw new Error('CAS syntax: CAS key expectedJson valueJson [PX ms]');
+        }
+        const key = args[0] as string;
+        const expectedRaw = args[1] as string;
+        const value = this.parseValue(args[2] as string);
+        const ttlMs = this.parsePx(args.slice(3));
+        const expected = expectedRaw === '' ? undefined : (JSON.parse(expectedRaw) as SnapshotEntry['value']);
+        const ok = this.kv.cas(key, expected, value, ttlMs);
+        if (ok) {
+          // AOF replay uses relative TTL; convert an absolute preserved
+          // expiry to remaining ms so the log stays meaningful.
+          const remaining = this.kv.ttl(key);
+          this.logAof({
+            op: 'set',
+            key,
+            value,
+            ...(remaining >= 0 ? { ttlMs: remaining } : {}),
+          });
+          this.publishInvalidate({ event: 'set', key });
+        }
+        return { kind: 'int', value: ok ? 1 : 0 };
+      }
 
       case 'GET': {
         this.requireArgs(cmd, args, 1);

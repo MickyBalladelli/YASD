@@ -30,11 +30,63 @@ class DatabaseError extends Error {
   }
 }
 
+export interface SlowQueryEntry {
+  sql: string;
+  durationMs: number;
+  at: number;
+}
+
+export interface QueryPlan {
+  statement: string;
+  table?: string;
+  columns?: string[] | '*';
+  /** How the WHERE filter is served. */
+  strategy: 'index-scan' | 'full-scan' | 'n/a';
+  /** Column(s) served from an index, when strategy is index-scan. */
+  indexColumns?: string[];
+  hasOrderBy: boolean;
+  limit?: number;
+  offset?: number;
+  /** Live row count of the table at plan time. */
+  tableRows?: number;
+}
+
+export interface QueryProfile extends QueryPlan {
+  durationMs: number;
+  rowsReturned: number;
+  affectedRows?: number;
+}
+
+const SLOW_LOG_CAP = 100;
+
 export class Executor {
   private db: Database;
+  private slowQueryThresholdMs = 0; // 0 = disabled
+  private slowLog: SlowQueryEntry[] = [];
 
   constructor() {
     this.db = { tables: new Map() };
+  }
+
+  /** Log queries slower than this (ms). 0 disables. */
+  setSlowQueryThreshold(ms: number): void {
+    if (typeof ms !== 'number' || !(ms >= 0)) {
+      throw new Error('slow query threshold must be a number >= 0');
+    }
+    this.slowQueryThresholdMs = ms;
+  }
+
+  getSlowQueryThreshold(): number {
+    return this.slowQueryThresholdMs;
+  }
+
+  /** Newest-first ring of slow queries (capped). */
+  getSlowLog(): SlowQueryEntry[] {
+    return [...this.slowLog];
+  }
+
+  clearSlowLog(): void {
+    this.slowLog = [];
   }
 
   execute(sql: string): QueryResult {
@@ -47,8 +99,19 @@ export class Executor {
       text = text.slice(0, -1).trim();
     }
 
-    const statement = parse(text);
-    return this.executeStatement(statement);
+    const started = Date.now();
+    try {
+      const statement = parse(text);
+      return this.executeStatement(statement);
+    } finally {
+      if (this.slowQueryThresholdMs > 0) {
+        const durationMs = Date.now() - started;
+        if (durationMs >= this.slowQueryThresholdMs) {
+          this.slowLog.unshift({ sql: text, durationMs, at: Date.now() });
+          if (this.slowLog.length > SLOW_LOG_CAP) this.slowLog.length = SLOW_LOG_CAP;
+        }
+      }
+    }
   }
 
   executeStatement(statement: SqlStatement): QueryResult {
@@ -611,6 +674,96 @@ export class Executor {
 
   query(sql: string): QueryResult {
     return this.execute(sql);
+  }
+
+  /**
+   * Explain how a SELECT is served without running it: index-scan vs
+   * full-scan for the WHERE filter, plus ORDER BY / LIMIT / OFFSET shape.
+   * Non-SELECT statements report strategy 'n/a'.
+   */
+  explain(sql: string): QueryPlan {
+    let text = sql.trim();
+    if (text.endsWith(';')) text = text.slice(0, -1).trim();
+    const statement = parse(text);
+    if (statement.type !== 'select') {
+      return { statement: statement.type, strategy: 'n/a', hasOrderBy: false };
+    }
+    const table = this.db.tables.get(statement.tableName);
+    const plan: QueryPlan = {
+      statement: 'select',
+      table: statement.tableName,
+      columns: statement.columns,
+      strategy: 'full-scan',
+      hasOrderBy: statement.orderBy !== undefined,
+      tableRows: table?.rows.length,
+    };
+    if (statement.limit !== undefined) plan.limit = statement.limit;
+    if (statement.offset !== undefined) plan.offset = statement.offset;
+    if (table && statement.where) {
+      const cols = this.describeIndexUse(table, statement.where);
+      if (cols) {
+        plan.strategy = 'index-scan';
+        plan.indexColumns = cols;
+      }
+    } else if (table && !statement.where) {
+      plan.strategy = 'full-scan';
+    }
+    return plan;
+  }
+
+  /** Run a query and report timing + shape (plan, rows, duration). */
+  profile(sql: string): QueryProfile {
+    const plan = this.explain(sql);
+    const started = Date.now();
+    const result = this.execute(sql);
+    return {
+      ...plan,
+      durationMs: Date.now() - started,
+      rowsReturned: result.rows.length,
+      ...(result.affectedRows === undefined ? {} : { affectedRows: result.affectedRows }),
+    };
+  }
+
+  /**
+   * Columns an index lookup would use for this WHERE (mirrors
+   * planIndexLookup). Returns undefined when it falls back to a full scan.
+   */
+  private describeIndexUse(table: TableData, where: WhereClause): string[] | undefined {
+    switch (where.type) {
+      case 'comparison': {
+        const comp = where as ComparisonClause;
+        if (comp.operator === '=') {
+          if (this.isColumn(table, comp.left) && this.isIndexableValue(comp.right)) {
+            return table.indexes[comp.left] ? [comp.left] : undefined;
+          }
+          if (this.isColumn(table, comp.right) && this.isIndexableValue(comp.left)) {
+            return table.indexes[comp.right] ? [comp.right] : undefined;
+          }
+          return undefined;
+        }
+        if (comp.operator === 'in') {
+          if (
+            this.isColumn(table, comp.left) &&
+            Array.isArray(comp.right) &&
+            (comp.right as unknown[]).every(v => this.isIndexableValue(v)) &&
+            table.indexes[comp.left]
+          ) {
+            return [comp.left];
+          }
+          return undefined;
+        }
+        return undefined;
+      }
+      case 'and': {
+        const and = where as AndClause;
+        const left = this.describeIndexUse(table, and.left);
+        const right = this.describeIndexUse(table, and.right);
+        if (!left || !right) return undefined;
+        return Array.from(new Set([...left, ...right]));
+      }
+      default:
+        return undefined;
+    }
   }
 
   getTableNames(): string[] {

@@ -9,7 +9,8 @@ export type RespReply =
   | { kind: 'error'; message: string }
   | { kind: 'int'; value: number }
   | { kind: 'bulk'; value: string | null }
-  | { kind: 'array'; items: Array<RespReply | null> };
+  | { kind: 'array'; items: Array<RespReply | null> }
+  | { kind: 'nil' };
 
 const CRLF = '\r\n';
 
@@ -52,6 +53,8 @@ export function encodeReply(reply: RespReply | null): Buffer {
       return encodeBulk(reply.value);
     case 'array':
       return encodeArray(reply.items);
+    case 'nil':
+      return Buffer.from('*-1\r\n', 'utf8');
   }
 }
 
@@ -110,7 +113,7 @@ function parseValue(buf: Buffer, pos: number): [RespReply, number] | null {
     const line = readLine(buf, pos + 1);
     if (!line) return null;
     const count = parseInt(line[0], 10);
-    if (count === -1) return [{ kind: 'array', items: [] }, line[1]];
+    if (count === -1) return [{ kind: 'nil' }, line[1]];
     if (!Number.isInteger(count) || count < -1) throw new Error(`malformed RESP array length: ${line[0]}`);
     const items: Array<RespReply | null> = [];
     let p = line[1];

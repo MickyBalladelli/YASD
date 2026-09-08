@@ -108,6 +108,14 @@ export class KVCache {
   private evictions = 0;
   private expiries = 0;
   private timer?: ReturnType<typeof setInterval>;
+  /**
+   * Per-key mutation generation for optimistic transactions (WATCH).
+   * Bumped on every state change (writes, deletes, TTL changes, expiry).
+   * `getVersion` returns 0 for never-written keys. Tombstones are kept so a
+   * delete is still observed as a change; the map is pruned (safe direction:
+   * pruning can only cause a false abort, never a missed conflict).
+   */
+  private keyVersions = new Map<string, number>();
 
   readonly maxEntries: number;
   readonly maxBytes: number;
@@ -154,6 +162,29 @@ export class KVCache {
     this.map.delete(key);
     this.bytes -= entry.size;
     this.expiries++;
+    this.bumpVersion(key);
+  }
+
+  /**
+   * Mutation generation for `key` (0 = never written). Used by
+   * `KVTransaction` (WATCH) and the server's WATCH command to detect
+   * read-modify-write conflicts between watch time and commit time.
+   */
+  getVersion(key: string): number {
+    return this.keyVersions.get(key) ?? 0;
+  }
+
+  private bumpVersion(key: string): void {
+    this.keyVersions.set(key, (this.keyVersions.get(key) ?? 0) + 1);
+    // Bound the tombstone map: dropping versions for non-live keys can only
+    // cause a false transaction abort (version reads as 0, mismatching any
+    // earlier snapshot), never a missed conflict.
+    if (this.keyVersions.size > this.maxEntries * 2 + 1024) {
+      for (const k of this.keyVersions.keys()) {
+        if (!this.map.has(k)) this.keyVersions.delete(k);
+        if (this.keyVersions.size <= this.maxEntries + 512) break;
+      }
+    }
   }
 
   /** O(1) lookup with lazy expiry + LRU touch. */
@@ -189,6 +220,7 @@ export class KVCache {
       if (old) {
         this.map.delete(key);
         this.bytes -= old.size;
+        this.bumpVersion(key);
       }
       this.expiries++;
       this.misses++;
@@ -202,6 +234,7 @@ export class KVCache {
     }
     this.map.set(key, { value, expiresAt, size });
     this.bytes += size;
+    this.bumpVersion(key);
     this.evictIfNeeded(key);
     return value;
   }
@@ -229,6 +262,7 @@ export class KVCache {
         this.map.delete(oldestKey);
         this.bytes -= entry.size;
         this.evictions++;
+        this.bumpVersion(oldestKey);
       }
     }
   }
@@ -242,6 +276,7 @@ export class KVCache {
     }
     this.map.delete(key);
     this.bytes -= entry.size;
+    this.bumpVersion(key);
     return true;
   }
 
@@ -258,6 +293,7 @@ export class KVCache {
         const entry = this.map.get(key);
         if (entry) this.bytes -= entry.size;
         this.map.delete(key);
+        this.bumpVersion(key);
         count++;
       }
     }
@@ -265,6 +301,7 @@ export class KVCache {
   }
 
   clear(): void {
+    for (const key of this.map.keys()) this.bumpVersion(key);
     this.map.clear();
     this.bytes = 0;
   }
@@ -328,6 +365,7 @@ export class KVCache {
     const size = estimateSize(key, next);
     this.map.set(key, { value: next, expiresAt, size });
     this.bytes += size;
+    this.bumpVersion(key);
     this.evictIfNeeded(key);
     return next;
   }
@@ -335,6 +373,79 @@ export class KVCache {
   /** Atomic counter subtract. See `incr`. Returns the new value. */
   decr(key: string, by = 1): number {
     return this.incr(key, -by);
+  }
+
+  private static valuesEqual(a: Value | undefined, b: Value | undefined): boolean {
+    if (a === b) return true;
+    if (a === undefined || b === undefined) return false;
+    if (typeof a === 'object' && a !== null && typeof b === 'object' && b !== null) {
+      try {
+        return JSON.stringify(a) === JSON.stringify(b);
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Compare-and-set for read-modify-write (distributed locks, single-flight
+   * hydration, exactly-once counters). Succeeds when the live value
+   * deep-equals `expected` — pass `undefined` to assert absence (expired
+   * counts as absent). On success stores `value` and returns true, otherwise
+   * state is untouched and it returns false. Single-threaded execution makes
+   * the check-and-store uninterrupted.
+   *
+   * TTL: an explicit `ttlMs` wins; otherwise the key's existing TTL is
+   * preserved; new keys fall back to namespace/default resolution (as `set`).
+   */
+  cas(key: string, expected: Value | undefined, value: Value, ttlMs?: number): boolean {
+    const now = Date.now();
+    const entry = this.map.get(key);
+    let current: Value | undefined;
+    let keepExpiresAt: number | undefined;
+    if (entry) {
+      if (this.isExpired(entry, now)) {
+        this.removeExpired(key, entry);
+        current = undefined;
+      } else {
+        current = entry.value;
+        keepExpiresAt = entry.expiresAt;
+      }
+    }
+    if (!KVCache.valuesEqual(current, expected)) return false;
+    if (value === undefined) {
+      throw new Error('cas value cannot be undefined (use null)');
+    }
+    const resolvedDefault = ttlMs !== undefined ? undefined : this.resolveTTLMs(key, undefined);
+    const expiresAt =
+      ttlMs !== undefined
+        ? now + validateTTL(ttlMs, 'ttlMs')
+        : keepExpiresAt !== undefined
+          ? keepExpiresAt
+          : resolvedDefault === undefined
+            ? undefined
+            : now + resolvedDefault;
+    if (expiresAt !== undefined && expiresAt <= now) {
+      if (entry && this.map.get(key) === entry) {
+        this.map.delete(key);
+        this.bytes -= entry.size;
+        this.bumpVersion(key);
+      }
+      this.expiries++;
+      return true; // compare succeeded; ttl 0 means "don't keep it"
+    }
+    const live = this.map.get(key);
+    if (live) {
+      this.bytes -= live.size;
+      this.map.delete(key);
+    }
+    const size = estimateSize(key, value);
+    this.map.set(key, { value, expiresAt, size });
+    this.bytes += size;
+    this.bumpVersion(key);
+    this.evictIfNeeded(key);
+    return true;
   }
 
   /**
@@ -374,6 +485,7 @@ export class KVCache {
       const size = estimateSize(e.key, e.value);
       this.map.set(e.key, { value: e.value, expiresAt: e.expiresAt, size });
       this.bytes += size;
+      this.bumpVersion(e.key);
       count++;
     }
     while ((this.map.size > this.maxEntries || this.bytes > this.maxBytes) && this.map.size > 0) {
@@ -385,6 +497,7 @@ export class KVCache {
       this.map.delete(k);
       this.bytes -= en.size;
       this.evictions++;
+      this.bumpVersion(k);
     }
     return count;
   }
@@ -418,6 +531,7 @@ export class KVCache {
     // LRU touch.
     this.map.delete(key);
     this.map.set(key, entry);
+    this.bumpVersion(key);
     return true;
   }
 
@@ -432,6 +546,7 @@ export class KVCache {
     entry.expiresAt = undefined;
     this.map.delete(key);
     this.map.set(key, entry);
+    this.bumpVersion(key);
     return true;
   }
 
@@ -444,6 +559,7 @@ export class KVCache {
         this.map.delete(key);
         this.bytes -= entry.size;
         this.expiries++;
+        this.bumpVersion(key);
         count++;
       }
     }
@@ -474,6 +590,52 @@ export class KVCache {
     this.stopSweeper();
   }
 
+  /**
+   * Start an optimistic transaction (Redis-style WATCH/MULTI/EXEC).
+   * Queue writes on the returned object, then `exec()` to commit them
+   * atomically — single-threaded application makes the commit
+   * uninterrupted, and any watched key mutated since `watch()` aborts the
+   * commit (returns null) instead of applying a stale read-modify-write.
+   */
+  multi(): KVTransaction {
+    return new KVTransaction(this);
+  }
+
+  /**
+   * Watch-then-commit loop with retries. Watches `keys`, runs `fn(tx)`
+   * (read via `tx.get`, queue writes via `tx.set/del/incr/...`), commits,
+   * and retries on conflict up to `maxRetries` times. A throw inside `fn`
+   * discards and rethrows; `tx.discard()` inside `fn` aborts voluntarily
+   * (`committed: false`, no retry).
+   */
+  async runTransaction<T>(
+    keys: string[],
+    fn: (tx: KVTransaction) => T | Promise<T>,
+    maxRetries = 3
+  ): Promise<{ committed: boolean; attempts: number; results: TxResult[] | null; value: T | undefined }> {
+    if (!Number.isInteger(maxRetries) || maxRetries < 0) {
+      throw new Error('maxRetries must be an integer >= 0');
+    }
+    let attempts = 0;
+    let value: T | undefined;
+    for (;;) {
+      const tx = this.multi();
+      tx.watch(...keys);
+      attempts++;
+      value = await fn(tx);
+      if (tx.finished) {
+        return { committed: false, attempts, results: null, value };
+      }
+      const results = tx.exec();
+      if (results !== null) {
+        return { committed: true, attempts, results, value };
+      }
+      if (attempts > maxRetries) {
+        return { committed: false, attempts, results: null, value };
+      }
+    }
+  }
+
   get size(): number {
     return this.map.size;
   }
@@ -491,5 +653,301 @@ export class KVCache {
       entries: this.map.size,
       bytes: this.bytes,
     };
+  }
+}
+
+/** Per-op result of a committed transaction (mirrors the queued method). */
+export type TxResult = Value | boolean | number;
+
+type TxQueuedOp =
+  | { op: 'set'; key: string; value: Value; ttlMs?: number }
+  | { op: 'mset'; entries: KVBatchEntry[] }
+  | { op: 'del'; key: string }
+  | { op: 'clearPrefix'; prefix: string }
+  | { op: 'expire'; key: string; ttlMs: number }
+  | { op: 'persist'; key: string }
+  | { op: 'incr'; key: string; by: number }
+  | { op: 'decr'; key: string; by: number }
+  | { op: 'cas'; key: string; expected: Value | undefined; value: Value; ttlMs?: number };
+
+export class TransactionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TransactionError';
+  }
+}
+
+/**
+ * Optimistic multi-key transaction over a KVCache (Redis-style).
+ *
+ *   const tx = cache.multi();
+ *   tx.watch('likes:1', 'feed:home');   // snapshot versions
+ *   const likes = tx.get('likes:1');     // immediate read (post-watch)
+ *   tx.set('likes:1', likes + 1);        // queued write
+ *   tx.incr('feed:home:version');        // queued write
+ *   const results = tx.exec();           // null = watched key changed, abort
+ *
+ * Reads (`get`) execute immediately against live state; writes queue and
+ * apply in order inside `exec()`, which is synchronous and therefore atomic
+ * on Node's single thread. `exec()` validates every op before mutating, and
+ * rolls back (restores pre-commit snapshots) if a commit-time check fails,
+ * so a commit is all-or-nothing. One-shot: `exec()`/`discard()` finish the
+ * transaction; any further use throws.
+ */
+export class KVTransaction {
+  private watched = new Map<string, number>();
+  private queue: TxQueuedOp[] = [];
+  private done = false;
+
+  constructor(private readonly cache: KVCache) {}
+
+  /** True once `exec()` or `discard()` has run. */
+  get finished(): boolean {
+    return this.done;
+  }
+
+  /** Number of queued writes. */
+  get queued(): number {
+    return this.queue.length;
+  }
+
+  /** Snapshot versions of `keys`; aborts `exec()` if any change since. */
+  watch(...keys: string[]): this {
+    this.assertOpen('watch');
+    for (const key of keys) {
+      if (typeof key !== 'string') throw new TransactionError('watch keys must be strings');
+      this.watched.set(key, this.cache.getVersion(key));
+    }
+    return this;
+  }
+
+  /** Forget all watched versions (EXEC still commits queued writes). */
+  unwatch(): this {
+    this.assertOpen('unwatch');
+    this.watched.clear();
+    return this;
+  }
+
+  /**
+   * Immediate read against live state (lazy expiry + LRU touch, like `get`).
+   * Call after `watch(key)` for the classic read-modify-write pattern.
+   */
+  get(key: string): Value | undefined {
+    this.assertOpen('get');
+    return this.cache.get(key);
+  }
+
+  /** Queue a SET (same TTL resolution/validation as `KVCache.set`). */
+  set(key: string, value: Value, ttlMs?: number): this {
+    this.assertOpen('set');
+    KVTransaction.checkValue(value, 'set');
+    KVTransaction.checkTtl(ttlMs);
+    this.queue.push({ op: 'set', key, value, ttlMs });
+    return this;
+  }
+
+  /** Queue an MSET batch. */
+  mset(entries: KVBatchEntry[]): this {
+    this.assertOpen('mset');
+    if (!Array.isArray(entries)) throw new TransactionError('mset entries must be an array');
+    for (const e of entries) {
+      if (!e || typeof e.key !== 'string') {
+        throw new TransactionError('mset entries must be { key: string, value, ttlMs? }');
+      }
+      KVTransaction.checkValue(e.value, 'mset');
+      KVTransaction.checkTtl(e.ttlMs);
+    }
+    this.queue.push({ op: 'mset', entries: entries.map(e => ({ ...e })) });
+    return this;
+  }
+
+  /** Queue a DEL. Result at commit: true when a live key was removed. */
+  del(key: string): this {
+    this.assertOpen('del');
+    this.queue.push({ op: 'del', key });
+    return this;
+  }
+
+  /** Queue a namespace clear. Result at commit: number of keys removed. */
+  clearPrefix(prefix: string): this {
+    this.assertOpen('clearPrefix');
+    if (typeof prefix !== 'string') throw new TransactionError('clearPrefix prefix must be a string');
+    this.queue.push({ op: 'clearPrefix', prefix });
+    return this;
+  }
+
+  /** Queue an EXPIRE. Result at commit: false when missing/expired. */
+  expire(key: string, ttlMs: number): this {
+    this.assertOpen('expire');
+    KVTransaction.checkTtl(ttlMs, true);
+    this.queue.push({ op: 'expire', key, ttlMs });
+    return this;
+  }
+
+  /** Queue a PERSIST. Result at commit: false when missing/expired. */
+  persist(key: string): this {
+    this.assertOpen('persist');
+    this.queue.push({ op: 'persist', key });
+    return this;
+  }
+
+  /** Queue an INCR. Fails the commit when the live value is non-numeric. */
+  incr(key: string, by = 1): this {
+    this.assertOpen('incr');
+    KVTransaction.checkDelta(by);
+    this.queue.push({ op: 'incr', key, by });
+    return this;
+  }
+
+  /** Queue a DECR. */
+  decr(key: string, by = 1): this {
+    this.assertOpen('decr');
+    KVTransaction.checkDelta(by);
+    this.queue.push({ op: 'decr', key, by });
+    return this;
+  }
+
+  /** Queue a CAS. Result at commit: true on compare success. */
+  cas(key: string, expected: Value | undefined, value: Value, ttlMs?: number): this {
+    this.assertOpen('cas');
+    KVTransaction.checkValue(value, 'cas');
+    KVTransaction.checkTtl(ttlMs);
+    this.queue.push({ op: 'cas', key, expected, value, ttlMs });
+    return this;
+  }
+
+  /** Drop queued writes and watches; the transaction is finished. */
+  discard(): void {
+    this.assertOpen('discard');
+    this.queue = [];
+    this.watched.clear();
+    this.done = true;
+  }
+
+  /**
+   * Commit queued writes atomically. Returns per-op results in queue order,
+   * or null when a watched key changed since `watch()` (nothing applied).
+   * Throws `TransactionError` when a commit-time check fails (nothing
+   * applied — pre-commit snapshots are restored) or the transaction is
+   * already finished.
+   */
+  exec(): TxResult[] | null {
+    this.assertOpen('exec');
+    this.done = true;
+    for (const [key, version] of this.watched) {
+      if (this.cache.getVersion(key) !== version) {
+        this.queue = [];
+        this.watched.clear();
+        return null;
+      }
+    }
+    const ops = this.queue;
+    this.queue = [];
+    this.watched.clear();
+    if (ops.length === 0) return [];
+    // Snapshot touched keys so a commit-time failure rolls back to
+    // all-or-nothing (single-threaded: no interleaving inside this loop).
+    const snapshot = this.snapshotTouched(ops);
+    try {
+      const results: TxResult[] = [];
+      for (const op of ops) results.push(this.apply(op));
+      return results;
+    } catch (err) {
+      this.rollback(snapshot);
+      throw err;
+    }
+  }
+
+  // ---- internals ----
+
+  private assertOpen(what: string): void {
+    if (this.done) throw new TransactionError(`cannot ${what}: transaction already finished (exec/discard)`);
+  }
+
+  private static checkValue(value: Value | undefined, what: string): void {
+    if (value === undefined) throw new TransactionError(`${what} value cannot be undefined (use null)`);
+  }
+
+  private static checkTtl(ttlMs: number | undefined, required = false): void {
+    if (ttlMs === undefined) {
+      if (required) throw new TransactionError('ttlMs is required');
+      return;
+    }
+    if (typeof ttlMs !== 'number' || !Number.isFinite(ttlMs)) {
+      throw new TransactionError(`ttlMs must be a finite number of ms, got ${String(ttlMs)}`);
+    }
+    if (ttlMs < 0) throw new TransactionError(`ttlMs must be >= 0, got ${ttlMs}`);
+  }
+
+  private static checkDelta(by: number): void {
+    if (typeof by !== 'number' || !Number.isFinite(by)) {
+      throw new TransactionError(`delta must be a finite number, got ${String(by)}`);
+    }
+  }
+
+  private snapshotTouched(ops: TxQueuedOp[]): Map<string, SnapshotEntry | undefined> {
+    const keys = new Set<string>();
+    for (const op of ops) {
+      switch (op.op) {
+        case 'mset':
+          for (const e of op.entries) keys.add(e.key);
+          break;
+        case 'clearPrefix': {
+          const needle = op.prefix + ':';
+          for (const e of this.cache.dump()) {
+            if (e.key === op.prefix || e.key.startsWith(needle)) keys.add(e.key);
+          }
+          break;
+        }
+        default:
+          keys.add(op.key);
+      }
+    }
+    const snap = new Map<string, SnapshotEntry | undefined>();
+    for (const key of keys) {
+      const value = this.cache.get(key);
+      if (value === undefined) {
+        snap.set(key, undefined);
+      } else {
+        const ttl = this.cache.ttl(key);
+        snap.set(
+          key,
+          ttl >= 0 ? { key, value, expiresAt: Date.now() + ttl } : { key, value }
+        );
+      }
+    }
+    return snap;
+  }
+
+  private rollback(snapshot: Map<string, SnapshotEntry | undefined>): void {
+    const restore: SnapshotEntry[] = [];
+    for (const [key, entry] of snapshot) {
+      this.cache.del(key);
+      if (entry !== undefined) restore.push(entry);
+    }
+    if (restore.length > 0) this.cache.restore(restore);
+  }
+
+  private apply(op: TxQueuedOp): TxResult {
+    switch (op.op) {
+      case 'set':
+        return this.cache.set(op.key, op.value, op.ttlMs);
+      case 'mset':
+        return this.cache.mset(op.entries);
+      case 'del':
+        return this.cache.del(op.key);
+      case 'clearPrefix':
+        return this.cache.clearPrefix(op.prefix);
+      case 'expire':
+        return this.cache.expire(op.key, op.ttlMs);
+      case 'persist':
+        return this.cache.persist(op.key);
+      case 'incr':
+        return this.cache.incr(op.key, op.by);
+      case 'decr':
+        return this.cache.decr(op.key, op.by);
+      case 'cas':
+        return this.cache.cas(op.key, op.expected, op.value, op.ttlMs);
+    }
   }
 }

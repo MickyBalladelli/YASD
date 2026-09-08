@@ -11,7 +11,11 @@
 //   --max-entries 10000    CACHE_MAX_ENTRIES
 //   --max-bytes 67108864   CACHE_MAX_BYTES
 //   --default-ttl-ms 15000 CACHE_DEFAULT_TTL_MS
+//   --password s3cret      YASD_PASSWORD (AUTH required)
+//   --tls-key key.pem      YASD_TLS_KEY (PEM path; needs --tls-cert)
+//   --tls-cert cert.pem    YASD_TLS_CERT (PEM path; needs --tls-key)
 
+import * as fs from 'fs';
 import { YasdServer, serverOptionsFromEnv } from './server';
 
 function parseArgv(argv: string[]): Record<string, string | boolean> {
@@ -46,9 +50,11 @@ async function main(): Promise<void> {
     console.log('Usage: yasd-server [options]');
     console.log('  --port, --host, --snapshot, --aof, --auto-save-ms,');
     console.log('  --no-load, --no-save-on-shutdown,');
-    console.log('  --max-entries, --max-bytes, --default-ttl-ms');
+    console.log('  --max-entries, --max-bytes, --default-ttl-ms,');
+    console.log('  --password, --tls-key <pem>, --tls-cert <pem>');
     console.log('Env: YASD_PORT YASD_HOST YASD_SNAPSHOT YASD_AOF YASD_AUTO_SAVE_MS');
     console.log('     CACHE_MAX_ENTRIES CACHE_MAX_BYTES CACHE_DEFAULT_TTL_MS CACHE_NAMESPACE_TTLS');
+    console.log('     YASD_PASSWORD YASD_TLS_KEY YASD_TLS_CERT');
     return;
   }
 
@@ -65,6 +71,16 @@ async function main(): Promise<void> {
   if (typeof args['max-bytes'] === 'string') base.cache.maxBytes = parseInt(args['max-bytes'], 10);
   if (typeof args['default-ttl-ms'] === 'string') {
     base.cache.defaultTTLMs = parseInt(args['default-ttl-ms'], 10);
+  }
+  if (typeof args.password === 'string') base.password = args.password;
+  if (typeof args.requirepass === 'string') base.password = args.requirepass;
+  const tlsKey = args['tls-key'];
+  const tlsCert = args['tls-cert'];
+  if (tlsKey !== undefined || tlsCert !== undefined) {
+    if (typeof tlsKey !== 'string' || typeof tlsCert !== 'string') {
+      throw new Error('--tls-key and --tls-cert must both be PEM file paths');
+    }
+    base.tls = { key: fs.readFileSync(tlsKey, 'utf8'), cert: fs.readFileSync(tlsCert, 'utf8') };
   }
 
   const server = new YasdServer(base);
