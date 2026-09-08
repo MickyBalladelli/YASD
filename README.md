@@ -213,8 +213,51 @@ await client.close();
 await server.close();       // graceful: drains sockets, final SAVE
 ```
 
-Protocol commands: `PING GET SET[M PX] MGET MSET DEL CLEAR TTL EXPIRE
-PERSIST INCR[BY] DECR[BY] PUBLISH SUBSCRIBE UNSUBSCRIBE INFO SAVE LOAD QUIT`.
+Protocol commands: `PING GET SET[M PX] CAS MGET MSET DEL CLEAR TTL EXPIRE
+PERSIST INCR[BY] DECR[BY] WATCH UNWATCH MULTI EXEC DISCARD
+PUBLISH SUBSCRIBE UNSUBSCRIBE INFO SAVE LOAD QUIT`.
+
+### Transactions (multi-key read-modify-write)
+
+Single-key RMW is covered by `CAS`/`INCR`/`DECR`. For multi-key atomicity
+(feed + counter updates, single-flight hydration), use optimistic
+transactions — embedded or over the wire with identical semantics:
+
+```javascript
+// Embedded
+const tx = db.multi();
+tx.watch('likes:1', 'feed:home');
+const likes = tx.get('likes:1') ?? 0;
+tx.set('likes:1', likes + 1);
+tx.set('feed:home', freshFeed, 15_000);
+const results = tx.exec(); // null = watched key changed, retry
+if (results === null) { /* re-read and retry */ }
+
+// Or with automatic retries:
+const out = await db.runTransaction(['likes:1', 'feed:home'], async (tx) => {
+  const likes = tx.get('likes:1') ?? 0;
+  tx.set('likes:1', likes + 1);
+  tx.set('feed:home', freshFeed, 15_000);
+  return likes + 1;
+}, 3 /* maxRetries */);
+// out = { committed, attempts, results, value }
+```
+
+```javascript
+// Server mode (dedicated connection, same pattern)
+const tx = client.multi();
+await tx.watch('likes:1');
+const cur = await tx.get('likes:1');
+await tx.set('likes:1', (cur ?? 0) + 1); // first write auto-sends MULTI
+const results = await tx.exec(); // null on conflict; per-op array otherwise
+// Or: await client.runTransaction(['likes:1'], async (tx) => { ... });
+```
+
+Rules: `WATCH` snapshots key versions; `EXEC` commits the queued writes
+atomically and returns per-op replies, or nil when a watched key changed
+(nothing applied). `EXEC`/`DISCARD` always clear watches (`DISCARD` drops the
+queue too). Committed writes hit the AOF and fan out invalidations exactly
+like plain writes. Reads must precede `MULTI` — read first, then write.
 
 ## Test Server
 
