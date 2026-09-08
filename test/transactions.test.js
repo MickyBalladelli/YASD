@@ -290,7 +290,7 @@ async function runTests() {
     await tx.set('likes:1', cur + 1);
     await tx.incr('writes');
     const results = await tx.exec();
-    assert.deepStrictEqual(results, [11, 1]);
+    assert.deepStrictEqual(results, ['OK', 1]); // wire SET replies OK, INCR replies the number
     assert.strictEqual(await client.get('likes:1'), 11);
     assert.strictEqual(tx.finished, true);
 
