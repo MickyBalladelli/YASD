@@ -48,7 +48,20 @@ Echo seam to target: `cacheKey(namespace, value) / cacheGet(key) / cacheSet(key,
     dedicated connection (first write auto-sends MULTI, reads rejected after
     MULTI) + `YasdClient.runTransaction()`. Tests: `test/transactions.test.js`
     (21 tests, wired into `npm test`).
-- [ ] Metrics: hits/misses, evictions, expiries, memory bytes, slow-query log.
+- [x] Metrics: hits/misses, evictions, expiries, memory bytes, slow-query log.
+  - Counters: `KVCache.stats()` (`hits/misses/evictions/expiries` + live
+    `entries`/`bytes`) surfaced as `YASD.cacheStats()`, server `INFO` +
+    `/healthz`; `resetStats()` zeroes counters without dropping data.
+  - Slow-query log: shared `SlowLog` in `src/metrics.ts` (threshold 0 = off,
+    sub-ms precision, newest-first, capped at 100) backs the embedded SQL log
+    (`slowQueryMs` option, `setSlowQueryThreshold/slowLog/clearSlowLog`) and
+    the new server slow-command log (`slowCommandMs` option,
+    `YASD_SLOW_COMMAND_MS` env, `--slow-command-ms` flag,
+    `setSlowCommandThreshold/slowLog/clearSlowLog`, in `INFO`).
+  - Tests: `test/metrics.test.js` (10 tests, wired into `npm test`).
+  - Drive-by fix: unique tmp path per `saveSnapshot` call (periodic autosave
+    + explicit SAVE + shutdown SAVE used to share one tmp file and could hit
+    ENOENT on rename).
 - [ ] Query profiling for `WHERE/ORDER BY/LIMIT` paths.
 - [ ] Auth + TLS for server mode.
 

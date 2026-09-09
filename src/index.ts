@@ -35,6 +35,8 @@ export type {
 };
 
 export { parse, KVCache, KVTransaction, TransactionError, DEFAULT_NAMESPACE_TTLS, PubSubHub, INVALIDATE_CHANNEL };
+export { SlowLog, SLOW_LOG_CAP, checkSlowThreshold } from './metrics';
+export type { SlowEntry } from './metrics';
 export { YasdServer, serverOptionsFromEnv, DEFAULT_PORT } from './server';
 export type { YasdServerOptions, ServerInfo } from './server';
 export { YasdClient, parseCacheUrl } from './client';
@@ -186,6 +188,11 @@ export class YASD {
   /** Cache hit/miss/eviction/expiry counters plus size. */
   cacheStats(): KVStats {
     return this.cache.stats();
+  }
+
+  /** Zero the cache counters (hits/misses/evictions/expiries); data kept. */
+  resetStats(): void {
+    this.cache.resetStats();
   }
 
   /** Synchronously evict expired keys. Returns the number removed. */

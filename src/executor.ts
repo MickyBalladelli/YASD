@@ -22,6 +22,8 @@ import {
   NotClause
 } from './types';
 import { parse } from './parser';
+import { performance } from 'perf_hooks';
+import { SlowLog, checkSlowThreshold } from './metrics';
 
 class DatabaseError extends Error {
   constructor(message: string, public code: string) {
@@ -57,12 +59,9 @@ export interface QueryProfile extends QueryPlan {
   affectedRows?: number;
 }
 
-const SLOW_LOG_CAP = 100;
-
 export class Executor {
   private db: Database;
-  private slowQueryThresholdMs = 0; // 0 = disabled
-  private slowLog: SlowQueryEntry[] = [];
+  private slow = new SlowLog();
 
   constructor() {
     this.db = { tables: new Map() };
@@ -70,23 +69,20 @@ export class Executor {
 
   /** Log queries slower than this (ms). 0 disables. */
   setSlowQueryThreshold(ms: number): void {
-    if (typeof ms !== 'number' || !(ms >= 0)) {
-      throw new Error('slow query threshold must be a number >= 0');
-    }
-    this.slowQueryThresholdMs = ms;
+    this.slow.setThreshold(checkSlowThreshold(ms, 'slow query threshold'));
   }
 
   getSlowQueryThreshold(): number {
-    return this.slowQueryThresholdMs;
+    return this.slow.threshold;
   }
 
   /** Newest-first ring of slow queries (capped). */
   getSlowLog(): SlowQueryEntry[] {
-    return [...this.slowLog];
+    return this.slow.list().map(e => ({ sql: e.name, durationMs: e.durationMs, at: e.at }));
   }
 
   clearSlowLog(): void {
-    this.slowLog = [];
+    this.slow.clear();
   }
 
   execute(sql: string): QueryResult {
@@ -99,18 +95,12 @@ export class Executor {
       text = text.slice(0, -1).trim();
     }
 
-    const started = Date.now();
+    const started = performance.now();
     try {
       const statement = parse(text);
       return this.executeStatement(statement);
     } finally {
-      if (this.slowQueryThresholdMs > 0) {
-        const durationMs = Date.now() - started;
-        if (durationMs >= this.slowQueryThresholdMs) {
-          this.slowLog.unshift({ sql: text, durationMs, at: Date.now() });
-          if (this.slowLog.length > SLOW_LOG_CAP) this.slowLog.length = SLOW_LOG_CAP;
-        }
-      }
+      this.slow.record(text, performance.now() - started);
     }
   }
 

@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "node test/basic.test.js && node test/kv.test.js && node test/p1.test.js && node test/transactions.test.js",
+    "test": "node test/basic.test.js && node test/kv.test.js && node test/p1.test.js && node test/transactions.test.js && node test/metrics.test.js",
     "serve": "node dist/cli.js",
     "dev": "node test/server.js",
     "prepublish": "npm run build"

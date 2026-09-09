@@ -259,6 +259,40 @@ atomically and returns per-op replies, or nil when a watched key changed
 queue too). Committed writes hit the AOF and fan out invalidations exactly
 like plain writes. Reads must precede `MULTI` — read first, then write.
 
+### Metrics: counters, memory, slow-query log
+
+```javascript
+// Embedded KV counters (cumulative)
+db.cacheStats();
+// { hits, misses, expiries, evictions, entries, bytes }
+db.resetStats(); // zero the four counters; entries/bytes untouched
+
+// Embedded SQL slow-query log (0 = off)
+const db2 = new YASD({ slowQueryMs: 5 });
+db2.setSlowQueryThreshold(5);
+db2.slowLog();      // newest-first [{ sql, durationMs, at }], capped at 100
+db2.clearSlowLog();
+```
+
+Server mode exposes the same counters plus a slow-**command** log through
+`INFO` (and `GET /healthz`, which serves the same JSON):
+
+```bash
+node dist/cli.js --slow-command-ms 5   # or YASD_SLOW_COMMAND_MS=5
+```
+
+```javascript
+await client.info();
+// { status, version, uptimeMs, connections, tls, auth,
+//   entries, bytes, hits, misses, evictions, expiries,
+//   subscribers, channels, slowCommandMs, slowLog }
+// slowLog: newest-first [{ name, durationMs, at, argc }], capped at 100
+```
+
+Conventions: `hits`/`misses` count cache lookups (`get`/`mget`, plus `ttl`
+misses); `bytes` tracks key + JSON value size; slow thresholds are in ms
+(fractions allowed — `1e-9` logs everything, handy for tests).
+
 ## Test Server
 
 A test server is included in the `test/` directory. Run it to see YASD in action:

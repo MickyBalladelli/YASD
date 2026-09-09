@@ -654,6 +654,17 @@ export class KVCache {
       bytes: this.bytes,
     };
   }
+
+  /**
+   * Zero the cumulative counters (hits/misses/evictions/expiries).
+   * Live entries and their bytes are untouched — use `clear()` to drop data.
+   */
+  resetStats(): void {
+    this.hits = 0;
+    this.misses = 0;
+    this.evictions = 0;
+    this.expiries = 0;
+  }
 }
 
 /** Per-op result of a committed transaction (mirrors the queued method). */

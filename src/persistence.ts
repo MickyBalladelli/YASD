@@ -36,12 +36,18 @@ function ensureDir(filePath: string): void {
   }
 }
 
+/** Per-call counter so concurrent saves never share a tmp path. */
+let saveSnapshotCounter = 0;
+
 /** Write a full snapshot. Returns the number of entries saved. */
 export async function saveSnapshot(store: SnapshotStore, filePath: string): Promise<number> {
   const entries = store.dump();
   const file: SnapshotFile = { version: 1, savedAt: Date.now(), entries };
   ensureDir(filePath);
-  const tmp = `${filePath}.tmp.${process.pid}`;
+  // Unique tmp path per call: concurrent saves (periodic autosave, explicit
+  // SAVE, shutdown SAVE) must not share one tmp file — the loser of a
+  // write/rename overlap would hit ENOENT on rename.
+  const tmp = `${filePath}.tmp.${process.pid}.${saveSnapshotCounter++}`;
   await fs.promises.writeFile(tmp, JSON.stringify(file), 'utf8');
   await fs.promises.rename(tmp, filePath);
   return entries.length;

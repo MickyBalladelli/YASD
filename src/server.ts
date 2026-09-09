@@ -25,6 +25,8 @@
 import * as net from 'net';
 import * as tls from 'tls';
 import * as fs from 'fs';
+import { performance } from 'perf_hooks';
+import { SlowLog, SlowEntry, checkSlowThreshold } from './metrics';
 import {
   KVCache,
   KVOptions,
@@ -73,6 +75,11 @@ export interface YasdServerOptions {
   /** Periodic SAVE interval in ms. Default 0 (off). */
   autoSaveMs?: number;
   /**
+   * Log commands slower than this (ms) into the slow-command ring
+   * (exposed via INFO). Default 0 (off); fractional values allowed.
+   */
+  slowCommandMs?: number;
+  /**
    * Password for the AUTH command. When set, every command except AUTH/QUIT
    * is rejected with NOAUTH until authenticated. HTTP /healthz stays open
    * (load balancers shouldn't need the secret).
@@ -97,6 +104,10 @@ export interface ServerInfo {
   expiries: number;
   subscribers: number;
   channels: string[];
+  /** Slow-command threshold in ms (0 = off). */
+  slowCommandMs: number;
+  /** Newest-first slow-command ring (capped at 100). */
+  slowLog: SlowEntry[];
 }
 
 interface ConnState {
@@ -139,6 +150,11 @@ export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Yasd
   if (env.YASD_SNAPSHOT) opts.snapshotPath = env.YASD_SNAPSHOT;
   if (env.YASD_AOF) opts.aofPath = env.YASD_AOF;
   if (env.YASD_AUTO_SAVE_MS !== undefined) opts.autoSaveMs = parseInt(env.YASD_AUTO_SAVE_MS, 10);
+  if (env.YASD_SLOW_COMMAND_MS !== undefined) {
+    const n = parseFloat(env.YASD_SLOW_COMMAND_MS);
+    if (!(n >= 0)) throw new Error('YASD_SLOW_COMMAND_MS must be a number >= 0');
+    opts.slowCommandMs = n;
+  }
   if (env.YASD_LOAD_ON_START !== undefined) opts.loadOnStart = env.YASD_LOAD_ON_START !== '0';
   if (env.YASD_SAVE_ON_SHUTDOWN !== undefined) opts.saveOnShutdown = env.YASD_SAVE_ON_SHUTDOWN !== '0';
   const password = env.YASD_PASSWORD ?? env.YASD_REQUIREPASS;
@@ -178,6 +194,7 @@ export class YasdServer {
   readonly tlsEnabled: boolean;
   private password: string | undefined;
   private tlsOptions: { key: string | Buffer; cert: string | Buffer } | undefined;
+  private slow = new SlowLog();
 
   constructor(options: YasdServerOptions = {}) {
     this.host = options.host ?? '0.0.0.0';
@@ -193,6 +210,9 @@ export class YasdServer {
     this.authRequired = this.password !== undefined;
     this.tlsOptions = options.tls;
     this.tlsEnabled = options.tls !== undefined;
+    if (options.slowCommandMs !== undefined) {
+      this.slow.setThreshold(checkSlowThreshold(options.slowCommandMs, 'slowCommandMs'));
+    }
   }
 
   /** Direct access to the underlying cache (embedded use, tests). */
@@ -221,7 +241,23 @@ export class YasdServer {
       expiries: s.expiries,
       subscribers: this.hub.subscriberCount(),
       channels: this.hub.channelNames(),
+      slowCommandMs: this.slow.threshold,
+      slowLog: this.slow.list(),
     };
+  }
+
+  /** Log commands slower than this (ms); 0 disables. */
+  setSlowCommandThreshold(ms: number): void {
+    this.slow.setThreshold(checkSlowThreshold(ms, 'slowCommandMs'));
+  }
+
+  /** Newest-first slow-command ring (capped at 100). */
+  slowLog(): SlowEntry[] {
+    return this.slow.list();
+  }
+
+  clearSlowLog(): void {
+    this.slow.clear();
   }
 
   address(): { host: string; port: number } {
@@ -438,6 +474,7 @@ export class YasdServer {
       );
       return 'ok';
     }
+    const started = performance.now();
     try {
       const reply = this.dispatch(state, cmd, argv.slice(1));
       if (reply === 'close') {
@@ -450,6 +487,9 @@ export class YasdServer {
       }
     } catch (err) {
       state.socket.write(encodeReply({ kind: 'error', message: `ERR ${(err as Error).message}` }));
+    } finally {
+      // SAVE/LOAD finish asynchronously; the sync portion is what's timed.
+      this.slow.record(cmd, performance.now() - started, argv.length - 1);
     }
     return 'ok';
   }
