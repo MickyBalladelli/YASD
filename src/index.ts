@@ -111,7 +111,16 @@ export class YASD {
   }
 
   /**
-   * Explain how a SELECT is served (index-scan vs full-scan) without running it.
+   * Explain how a SELECT is served without running it: index-scan vs
+   * full-scan for the WHERE filter, plus ORDER BY / LIMIT / OFFSET shape
+   * and the live row count. Non-SELECT statements report strategy 'n/a'.
+   * @example
+   * ```typescript
+   * db.explain("SELECT * FROM users WHERE id = 7 ORDER BY age DESC LIMIT 10");
+   * // { statement: 'select', strategy: 'index-scan', indexColumns: ['id'],
+   * //   hasOrderBy: true, orderBy: { column: 'age', direction: 'desc' },
+   * //   limit: 10, tableRows: 200, ... }
+   * ```
    */
   explain(sql: string): QueryPlan {
     return this.executor.explain(sql);

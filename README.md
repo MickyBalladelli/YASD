@@ -293,6 +293,27 @@ Conventions: `hits`/`misses` count cache lookups (`get`/`mget`, plus `ttl`
 misses); `bytes` tracks key + JSON value size; slow thresholds are in ms
 (fractions allowed — `1e-9` logs everything, handy for tests).
 
+### Query profiling: EXPLAIN and PROFILE
+
+```javascript
+db.explain("SELECT * FROM users WHERE id = 7 ORDER BY age DESC LIMIT 10");
+// { statement: 'select', table: 'users', columns: '*',
+//   strategy: 'index-scan', indexColumns: ['id'],
+//   hasOrderBy: true, orderBy: { column: 'age', direction: 'desc' },
+//   limit: 10, tableRows: 200 }
+
+db.profile('SELECT * FROM users WHERE age > 40');
+// { ...plan, durationMs: 0.42, rowsReturned: 54 }
+// writes also report affectedRows
+```
+
+`explain()` plans without running: `=` / `IN` (including `AND`s of those) on
+indexed columns report `index-scan` with the columns used; ranges, `LIKE`,
+`OR`, and mixed predicates report `full-scan`. Non-`SELECT` statements report
+strategy `'n/a'`. `profile()` runs the query and adds sub-ms `durationMs`,
+`rowsReturned`, and `affectedRows` for writes — and the run feeds the
+slow-query log when over threshold.
+
 ## Test Server
 
 A test server is included in the `test/` directory. Run it to see YASD in action:

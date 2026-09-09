@@ -47,6 +47,8 @@ export interface QueryPlan {
   /** Column(s) served from an index, when strategy is index-scan. */
   indexColumns?: string[];
   hasOrderBy: boolean;
+  /** ORDER BY path detail (column + direction) when present. */
+  orderBy?: { column: string; direction: 'asc' | 'desc' };
   limit?: number;
   offset?: number;
   /** Live row count of the table at plan time. */
@@ -687,6 +689,9 @@ export class Executor {
       hasOrderBy: statement.orderBy !== undefined,
       tableRows: table?.rows.length,
     };
+    if (statement.orderBy !== undefined) {
+      plan.orderBy = { column: statement.orderBy.column, direction: statement.orderBy.direction };
+    }
     if (statement.limit !== undefined) plan.limit = statement.limit;
     if (statement.offset !== undefined) plan.offset = statement.offset;
     if (table && statement.where) {
@@ -704,11 +709,11 @@ export class Executor {
   /** Run a query and report timing + shape (plan, rows, duration). */
   profile(sql: string): QueryProfile {
     const plan = this.explain(sql);
-    const started = Date.now();
+    const started = performance.now();
     const result = this.execute(sql);
     return {
       ...plan,
-      durationMs: Date.now() - started,
+      durationMs: performance.now() - started,
       rowsReturned: result.rows.length,
       ...(result.affectedRows === undefined ? {} : { affectedRows: result.affectedRows }),
     };

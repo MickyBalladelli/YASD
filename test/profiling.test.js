@@ -1,0 +1,247 @@
+#!/usr/bin/env node
+// Query profiling tests: EXPLAIN plans for WHERE/ORDER BY/LIMIT paths
+// (index-scan vs full-scan) and PROFILE runs (plan + timing + row counts).
+// Run: node test/profiling.test.js (needs the built dist).
+
+let mod;
+try {
+  mod = require('../dist/index.js');
+  console.log('Using compiled version from dist/index.js');
+} catch (e) {
+  console.log('YASD not available, skipping tests');
+  console.log('Please run: npm run build');
+  process.exit(0);
+}
+
+const assert = require('assert');
+
+const { YASD } = mod;
+
+function seed() {
+  const db = new YASD({ sweepIntervalMs: 0 });
+  db.query('CREATE TABLE users (id int primary key, name string, age number)');
+  const names = ['Ann', 'Bob', 'Cat', 'Dan', 'Eve'];
+  for (let i = 1; i <= 200; i++) {
+    db.query(`INSERT INTO users VALUES (${i}, '${names[i % 5]}', ${20 + (i % 30)})`);
+  }
+  return db;
+}
+
+async function runTests() {
+  console.log('Starting YASD profiling tests...\n');
+
+  let passed = 0;
+  let failed = 0;
+
+  async function test(name, fn) {
+    try {
+      await fn();
+      console.log(`✓ ${name}`);
+      passed++;
+    } catch (error) {
+      console.log(`✗ ${name}`);
+      console.log(`  Error: ${error && error.message}`);
+      failed++;
+    }
+  }
+
+  // ---- EXPLAIN: WHERE paths ----
+
+  await test('explain: = and IN use index-scan', async () => {
+    const db = seed();
+    const eq = db.explain("SELECT * FROM users WHERE name = 'Ann'");
+    assert.strictEqual(eq.statement, 'select');
+    assert.strictEqual(eq.table, 'users');
+    assert.strictEqual(eq.strategy, 'index-scan');
+    assert.deepStrictEqual(eq.indexColumns, ['name']);
+    assert.strictEqual(eq.tableRows, 200);
+
+    const inPlan = db.explain('SELECT * FROM users WHERE id IN (1, 2, 3)');
+    assert.strictEqual(inPlan.strategy, 'index-scan');
+    assert.deepStrictEqual(inPlan.indexColumns, ['id']);
+    db.close();
+  });
+
+  await test('explain: AND of indexable predicates uses index-scan', async () => {
+    const db = seed();
+    const plan = db.explain("SELECT * FROM users WHERE age = 25 AND name = 'Ann'");
+    assert.strictEqual(plan.strategy, 'index-scan');
+    assert.deepStrictEqual([...plan.indexColumns].sort(), ['age', 'name']);
+    assert.strictEqual(db.query("SELECT * FROM users WHERE age = 25 AND name = 'Ann'").rows.length, 7);
+    db.close();
+  });
+
+  await test('explain: range/LIKE/OR/mixed-AND fall back to full-scan', async () => {
+    const db = seed();
+    for (const sql of [
+      'SELECT * FROM users WHERE age > 25',
+      "SELECT * FROM users WHERE name LIKE 'A%'",
+      "SELECT * FROM users WHERE name = 'Ann' OR age = 30",
+      "SELECT * FROM users WHERE age > 25 AND name = 'Bob'",
+      'SELECT * FROM users',
+    ]) {
+      const plan = db.explain(sql);
+      assert.strictEqual(plan.strategy, 'full-scan', sql);
+      assert.strictEqual(plan.indexColumns, undefined, sql);
+    }
+    db.close();
+  });
+
+  await test('explain: plans agree with execution (index results are honest)', async () => {
+    const db = seed();
+    const cases = [
+      "SELECT * FROM users WHERE name = 'Ann'",
+      'SELECT * FROM users WHERE id IN (1, 2, 3)',
+      "SELECT * FROM users WHERE age = 25 AND name = 'Ann'",
+    ];
+    for (const sql of cases) {
+      const plan = db.explain(sql);
+      assert.strictEqual(plan.strategy, 'index-scan', sql);
+      const res = db.query(sql);
+      const scan = db.query('SELECT * FROM users').rows.filter(r => {
+        if (sql.includes('Ann') && !sql.includes('age')) return r.name === 'Ann';
+        if (sql.includes('IN')) return [1, 2, 3].includes(r.id);
+        return r.age === 25 && r.name === 'Ann';
+      });
+      assert.strictEqual(res.rows.length, scan.length, `${sql}: same rows as full scan`);
+      assert.ok(res.rows.length > 0, `${sql}: non-empty`);
+    }
+    db.close();
+  });
+
+  // ---- EXPLAIN: ORDER BY / LIMIT paths ----
+
+  await test('explain: ORDER BY detail and defaults', async () => {
+    const db = seed();
+    const plain = db.explain('SELECT * FROM users');
+    assert.strictEqual(plain.hasOrderBy, false);
+    assert.strictEqual(plain.orderBy, undefined);
+
+    const asc = db.explain('SELECT * FROM users ORDER BY age');
+    assert.strictEqual(asc.hasOrderBy, true);
+    assert.deepStrictEqual(asc.orderBy, { column: 'age', direction: 'asc' });
+
+    const desc = db.explain('SELECT * FROM users ORDER BY age DESC');
+    assert.deepStrictEqual(desc.orderBy, { column: 'age', direction: 'desc' });
+
+    // Combined with a WHERE path: both halves reported.
+    const combo = db.explain("SELECT * FROM users WHERE name = 'Ann' ORDER BY age DESC");
+    assert.strictEqual(combo.strategy, 'index-scan');
+    assert.deepStrictEqual(combo.orderBy, { column: 'age', direction: 'desc' });
+    db.close();
+  });
+
+  await test('explain: LIMIT/OFFSET echoed, columns and table reported', async () => {
+    const db = seed();
+    const paged = db.explain('SELECT * FROM users ORDER BY id LIMIT 10 OFFSET 5');
+    assert.strictEqual(paged.limit, 10);
+    assert.strictEqual(paged.offset, 5);
+
+    const noPage = db.explain('SELECT * FROM users');
+    assert.strictEqual(noPage.limit, undefined);
+    assert.strictEqual(noPage.offset, undefined);
+
+    const cols = db.explain('SELECT name, age FROM users WHERE id = 1');
+    assert.deepStrictEqual(cols.columns, ['name', 'age']);
+    assert.strictEqual(cols.strategy, 'index-scan');
+
+    const star = db.explain('SELECT * FROM users');
+    assert.strictEqual(star.columns, '*');
+    assert.strictEqual(star.table, 'users');
+    assert.strictEqual(star.tableRows, 200);
+    db.close();
+  });
+
+  await test('explain: missing table and non-SELECT statements', async () => {
+    const db = seed();
+    const missing = db.explain('SELECT * FROM nope WHERE id = 1');
+    assert.strictEqual(missing.statement, 'select');
+    assert.strictEqual(missing.table, 'nope');
+    assert.strictEqual(missing.tableRows, undefined);
+
+    const ins = db.explain("INSERT INTO users VALUES (201, 'Zed', 40)");
+    assert.deepStrictEqual(ins, { statement: 'insert', strategy: 'n/a', hasOrderBy: false });
+
+    const semicolon = db.explain("SELECT * FROM users WHERE name = 'Ann';");
+    assert.strictEqual(semicolon.strategy, 'index-scan', 'trailing semicolon tolerated');
+    db.close();
+  });
+
+  // ---- PROFILE ----
+
+  await test('profile: SELECT reports plan + timing + row counts', async () => {
+    const db = seed();
+    const sql = "SELECT * FROM users WHERE name = 'Ann' ORDER BY age DESC LIMIT 5";
+    const p = db.profile(sql);
+    assert.strictEqual(p.statement, 'select');
+    assert.strictEqual(p.strategy, 'index-scan');
+    assert.deepStrictEqual(p.indexColumns, ['name']);
+    assert.deepStrictEqual(p.orderBy, { column: 'age', direction: 'desc' });
+    assert.strictEqual(p.limit, 5);
+    assert.strictEqual(typeof p.durationMs, 'number');
+    assert.ok(p.durationMs >= 0, `duration, got ${p.durationMs}`);
+    assert.strictEqual(p.rowsReturned, 5, 'LIMIT applied (40 Ann rows, 5 returned)');
+    assert.strictEqual(p.affectedRows, undefined, 'SELECT has no affectedRows');
+    // The profiled run matches a direct run (ORDER BY + LIMIT honored).
+    const direct = db.query(sql).rows;
+    assert.strictEqual(direct.length, p.rowsReturned);
+    assert.ok(direct.every(r => r.name === 'Ann'));
+    const ages = direct.map(r => r.age);
+    assert.deepStrictEqual([...ages].sort((a, b) => b - a), ages, 'descending by age');
+    db.close();
+  });
+
+  await test('profile: full-scan SELECT and write statements', async () => {
+    const db = seed();
+    const full = db.profile('SELECT * FROM users WHERE age > 40');
+    assert.strictEqual(full.strategy, 'full-scan');
+    assert.strictEqual(full.rowsReturned, 54, 'exact count for the seed data');
+    assert.strictEqual(
+      full.rowsReturned,
+      db.query('SELECT * FROM users WHERE age > 40').rows.length,
+      'profile count matches direct run'
+    );
+    assert.ok(full.rowsReturned > 0);
+    assert.strictEqual(full.affectedRows, undefined, 'SELECT has no affectedRows');
+
+    const ins = db.profile("INSERT INTO users VALUES (201, 'Zed', 40)");
+    assert.strictEqual(ins.statement, 'insert');
+    assert.strictEqual(ins.strategy, 'n/a');
+    assert.strictEqual(ins.affectedRows, 1);
+    assert.strictEqual(ins.rowsReturned, 0);
+
+    const upd = db.profile("UPDATE users SET age = 41 WHERE name = 'Zed'");
+    assert.strictEqual(upd.affectedRows, 1);
+
+    const del = db.profile("DELETE FROM users WHERE name = 'Zed'");
+    assert.strictEqual(del.affectedRows, 1);
+    assert.strictEqual(db.query("SELECT * FROM users WHERE name = 'Zed'").rows.length, 0);
+    db.close();
+  });
+
+  await test('profile: runs feed the slow-query log when over threshold', async () => {
+    const db = seed();
+    db.setSlowQueryThreshold(1e-9);
+    db.profile("SELECT * FROM users WHERE name = 'Ann'");
+    const log = db.slowLog();
+    assert.strictEqual(log.length, 1);
+    assert.ok(log[0].sql.includes('Ann'), `profiled sql logged, got ${log[0].sql}`);
+    db.close();
+  });
+
+  // Summary
+  console.log('\n' + '='.repeat(50));
+  console.log(`Profiling tests completed: ${passed + failed}`);
+  console.log(`Passed: ${passed}`);
+  console.log(`Failed: ${failed}`);
+  console.log('='.repeat(50));
+
+  if (failed > 0) {
+    process.exit(1);
+  }
+}
+
+runTests().catch(err => {
+  console.error(err);
+  process.exit(1);
+});

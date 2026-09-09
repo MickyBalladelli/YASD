@@ -62,7 +62,14 @@ Echo seam to target: `cacheKey(namespace, value) / cacheGet(key) / cacheSet(key,
   - Drive-by fix: unique tmp path per `saveSnapshot` call (periodic autosave
     + explicit SAVE + shutdown SAVE used to share one tmp file and could hit
     ENOENT on rename).
-- [ ] Query profiling for `WHERE/ORDER BY/LIMIT` paths.
+- [x] Query profiling for `WHERE/ORDER BY/LIMIT` paths.
+  - `Executor.explain()` (plan without running: `=`/`IN`/ANDs on indexed
+    columns → `index-scan` + `indexColumns`; ranges/`LIKE`/`OR`/mixed →
+    `full-scan`; `ORDER BY` column + direction, `LIMIT`/`OFFSET`, columns,
+    table, live `tableRows`; non-`SELECT` → `'n/a'`) and `profile()` (plan +
+    sub-ms `durationMs`, `rowsReturned`, `affectedRows`), on `YASD` with types
+    `QueryPlan`/`QueryProfile`; profiled runs feed the slow-query log.
+  - Tests: `test/profiling.test.js` (10 tests, wired into `npm test`).
 - [ ] Auth + TLS for server mode.
 
 ## Echo integration checklist
