@@ -7,6 +7,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev 2>/dev/null || npm install --omit=dev
 
 COPY dist ./dist
+COPY examples/healthcheck.js ./healthcheck.js
 
 EXPOSE 7379
 VOLUME ["/data"]
@@ -17,7 +18,11 @@ ENV YASD_PORT=7379 \
     YASD_AOF=/data/appendonly.aof \
     YASD_AUTO_SAVE_MS=60000
 
+# Optional security settings:
+# YASD_PASSWORD, YASD_TLS_KEY, YASD_TLS_CERT, YASD_TLS_CA,
+# YASD_TLS_REQUEST_CERT, YASD_TLS_REJECT_UNAUTHORIZED
+
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:7379/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+  CMD node healthcheck.js
 
 CMD ["node", "dist/cli.js"]

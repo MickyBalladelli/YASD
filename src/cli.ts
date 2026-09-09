@@ -15,6 +15,8 @@
 //   --password s3cret      YASD_PASSWORD (AUTH required)
 //   --tls-key key.pem      YASD_TLS_KEY (PEM path; needs --tls-cert)
 //   --tls-cert cert.pem    YASD_TLS_CERT (PEM path; needs --tls-key)
+//   --tls-ca ca.pem        YASD_TLS_CA (optional client CA)
+//   --tls-min-version      YASD_TLS_MIN_VERSION (for example TLSv1.3)
 
 import * as fs from 'fs';
 import { YasdServer, serverOptionsFromEnv } from './server';
@@ -52,10 +54,11 @@ async function main(): Promise<void> {
     console.log('  --port, --host, --snapshot, --aof, --auto-save-ms,');
     console.log('  --no-load, --no-save-on-shutdown,');
     console.log('  --max-entries, --max-bytes, --default-ttl-ms, --slow-command-ms,');
-    console.log('  --password, --tls-key <pem>, --tls-cert <pem>');
+    console.log('  --password, --tls-key <pem>, --tls-cert <pem>, --tls-ca <pem>');
     console.log('Env: YASD_PORT YASD_HOST YASD_SNAPSHOT YASD_AOF YASD_AUTO_SAVE_MS YASD_SLOW_COMMAND_MS');
     console.log('     CACHE_MAX_ENTRIES CACHE_MAX_BYTES CACHE_DEFAULT_TTL_MS CACHE_NAMESPACE_TTLS');
-    console.log('     YASD_PASSWORD YASD_TLS_KEY YASD_TLS_CERT');
+    console.log('     YASD_PASSWORD YASD_TLS_KEY YASD_TLS_CERT YASD_TLS_CA YASD_TLS_MIN_VERSION');
+    console.log('     YASD_TLS_REQUEST_CERT YASD_TLS_REJECT_UNAUTHORIZED');
     return;
   }
 
@@ -87,6 +90,12 @@ async function main(): Promise<void> {
       throw new Error('--tls-key and --tls-cert must both be PEM file paths');
     }
     base.tls = { key: fs.readFileSync(tlsKey, 'utf8'), cert: fs.readFileSync(tlsCert, 'utf8') };
+  }
+  const tlsCa = args['tls-ca'];
+  if (tlsCa !== undefined) {
+    if (typeof tlsCa !== 'string') throw new Error('--tls-ca must be a PEM file path');
+    if (!base.tls) throw new Error('--tls-ca requires TLS key and cert');
+    base.tls.ca = fs.readFileSync(tlsCa, 'utf8');
   }
 
   const server = new YasdServer(base);

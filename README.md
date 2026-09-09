@@ -183,6 +183,32 @@ node dist/cli.js --port 7379 --snapshot ./data/snapshot.json \
 # or: docker compose up --build
 ```
 
+Protect the RESP port with a password, TLS, or both. Password auth is per
+connection; `/healthz` stays open for load balancers. Use `yasds://` on clients
+when TLS is enabled:
+
+```bash
+YASD_PASSWORD='change-me' \
+YASD_TLS_KEY=./tls/server.key \
+YASD_TLS_CERT=./tls/server.crt \
+node dist/cli.js --port 7379
+```
+
+The same settings use `--password`, `--tls-key`, `--tls-cert`, and `--tls-ca`
+flags. `YASD_TLS_CA` is optional; combine it with
+`YASD_TLS_REQUEST_CERT=true` and `YASD_TLS_REJECT_UNAUTHORIZED=true` for
+client-certificate verification. `YASD_TLS_MIN_VERSION` accepts `TLSv1.2` or
+`TLSv1.3` (older protocol versions are accepted only when explicitly chosen).
+
+```javascript
+const secureClient = new YasdClient({
+  url: 'yasds://:change-me@127.0.0.1:7379?poolSize=4',
+  tls: { ca: require('node:fs').readFileSync('./tls/ca.crt') }
+})
+await secureClient.connect()
+await secureClient.healthcheck() // HTTPS healthcheck when TLS is enabled
+```
+
 ```javascript
 const { YasdServer, YasdClient } = require('yasd');
 
@@ -213,7 +239,7 @@ await client.close();
 await server.close();       // graceful: drains sockets, final SAVE
 ```
 
-Protocol commands: `PING GET SET[M PX] CAS MGET MSET DEL CLEAR TTL EXPIRE
+Protocol commands: `AUTH PING GET SET[M PX] CAS MGET MSET DEL CLEAR TTL EXPIRE
 PERSIST INCR[BY] DECR[BY] WATCH UNWATCH MULTI EXEC DISCARD
 PUBLISH SUBSCRIBE UNSUBSCRIBE INFO SAVE LOAD QUIT`.
 

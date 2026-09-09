@@ -18,11 +18,18 @@ services:
       CACHE_MAX_BYTES: "268435456" # 256 MiB
       # Per-namespace TTL defaults (ms): feeds 15s, popular 60s, channels 30s
       CACHE_NAMESPACE_TTLS: '{"feeds":15000,"popular":60000,"channels":30000,"presence":30000,"typing":10000}'
+      # Optional RESP auth/TLS. Mount certificates before enabling these.
+      # YASD_PASSWORD: "change-me"
+      # YASD_TLS_KEY: "/run/secrets/yasd-server.key"
+      # YASD_TLS_CERT: "/run/secrets/yasd-server.crt"
+      # YASD_TLS_CA: "/run/secrets/yasd-ca.crt"
+      # YASD_TLS_REQUEST_CERT: "true"
+      # YASD_TLS_REJECT_UNAUTHORIZED: "true"
     volumes:
       - yasd-data:/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:7379/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "healthcheck.js"]
       interval: 10s
       timeout: 3s
       retries: 3

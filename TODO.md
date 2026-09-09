@@ -70,14 +70,20 @@ Echo seam to target: `cacheKey(namespace, value) / cacheGet(key) / cacheSet(key,
     sub-ms `durationMs`, `rowsReturned`, `affectedRows`), on `YASD` with types
     `QueryPlan`/`QueryProfile`; profiled runs feed the slow-query log.
   - Tests: `test/profiling.test.js` (10 tests, wired into `npm test`).
-- [ ] Auth + TLS for server mode.
+- [x] Auth + TLS for server mode.
+  - `YASD_PASSWORD` / `YASD_REQUIREPASS` and `AUTH` gate every RESP command per connection; `YasdClient` authenticates pooled and subscriber sockets automatically.
+  - `YASD_TLS_KEY` + `YASD_TLS_CERT` (or CLI flags) enable TLS; `yasds://` clients use TLS for RESP and `/healthz`. Optional CA, client-cert verification, and minimum-version settings are supported.
 
 ## Echo integration checklist
 
 - [ ] Drop-in adapter in `Echo/server/src/cache/` implementing `cacheGet/cacheSet/cacheClear` on YASD KV API.
+  - Pending in the Echo project; this YASD repo is not changing Echo files.
 - [ ] Explicit invalidation on write (post/like/join/leave/read-state).
+  - Pending in the Echo project; YASD exposes `clearPrefix` and pub/sub invalidation primitives.
 - [ ] Config: `CACHE_URL`, `CACHE_MAX_ENTRIES`, `CACHE_TTL_MS_*` via env.
+  - Pending in the Echo project; YASD server already reads cache sizing and namespace TTL settings.
 - [ ] Load/chaos check: TTL expiry, LRU under pressure, restart behavior, multi-replica consistency.
+  - Run checks from the Echo project after its adapter is wired. No Echo files changed here.
 
 ## Non-goals
 

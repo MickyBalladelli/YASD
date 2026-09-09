@@ -10,6 +10,9 @@
 //   WATCH k ... | UNWATCH | MULTI | EXEC | DISCARD
 //   PUBLISH channel msg | SUBSCRIBE ch ... | UNSUBSCRIBE [ch ...]
 //   INFO | SAVE [path] | LOAD [path] | QUIT
+// Auth: set YASD_PASSWORD (or YASD_REQUIREPASS); clients send AUTH first.
+// TLS: set YASD_TLS_KEY + YASD_TLS_CERT; optional YASD_TLS_CA enables
+// client-certificate verification when requestCert/rejectUnauthorized are set.
 // Cache values travel as JSON bulk strings (objects/arrays supported).
 // Mutations are appended to the AOF (when configured) and published as
 // invalidation events on `__yasd__:invalidate` for other replicas.
@@ -44,6 +47,12 @@ import {
 } from './protocol';
 
 export const DEFAULT_PORT = 7379;
+
+/** TLS identity plus optional client-certificate and protocol settings. */
+export type YasdServerTlsOptions = tls.TlsOptions & {
+  key: string | Buffer;
+  cert: string | Buffer;
+};
 
 /** Commands that may be queued between MULTI and EXEC (KV ops + PING). */
 const TX_QUEUEABLE = new Set([
@@ -85,8 +94,8 @@ export interface YasdServerOptions {
    * (load balancers shouldn't need the secret).
    */
   password?: string;
-  /** TLS identity (PEM contents). When set the port serves TLS. */
-  tls?: { key: string | Buffer; cert: string | Buffer };
+  /** TLS identity and optional client-certificate settings. */
+  tls?: YasdServerTlsOptions;
 }
 
 export interface ServerInfo {
@@ -130,6 +139,18 @@ function parsePort(value: string | undefined, fallback: number): number {
   return n;
 }
 
+function parseBoolean(value: string, name: string): boolean {
+  if (value === '1' || value.toLowerCase() === 'true') return true;
+  if (value === '0' || value.toLowerCase() === 'false') return false;
+  throw new Error(`${name} must be true/false or 1/0`);
+}
+
+function parseTlsVersion(value: string): tls.SecureVersion {
+  const allowed = new Set(['TLSv1', 'TLSv1.1', 'TLSv1.2', 'TLSv1.3']);
+  if (!allowed.has(value)) throw new Error(`invalid YASD_TLS_MIN_VERSION: ${value}`);
+  return value as tls.SecureVersion;
+}
+
 export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): YasdServerOptions {
   const cache: KVOptions = {};
   if (env.CACHE_MAX_ENTRIES !== undefined) cache.maxEntries = parseInt(env.CACHE_MAX_ENTRIES, 10);
@@ -161,14 +182,31 @@ export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Yasd
   if (password !== undefined && password.length > 0) opts.password = password;
   const tlsKeyPath = env.YASD_TLS_KEY;
   const tlsCertPath = env.YASD_TLS_CERT;
-  if (tlsKeyPath || tlsCertPath) {
+  const tlsCaPath = env.YASD_TLS_CA;
+  const hasTlsOptions =
+    Boolean(tlsKeyPath || tlsCertPath || tlsCaPath || env.YASD_TLS_MIN_VERSION) ||
+    env.YASD_TLS_REQUEST_CERT !== undefined ||
+    env.YASD_TLS_REJECT_UNAUTHORIZED !== undefined;
+  if (hasTlsOptions) {
     if (!tlsKeyPath || !tlsCertPath) {
       throw new Error('YASD_TLS_KEY and YASD_TLS_CERT must both be set');
     }
-    opts.tls = {
+    const tlsOptions: YasdServerTlsOptions = {
       key: fs.readFileSync(tlsKeyPath, 'utf8'),
       cert: fs.readFileSync(tlsCertPath, 'utf8'),
     };
+    if (tlsCaPath) tlsOptions.ca = fs.readFileSync(tlsCaPath, 'utf8');
+    if (env.YASD_TLS_MIN_VERSION) tlsOptions.minVersion = parseTlsVersion(env.YASD_TLS_MIN_VERSION);
+    if (env.YASD_TLS_REQUEST_CERT !== undefined) {
+      tlsOptions.requestCert = parseBoolean(env.YASD_TLS_REQUEST_CERT, 'YASD_TLS_REQUEST_CERT');
+    }
+    if (env.YASD_TLS_REJECT_UNAUTHORIZED !== undefined) {
+      tlsOptions.rejectUnauthorized = parseBoolean(
+        env.YASD_TLS_REJECT_UNAUTHORIZED,
+        'YASD_TLS_REJECT_UNAUTHORIZED'
+      );
+    }
+    opts.tls = tlsOptions;
   }
   return opts;
 }
@@ -193,7 +231,7 @@ export class YasdServer {
   readonly authRequired: boolean;
   readonly tlsEnabled: boolean;
   private password: string | undefined;
-  private tlsOptions: { key: string | Buffer; cert: string | Buffer } | undefined;
+  private tlsOptions: YasdServerTlsOptions | undefined;
   private slow = new SlowLog();
 
   constructor(options: YasdServerOptions = {}) {
@@ -208,6 +246,9 @@ export class YasdServer {
     this.autoSaveMs = options.autoSaveMs ?? 0;
     this.password = options.password && options.password.length > 0 ? options.password : undefined;
     this.authRequired = this.password !== undefined;
+    if (options.tls && (!options.tls.key || !options.tls.cert)) {
+      throw new Error('TLS requires both key and cert');
+    }
     this.tlsOptions = options.tls;
     this.tlsEnabled = options.tls !== undefined;
     if (options.slowCommandMs !== undefined) {
@@ -277,9 +318,7 @@ export class YasdServer {
       await this.aof.replay(this.kv);
     }
     this.netServer = this.tlsOptions
-      ? tls.createServer({ key: this.tlsOptions.key, cert: this.tlsOptions.cert }, socket =>
-          this.onConnection(socket)
-        )
+      ? tls.createServer(this.tlsOptions, socket => this.onConnection(socket))
       : net.createServer(socket => this.onConnection(socket));
     await new Promise<void>((resolve, reject) => {
       const onError = (err: Error): void => {
@@ -613,7 +652,7 @@ export class YasdServer {
         return 'close';
 
       case 'AUTH': {
-        if (args.length > 1) throw new Error('AUTH takes an optional password');
+        if (args.length !== 1) throw new Error('AUTH takes one password');
         if (!this.authRequired) return { kind: 'simple', value: 'OK' };
         if (args[0] === this.password) {
           state.authed = true;

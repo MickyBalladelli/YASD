@@ -12,6 +12,7 @@
 import * as net from 'net';
 import * as tls from 'tls';
 import * as http from 'http';
+import * as https from 'https';
 import { Value, JsonValue } from './types';
 import { KVStats, TransactionError } from './cache';
 import { RespDecoder, RespReply, encodeCommand } from './protocol';
@@ -43,11 +44,12 @@ export interface ParsedCacheUrl {
 export function parseCacheUrl(url: string): ParsedCacheUrl {
   const trimmed = url.trim();
   // yasd://[[user]:password@]host[:port][?poolSize=&password=] — yasds:// enables TLS.
-  const match = /^(yasds?):\/\/(?:([^@/?#]*)@)?([^/:?#]+)(?::(\d+))?(?:\?(.*))?$/.exec(trimmed);
+  const match = /^(yasds?):\/\/(?:([^@/?#]*)@)?(\[[^\]]+\]|[^/:?#]+)(?::(\d+))?(?:\?(.*))?$/.exec(trimmed);
   if (!match) throw new Error(`invalid CACHE_URL (want yasd://host:port): ${url}`);
   const tls = match[1] === 'yasds';
   const userinfo = match[2];
-  const host = match[3] as string;
+  const rawHost = match[3] as string;
+  const host = rawHost.startsWith('[') && rawHost.endsWith(']') ? rawHost.slice(1, -1) : rawHost;
   const port = match[4] === undefined ? DEFAULT_PORT : parseInt(match[4], 10);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error(`invalid CACHE_URL port: ${url}`);
@@ -60,10 +62,9 @@ export function parseCacheUrl(url: string): ParsedCacheUrl {
     if (password.length === 0) password = undefined;
   }
   if (match[5]) {
-    for (const pair of match[5].split('&')) {
-      const [k, v] = pair.split('=');
-      if (k === 'poolSize' && v !== undefined) poolSize = parseInt(v, 10);
-      if (k === 'password' && v !== undefined) password = decodeURIComponent(v);
+    for (const [key, value] of new URLSearchParams(match[5])) {
+      if (key === 'poolSize') poolSize = parseInt(value, 10);
+      if (key === 'password') password = value;
     }
     if (poolSize !== undefined && (!Number.isInteger(poolSize) || poolSize < 1)) {
       throw new Error(`invalid CACHE_URL poolSize: ${url}`);
@@ -133,7 +134,7 @@ export class YasdClient {
     const password = options.password ?? fromUrl?.password;
     this.password = password && password.length > 0 ? password : undefined;
     if (options.tls !== undefined) {
-      this.tlsOptions = options.tls === true ? {} : { ...options.tls };
+      this.tlsOptions = options.tls === true ? {} : options.tls === false ? undefined : { ...options.tls };
     } else if (fromUrl?.tls) {
       this.tlsOptions = {};
     }
@@ -216,29 +217,35 @@ export class YasdClient {
     throw new Error(`unexpected PING reply: ${JSON.stringify(reply)}`);
   }
 
-  /** HTTP `/healthz` against the server port. Throws when unhealthy. */
+  /** HTTP(S) `/healthz` against the server port. Throws when unhealthy. */
   async healthcheck(timeoutMs = 3000): Promise<ServerInfo> {
     return new Promise<ServerInfo>((resolve, reject) => {
-      const req = http.get(
-        { host: this.host, port: this.port, path: '/healthz', timeout: timeoutMs },
-        res => {
-          let body = '';
-          res.on('data', chunk => {
-            body += String(chunk);
-          });
-          res.on('end', () => {
-            if (res.statusCode !== 200) {
-              reject(new Error(`healthcheck failed: HTTP ${res.statusCode}`));
-              return;
-            }
-            try {
-              resolve(JSON.parse(body) as ServerInfo);
-            } catch (err) {
-              reject(err as Error);
-            }
-          });
-        }
-      );
+      const requestOptions: http.RequestOptions = {
+        host: this.host,
+        port: this.port,
+        path: '/healthz',
+        timeout: timeoutMs,
+      };
+      const onResponse = (res: http.IncomingMessage): void => {
+        let body = '';
+        res.on('data', chunk => {
+          body += String(chunk);
+        });
+        res.on('end', () => {
+          if (res.statusCode !== 200) {
+            reject(new Error(`healthcheck failed: HTTP ${res.statusCode}`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(body) as ServerInfo);
+          } catch (err) {
+            reject(err as Error);
+          }
+        });
+      };
+      const req = this.tlsOptions === undefined
+        ? http.get(requestOptions, onResponse)
+        : https.get({ ...requestOptions, ...this.tlsOptions }, onResponse);
       req.on('timeout', () => {
         req.destroy(new Error('healthcheck timed out'));
       });
