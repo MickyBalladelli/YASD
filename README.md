@@ -311,9 +311,13 @@ node dist/cli.js --slow-command-ms 5   # or YASD_SLOW_COMMAND_MS=5
 await client.info();
 // { status, version, uptimeMs, connections, tls, auth,
 //   entries, bytes, hits, misses, evictions, expiries,
-//   subscribers, channels, slowCommandMs, slowLog }
+//   aofRecoveryState, aofRecoveryError, subscribers, channels,
+//   slowCommandMs, slowLog }
 // slowLog: newest-first [{ name, durationMs, at, argc }], capped at 100
 ```
+
+`aofRecoveryState` is `clean`, `torn-tail`, or `corrupt`. A corrupt AOF stops
+replay at the bad line and rejects further AOF writes until it is repaired.
 
 Conventions: `hits`/`misses` count cache lookups (`get`/`mget`, plus `ttl`
 misses); `bytes` tracks key + JSON value size; slow thresholds are in ms

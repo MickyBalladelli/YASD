@@ -45,6 +45,7 @@ import {
   AofMutation,
   AofBatchEntry,
   SnapshotLoadMetadata,
+  AofRecoveryState,
 } from './persistence';
 import {
   RespDecoder,
@@ -136,6 +137,8 @@ export interface ServerInfo {
   aofEnabled: boolean;
   aofDegraded: boolean;
   aofLastError?: string;
+  aofRecoveryState: AofRecoveryState
+  aofRecoveryError?: string
   subscribers: number;
   channels: string[];
   /** Slow-command threshold in ms (0 = off). */
@@ -324,6 +327,8 @@ export class YasdServer {
       aofEnabled: this.aof.enabled,
       aofDegraded: this.aofDegraded,
       ...(this.aofLastError === undefined ? {} : { aofLastError: this.aofLastError }),
+      aofRecoveryState: this.aof.recoveryState,
+      ...(this.aof.recoveryError === undefined ? {} : { aofRecoveryError: this.aof.recoveryError }),
       subscribers: this.hub.subscriberCount(),
       channels: this.hub.channelNames(),
       slowCommandMs: this.slow.threshold,
@@ -365,6 +370,9 @@ export class YasdServer {
         });
       }
       await this.aof.replay(this.kv, snapshotMetadata.aofSeq);
+    }
+    if (this.aof.recoveryState !== 'clean') {
+      console.error(`yasd: WARNING: ${this.aof.recoveryError ?? 'AOF recovery required'}`)
     }
     this.netServer = this.tlsOptions
       ? tls.createServer(this.tlsOptions, socket => this.onConnection(socket))

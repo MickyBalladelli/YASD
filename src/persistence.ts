@@ -24,6 +24,8 @@ export interface SnapshotLoadMetadata {
   aofSeq?: number;
 }
 
+export type AofRecoveryState = 'clean' | 'torn-tail' | 'corrupt'
+
 export interface SnapshotLoadOptions {
   clearFirst?: boolean;
   missingOk?: boolean;
@@ -70,6 +72,78 @@ function checkAofSeq(value: number, what: string): number {
     throw new Error(`${what} must be a safe integer >= 0`);
   }
   return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key)
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function isAofMutation(value: unknown): value is AofMutation {
+  if (!isRecord(value) || typeof value.op !== 'string') return false
+  switch (value.op) {
+    case 'set':
+      return (
+        typeof value.key === 'string' &&
+        hasOwn(value, 'value') &&
+        (!hasOwn(value, 'ttlMs') || isFiniteNumber(value.ttlMs)) &&
+        (!hasOwn(value, 'expiresAt') || value.expiresAt === null || isFiniteNumber(value.expiresAt))
+      )
+    case 'mset':
+      return (
+        Array.isArray(value.entries) &&
+        value.entries.every(entry =>
+          isRecord(entry) &&
+          typeof entry.key === 'string' &&
+          hasOwn(entry, 'value') &&
+          (!hasOwn(entry, 'ttlMs') || isFiniteNumber(entry.ttlMs)) &&
+          (!hasOwn(entry, 'expiresAt') || entry.expiresAt === null || isFiniteNumber(entry.expiresAt))
+        )
+      )
+    case 'del':
+      return Array.isArray(value.keys) && value.keys.every(key => typeof key === 'string')
+    case 'clear':
+      return typeof value.prefix === 'string'
+    case 'expire':
+      return (
+        typeof value.key === 'string' &&
+        ((hasOwn(value, 'expiresAt') && isFiniteNumber(value.expiresAt)) ||
+          (hasOwn(value, 'ttlMs') && isFiniteNumber(value.ttlMs)))
+      )
+    case 'persist':
+      return typeof value.key === 'string'
+    case 'incr':
+      return typeof value.key === 'string' && isFiniteNumber(value.by)
+    default:
+      return false
+  }
+}
+
+function validateAofOp(value: unknown): asserts value is AofOp {
+  if (
+    isRecord(value) &&
+    value.op === 'transaction' &&
+    Array.isArray(value.ops) &&
+    value.ops.every(entry => isAofMutation(entry))
+  ) {
+    return
+  }
+  if (!isAofMutation(value)) throw new Error('invalid AOF operation')
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function isIncompleteJsonError(error: unknown): boolean {
+  return error instanceof SyntaxError && /unexpected end of JSON input/i.test(error.message)
 }
 
 async function writeDurableFile(filePath: string, contents: string): Promise<void> {
@@ -206,19 +280,19 @@ interface ParsedAofLine {
   op: AofOp;
 }
 
-function parseAofLine(line: string): ParsedAofLine | undefined {
-  const parsed = JSON.parse(line) as Partial<AofRecord> & AofOp;
-  if (
-    parsed &&
-    typeof parsed === 'object' &&
-    Number.isSafeInteger(parsed.seq) &&
-    (parsed.seq as number) >= 0 &&
-    parsed.op &&
-    typeof parsed.op === 'object'
-  ) {
-    return { seq: parsed.seq as number, op: parsed.op as AofOp };
+function parseAofLine(line: string): ParsedAofLine {
+  const parsed: unknown = JSON.parse(line)
+  if (!isRecord(parsed)) throw new Error('AOF record must be an object')
+  if (hasOwn(parsed, 'version') || hasOwn(parsed, 'seq') || isRecord(parsed.op)) {
+    if (parsed.version !== 1) throw new Error('unsupported AOF record version')
+    if (!Number.isSafeInteger(parsed.seq) || (parsed.seq as number) < 0) {
+      throw new Error('invalid AOF record sequence')
+    }
+    validateAofOp(parsed.op)
+    return { seq: parsed.seq as number, op: parsed.op }
   }
-  return { op: parsed as AofOp };
+  validateAofOp(parsed)
+  return { op: parsed }
 }
 
 /**
@@ -229,6 +303,8 @@ export class AofLog {
   private filePath: string | undefined;
   private lastSeq = 0;
   private rotationCounter = 0;
+  private recoveryStatus: AofRecoveryState = 'clean'
+  private recoveryDetail?: string
 
   constructor(filePath?: string) {
     this.filePath = filePath;
@@ -249,8 +325,20 @@ export class AofLog {
     return this.lastSeq;
   }
 
+  get recoveryState(): AofRecoveryState {
+    return this.recoveryStatus
+  }
+
+  get recoveryError(): string | undefined {
+    return this.recoveryDetail
+  }
+
   append(op: AofOp): void {
     if (!this.filePath) return;
+    if (this.recoveryStatus === 'corrupt') {
+      throw new Error(`AOF is corrupt: ${this.recoveryDetail ?? 'repair required before writing'}`)
+    }
+    validateAofOp(op)
     if (this.lastSeq >= Number.MAX_SAFE_INTEGER) throw new Error('AOF sequence exhausted');
     const record: AofRecord = { version: 1, seq: this.lastSeq + 1, op };
     fs.appendFileSync(this.filePath, JSON.stringify(record) + '\n', 'utf8');
@@ -267,20 +355,61 @@ export class AofLog {
       throw err;
     }
     let max = 0;
-    for (const line of raw.split('\n')) {
+    let previousSeq: number | undefined
+    const lines = raw.split('\n')
+    for (const [i, line] of lines.entries()) {
       const trimmed = line.trim();
-      if (!trimmed) continue;
+      if (!trimmed) {
+        if (raw.length === 0 || (i === lines.length - 1 && raw.endsWith('\n'))) continue
+        this.noteRecovery(lines, i, new Error('empty AOF record'), raw)
+        break
+      }
       try {
         const parsed = parseAofLine(trimmed);
-        if (parsed?.seq !== undefined && parsed.seq > max) max = parsed.seq;
-      } catch {
-        // Replay handles corrupt lines; they do not contribute a sequence.
+        if (parsed.seq !== undefined) {
+          if (previousSeq !== undefined && parsed.seq <= previousSeq) {
+            throw new Error(`AOF sequence is not increasing (${parsed.seq} after ${previousSeq})`)
+          }
+          previousSeq = parsed.seq
+          if (parsed.seq > max) max = parsed.seq
+        }
+      } catch (error) {
+        this.noteRecovery(lines, i, error, raw)
+        break
       }
     }
     return max;
   }
 
-  /** Replay the log, skipping records already represented by a snapshot. */
+  private noteRecovery(lines: string[], index: number, error: unknown, raw: string): void {
+    const lineNumber = index + 1
+    const detail = `AOF recovery at line ${lineNumber}: ${errorMessage(error)}`
+    const isTornTail = index === lines.length - 1 && isIncompleteJsonError(error)
+    if (isTornTail) {
+      if (this.recoveryStatus === 'clean') {
+        this.recoveryStatus = 'torn-tail'
+        this.recoveryDetail = detail
+      }
+      this.repairTornTail(raw)
+      return
+    }
+    this.recoveryStatus = 'corrupt'
+    this.recoveryDetail = detail
+  }
+
+  private repairTornTail(raw: string): void {
+    if (!this.filePath) return;
+    const lastNewline = raw.lastIndexOf('\n')
+    const safeBytes = Buffer.byteLength(raw.slice(0, lastNewline + 1), 'utf8')
+    try {
+      fs.truncateSync(this.filePath, safeBytes)
+    } catch (error) {
+      this.recoveryStatus = 'corrupt'
+      this.recoveryDetail = `AOF torn-tail repair failed: ${errorMessage(error)}`
+    }
+  }
+
+  /** Replay the log; stop at corruption and only tolerate a torn final line. */
   async replay(cache: KVCache, snapshotSeq?: number): Promise<number> {
     if (!this.filePath) return 0;
     if (snapshotSeq !== undefined) checkAofSeq(snapshotSeq, 'snapshotSeq');
@@ -292,20 +421,32 @@ export class AofLog {
       throw err;
     }
     let applied = 0;
-    for (const line of raw.split('\n')) {
+    let previousSeq: number | undefined
+    const lines = raw.split('\n')
+    for (const [i, line] of lines.entries()) {
       const trimmed = line.trim();
-      if (!trimmed) continue;
+      if (!trimmed) {
+        if (raw.length === 0 || (i === lines.length - 1 && raw.endsWith('\n'))) continue
+        this.noteRecovery(lines, i, new Error('empty AOF record'), raw)
+        break
+      }
       try {
         const parsed = parseAofLine(trimmed);
-        if (!parsed) continue;
-        if (parsed.seq !== undefined && parsed.seq > this.lastSeq) this.lastSeq = parsed.seq;
+        if (parsed.seq !== undefined) {
+          if (previousSeq !== undefined && parsed.seq <= previousSeq) {
+            throw new Error(`AOF sequence is not increasing (${parsed.seq} after ${previousSeq})`)
+          }
+          previousSeq = parsed.seq
+          if (parsed.seq > this.lastSeq) this.lastSeq = parsed.seq
+        }
         // A v2 snapshot covers all legacy unsequenced records that existed
         // when it was written. New records always carry a sequence number.
         if (snapshotSeq !== undefined && (parsed.seq === undefined || parsed.seq <= snapshotSeq)) continue;
         applyAofOp(cache, parsed.op);
         applied++;
-      } catch {
-        // Skip corrupt lines (e.g. torn trailing write) and continue.
+      } catch (error) {
+        this.noteRecovery(lines, i, error, raw)
+        break
       }
     }
     if (snapshotSeq !== undefined && snapshotSeq > this.lastSeq) this.lastSeq = snapshotSeq;
@@ -320,6 +461,9 @@ export class AofLog {
    */
   rotateAfter(snapshotSeq: number): void {
     if (!this.filePath) return;
+    if (this.recoveryStatus === 'corrupt') {
+      throw new Error(`AOF is corrupt: ${this.recoveryDetail ?? 'repair required before rotation'}`)
+    }
     checkAofSeq(snapshotSeq, 'snapshotSeq');
     let raw: string;
     try {
@@ -329,14 +473,31 @@ export class AofLog {
       else throw err;
     }
     const tail: string[] = [];
-    for (const line of raw.split('\n')) {
+    let previousSeq: number | undefined
+    const lines = raw.split('\n')
+    for (const [i, line] of lines.entries()) {
       const trimmed = line.trim();
-      if (!trimmed) continue;
+      if (!trimmed) {
+        if (raw.length === 0 || (i === lines.length - 1 && raw.endsWith('\n'))) continue
+        this.noteRecovery(lines, i, new Error('empty AOF record'), raw)
+        if (this.recoveryState === 'corrupt') throw new Error(this.recoveryError)
+        break
+      }
       try {
         const parsed = parseAofLine(trimmed);
-        if (parsed?.seq !== undefined && parsed.seq > snapshotSeq) tail.push(trimmed);
-      } catch {
-        // Drop corrupt lines while compacting; replay already ignores them.
+        if (parsed.seq !== undefined) {
+          if (previousSeq !== undefined && parsed.seq <= previousSeq) {
+            throw new Error(`AOF sequence is not increasing (${parsed.seq} after ${previousSeq})`)
+          }
+          previousSeq = parsed.seq
+          if (parsed.seq > snapshotSeq) tail.push(trimmed)
+        }
+      } catch (error) {
+        this.noteRecovery(lines, i, error, raw)
+        if (this.recoveryState === 'corrupt') {
+          throw new Error(this.recoveryError)
+        }
+        break
       }
     }
     const tmp = `${this.filePath}.rotate.${process.pid}.${this.rotationCounter++}`;

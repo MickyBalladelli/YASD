@@ -52,6 +52,7 @@ export type {
   AofBatchEntry,
   AofOp,
   AofMutation,
+  AofRecoveryState,
 } from './persistence';
 export {
   RespDecoder,

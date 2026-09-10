@@ -48,10 +48,8 @@ source.
 - [x] Serialize `save()` and `load()` operations. Autosave, explicit SAVE, and
   shutdown now share one persistence queue; concurrent calls are covered by a
   regression test.
-- [ ] Treat AOF corruption deliberately. Replay currently skips every bad line
-  (`src/persistence.ts:145-154`), which can silently lose a middle operation.
-  Only tolerate an incomplete final line; stop, quarantine, or report other
-  corruption and expose the recovery state.
+- [x] Treat AOF corruption deliberately. Replay now stops at middle corruption,
+  tolerates only an incomplete final line, and exposes recovery state in INFO.
 - [ ] Publish every state mutation. `PERSIST` changes key state but emits no
   invalidation (`src/server.ts:770-775`); background expiry and `LOAD` also do
   not fan out changes. Add expiry/clear-load events or document the consistency

@@ -131,16 +131,42 @@ async function runTests() {
     log.append({ op: 'persist', key: 'a' });
     log.append({ op: 'del', keys: ['zz'] });
     log.append({ op: 'clear', prefix: 'zz' });
-    fs.appendFileSync(aofPath, 'not json {{{'); // torn tail line is skipped
+    fs.appendFileSync(aofPath, '{"version":1,"seq":8,"op":{"op":"set","key":"partial"')
     const db = new YASD({ sweepIntervalMs: 0 });
     const applied = await log.replay(db);
     assert.strictEqual(applied, 7);
+    assert.strictEqual(log.recoveryState, 'torn-tail')
     assert.strictEqual(db.get('a'), 1);
     assert.strictEqual(db.ttl('a'), -1, 'persist replayed');
     assert.strictEqual(db.get('n'), 2);
     assert.deepStrictEqual(db.get('m'), [1]);
     db.close();
-  });
+  })
+
+  await test('AOF replay stops at middle corruption and exposes recovery state', async () => {
+    const dir = tmpDir()
+    const aofPath = path.join(dir, 'corrupt.aof')
+    const source = new AofLog(aofPath)
+    source.append({ op: 'set', key: 'before', value: 1 })
+    source.append({ op: 'set', key: 'after', value: 2 })
+    const records = fs.readFileSync(aofPath, 'utf8').trim().split('\n')
+    fs.writeFileSync(aofPath, `${records[0]}\nnot json\n${records[1]}\n`)
+
+    const log = new AofLog(aofPath)
+    const db = new YASD({ sweepIntervalMs: 0 })
+    assert.strictEqual(await log.replay(db), 1)
+    assert.strictEqual(db.get('before'), 1)
+    assert.strictEqual(db.get('after'), undefined)
+    assert.strictEqual(log.recoveryState, 'corrupt')
+    assert.match(log.recoveryError, /line 2/)
+    assert.throws(() => log.append({ op: 'set', key: 'blocked', value: true }), /AOF is corrupt/)
+
+    const server = new YasdServer({ aofPath, loadOnStart: false })
+    assert.strictEqual(server.info().aofRecoveryState, 'corrupt')
+    assert.match(server.info().aofRecoveryError, /line 2/)
+    db.close()
+    await server.close()
+  })
 
   await test('AOF replay preserves absolute TTL deadlines', async () => {
     const dir = tmpDir();
