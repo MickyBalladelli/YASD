@@ -6,7 +6,7 @@ source.
 
 ## P0 — Fix correctness and safety first
 
-- [ ] Make cached JSON values safe to own. `KVCache.set()` stores object
+- [x] Make cached JSON values safe to own. `KVCache.set()` stores object
   references and `get()` returns them (`src/cache.ts:191-207,214-239`). A caller
   can mutate a value without updating bytes, LRU order, versions, or
   invalidation. Validate JSON values at the API boundary and either deep-clone

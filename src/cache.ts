@@ -90,6 +90,66 @@ function estimateSize(key: string, value: Value): number {
   return key.length * 2 + jsonLen;
 }
 
+/**
+ * Validate a runtime value as JSON data and return an owned deep copy.
+ * TypeScript types do not protect JavaScript callers from undefined,
+ * non-finite numbers, class instances, or cyclic objects.
+ */
+function cloneJsonValue(value: unknown, what: string): Value {
+  const ancestors = new Set<object>();
+
+  const clone = (current: unknown, path: string): Value => {
+    if (current === null) return null;
+    if (typeof current === 'string' || typeof current === 'boolean') return current;
+    if (typeof current === 'number') {
+      if (!Number.isFinite(current)) {
+        throw new Error(`${what} must contain only finite JSON numbers at ${path}`);
+      }
+      return current;
+    }
+    if (typeof current === 'undefined') {
+      throw new Error(`${what} cannot contain undefined at ${path} (use null)`);
+    }
+    if (typeof current !== 'object') {
+      throw new Error(`${what} must contain only JSON values at ${path}`);
+    }
+    if (ancestors.has(current)) {
+      throw new Error(`${what} cannot contain circular references at ${path}`);
+    }
+
+    ancestors.add(current);
+    try {
+      if (Array.isArray(current)) {
+        if (Object.getPrototypeOf(current) !== Array.prototype) {
+          throw new Error(`${what} must contain plain JSON arrays at ${path}`);
+        }
+        const out: Value[] = [];
+        for (let i = 0; i < current.length; i++) {
+          if (!Object.prototype.hasOwnProperty.call(current, i)) {
+            throw new Error(`${what} cannot contain sparse arrays at ${path}[${i}]`);
+          }
+          out.push(clone(current[i], `${path}[${i}]`));
+        }
+        return out;
+      }
+
+      const prototype = Object.getPrototypeOf(current);
+      if (prototype !== Object.prototype && prototype !== null) {
+        throw new Error(`${what} must contain only plain JSON objects at ${path}`);
+      }
+      const out: { [key: string]: Value } = Object.create(null) as { [key: string]: Value };
+      for (const key of Object.keys(current)) {
+        out[key] = clone((current as Record<string, unknown>)[key], `${path}.${key}`);
+      }
+      return out;
+    } finally {
+      ancestors.delete(current);
+    }
+  };
+
+  return clone(value, '$');
+}
+
 function validateTTL(ttlMs: number, what: string): number {
   if (typeof ttlMs !== 'number' || !Number.isFinite(ttlMs)) {
     throw new Error(`${what} must be a finite number of ms, got ${String(ttlMs)}`);
@@ -203,7 +263,7 @@ export class KVCache {
     this.map.delete(key);
     this.map.set(key, entry);
     this.hits++;
-    return entry.value;
+    return cloneJsonValue(entry.value, 'cached value');
   }
 
   /**
@@ -212,6 +272,7 @@ export class KVCache {
    * A single oversized entry is kept (it evicts everything else).
    */
   set(key: string, value: Value, ttlMs?: number): Value {
+    const ownedValue = cloneJsonValue(value, 'cache value');
     const ttl = this.resolveTTLMs(key, ttlMs);
     const expiresAt = ttl === undefined ? undefined : Date.now() + ttl;
     // Immediate expiry (ttl 0): behave like a write-through miss.
@@ -226,13 +287,13 @@ export class KVCache {
       this.misses++;
       return value;
     }
-    const size = estimateSize(key, value);
+    const size = estimateSize(key, ownedValue);
     const old = this.map.get(key);
     if (old) {
       this.bytes -= old.size;
       this.map.delete(key);
     }
-    this.map.set(key, { value, expiresAt, size });
+    this.map.set(key, { value: ownedValue, expiresAt, size });
     this.bytes += size;
     this.bumpVersion(key);
     this.evictIfNeeded(key);
@@ -320,10 +381,16 @@ export class KVCache {
    * Returns the number of entries written.
    */
   mset(entries: KVBatchEntry[]): number {
-    for (const e of entries) {
+    if (!Array.isArray(entries)) throw new Error('mset entries must be an array');
+    const validated = entries.map(e => {
       if (!e || typeof e.key !== 'string') {
         throw new Error('mset entries must be { key: string, value, ttlMs? }');
       }
+      const value = cloneJsonValue(e.value, 'mset value');
+      if (e.ttlMs !== undefined) validateTTL(e.ttlMs, 'ttlMs');
+      return { key: e.key, value, ttlMs: e.ttlMs };
+    });
+    for (const e of validated) {
       this.set(e.key, e.value, e.ttlMs);
     }
     return entries.length;
@@ -400,6 +467,8 @@ export class KVCache {
    * preserved; new keys fall back to namespace/default resolution (as `set`).
    */
   cas(key: string, expected: Value | undefined, value: Value, ttlMs?: number): boolean {
+    const ownedExpected = expected === undefined ? undefined : cloneJsonValue(expected, 'cas expected');
+    const ownedValue = cloneJsonValue(value, 'cas value');
     const now = Date.now();
     const entry = this.map.get(key);
     let current: Value | undefined;
@@ -413,10 +482,7 @@ export class KVCache {
         keepExpiresAt = entry.expiresAt;
       }
     }
-    if (!KVCache.valuesEqual(current, expected)) return false;
-    if (value === undefined) {
-      throw new Error('cas value cannot be undefined (use null)');
-    }
+    if (!KVCache.valuesEqual(current, ownedExpected)) return false;
     const resolvedDefault = ttlMs !== undefined ? undefined : this.resolveTTLMs(key, undefined);
     const expiresAt =
       ttlMs !== undefined
@@ -440,8 +506,8 @@ export class KVCache {
       this.bytes -= live.size;
       this.map.delete(key);
     }
-    const size = estimateSize(key, value);
-    this.map.set(key, { value, expiresAt, size });
+    const size = estimateSize(key, ownedValue);
+    this.map.set(key, { value: ownedValue, expiresAt, size });
     this.bytes += size;
     this.bumpVersion(key);
     this.evictIfNeeded(key);
@@ -450,7 +516,7 @@ export class KVCache {
 
   /**
    * Export live entries for snapshots. Skips already-expired keys.
-   * Values are shared by reference — stringify before storing.
+   * Values are cloned so mutating a snapshot cannot mutate the cache.
    */
   dump(): SnapshotEntry[] {
     const now = Date.now();
@@ -460,8 +526,8 @@ export class KVCache {
       if (entry.value === undefined) continue;
       out.push(
         entry.expiresAt === undefined
-          ? { key, value: entry.value }
-          : { key, value: entry.value, expiresAt: entry.expiresAt }
+          ? { key, value: cloneJsonValue(entry.value, 'snapshot value') }
+          : { key, value: cloneJsonValue(entry.value, 'snapshot value'), expiresAt: entry.expiresAt }
       );
     }
     return out;
@@ -473,17 +539,21 @@ export class KVCache {
    */
   restore(entries: SnapshotEntry[]): number {
     const now = Date.now();
-    let count = 0;
+    const pending: Array<{ entry: SnapshotEntry; value: Value }> = [];
     for (const e of entries) {
       if (!e || typeof e.key !== 'string' || e.value === undefined) continue;
       if (e.expiresAt !== undefined && e.expiresAt <= now) continue;
+      pending.push({ entry: e, value: cloneJsonValue(e.value, 'snapshot value') });
+    }
+    let count = 0;
+    for (const { entry: e, value } of pending) {
       const old = this.map.get(e.key);
       if (old) {
         this.bytes -= old.size;
         this.map.delete(e.key);
       }
-      const size = estimateSize(e.key, e.value);
-      this.map.set(e.key, { value: e.value, expiresAt: e.expiresAt, size });
+      const size = estimateSize(e.key, value);
+      this.map.set(e.key, { value, expiresAt: e.expiresAt, size });
       this.bytes += size;
       this.bumpVersion(e.key);
       count++;
@@ -751,9 +821,9 @@ export class KVTransaction {
   /** Queue a SET (same TTL resolution/validation as `KVCache.set`). */
   set(key: string, value: Value, ttlMs?: number): this {
     this.assertOpen('set');
-    KVTransaction.checkValue(value, 'set');
+    const ownedValue = KVTransaction.checkValue(value, 'set');
     KVTransaction.checkTtl(ttlMs);
-    this.queue.push({ op: 'set', key, value, ttlMs });
+    this.queue.push({ op: 'set', key, value: ownedValue, ttlMs });
     return this;
   }
 
@@ -761,14 +831,16 @@ export class KVTransaction {
   mset(entries: KVBatchEntry[]): this {
     this.assertOpen('mset');
     if (!Array.isArray(entries)) throw new TransactionError('mset entries must be an array');
+    const ownedEntries: KVBatchEntry[] = [];
     for (const e of entries) {
       if (!e || typeof e.key !== 'string') {
         throw new TransactionError('mset entries must be { key: string, value, ttlMs? }');
       }
-      KVTransaction.checkValue(e.value, 'mset');
+      const value = KVTransaction.checkValue(e.value, 'mset');
       KVTransaction.checkTtl(e.ttlMs);
+      ownedEntries.push({ key: e.key, value, ttlMs: e.ttlMs });
     }
-    this.queue.push({ op: 'mset', entries: entries.map(e => ({ ...e })) });
+    this.queue.push({ op: 'mset', entries: ownedEntries });
     return this;
   }
 
@@ -821,9 +893,10 @@ export class KVTransaction {
   /** Queue a CAS. Result at commit: true on compare success. */
   cas(key: string, expected: Value | undefined, value: Value, ttlMs?: number): this {
     this.assertOpen('cas');
-    KVTransaction.checkValue(value, 'cas');
+    const ownedExpected = expected === undefined ? undefined : KVTransaction.checkValue(expected, 'cas expected');
+    const ownedValue = KVTransaction.checkValue(value, 'cas');
     KVTransaction.checkTtl(ttlMs);
-    this.queue.push({ op: 'cas', key, expected, value, ttlMs });
+    this.queue.push({ op: 'cas', key, expected: ownedExpected, value: ownedValue, ttlMs });
     return this;
   }
 
@@ -875,8 +948,13 @@ export class KVTransaction {
     if (this.done) throw new TransactionError(`cannot ${what}: transaction already finished (exec/discard)`);
   }
 
-  private static checkValue(value: Value | undefined, what: string): void {
+  private static checkValue(value: Value | undefined, what: string): Value {
     if (value === undefined) throw new TransactionError(`${what} value cannot be undefined (use null)`);
+    try {
+      return cloneJsonValue(value, `${what} value`);
+    } catch (err) {
+      throw new TransactionError(err instanceof Error ? err.message : String(err));
+    }
   }
 
   private static checkTtl(ttlMs: number | undefined, required = false): void {
