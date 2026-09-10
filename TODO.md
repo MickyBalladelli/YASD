@@ -20,7 +20,7 @@ source.
   found before `clearPrefix()` and can leave newly created matching keys behind
   after a later failure (`src/cache.ts:899-939`). Preserve the full affected
   namespace and restore data, TTL, LRU order, and relevant counters exactly.
-- [ ] Make snapshot/AOF recovery crash-safe. A crash after snapshot rename but
+- [x] Make snapshot/AOF recovery crash-safe. A crash after snapshot rename but
   before AOF truncation can replay old `INCR` operations on top of the snapshot
   and double-count (`src/persistence.ts:42-53,158-163`). Use AOF generation or
   offset metadata plus atomic log rotation and a recovery test.

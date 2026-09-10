@@ -142,6 +142,40 @@ async function runTests() {
     db.close();
   });
 
+  await test('snapshot/AOF recovery skips superseded records after crash', async () => {
+    const dir = tmpDir();
+    const snap = path.join(dir, 'recovery-snapshot.json');
+    const aofPath = path.join(dir, 'recovery.aof');
+    const log = new AofLog(aofPath);
+    const db = new YASD({ sweepIntervalMs: 0 });
+    db.set('counter', 1);
+    db.incr('counter');
+    db.incr('counter');
+    log.append({ op: 'incr', key: 'counter', by: 1 });
+    const snapshotSeq = log.sequence;
+    await saveSnapshot(db, snap, { aofSeq: snapshotSeq });
+
+    db.incr('counter');
+    log.append({ op: 'incr', key: 'counter', by: 1 });
+
+    const recovered = new YASD({ sweepIntervalMs: 0 });
+    const metadata = {};
+    await loadSnapshot(recovered, snap, { metadata });
+    assert.strictEqual(metadata.aofSeq, snapshotSeq);
+    assert.strictEqual(await log.replay(recovered, metadata.aofSeq), 1);
+    assert.strictEqual(recovered.get('counter'), 4, 'old AOF record was not replayed twice');
+
+    log.rotateAfter(snapshotSeq);
+    const rotated = new YASD({ sweepIntervalMs: 0 });
+    const rotatedMetadata = {};
+    await loadSnapshot(rotated, snap, { metadata: rotatedMetadata });
+    assert.strictEqual(await log.replay(rotated, rotatedMetadata.aofSeq), 1);
+    assert.strictEqual(rotated.get('counter'), 4, 'rotated AOF kept the post-snapshot tail');
+    db.close();
+    recovered.close();
+    rotated.close();
+  });
+
   // ---- protocol codec ----
 
   await test('protocol encode/decode incl. partial chunks', async () => {

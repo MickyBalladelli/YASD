@@ -43,7 +43,15 @@ export { YasdClient, parseCacheUrl } from './client';
 export type { YasdClientOptions, ParsedCacheUrl, SubscribeHandler, TxExecResult, YasdTransactionOptions } from './client';
 export { YasdTransaction } from './client';
 export { saveSnapshot, loadSnapshot, AofLog, applyAofOp } from './persistence';
-export type { SnapshotFile, SnapshotStore, AofOp, AofMutation } from './persistence';
+export type {
+  SnapshotFile,
+  SnapshotStore,
+  SnapshotSaveOptions,
+  SnapshotLoadMetadata,
+  SnapshotLoadOptions,
+  AofOp,
+  AofMutation,
+} from './persistence';
 export {
   RespDecoder,
   encodeCommand,

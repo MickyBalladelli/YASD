@@ -37,7 +37,14 @@ import {
   SnapshotEntry,
 } from './cache';
 import { PubSubHub, PubSubListener, INVALIDATE_CHANNEL, invalidateMessage, InvalidationEvent } from './pubsub';
-import { saveSnapshot, loadSnapshot, AofLog, AofOp, AofMutation } from './persistence';
+import {
+  saveSnapshot,
+  loadSnapshot,
+  AofLog,
+  AofOp,
+  AofMutation,
+  SnapshotLoadMetadata,
+} from './persistence';
 import {
   RespDecoder,
   RespReply,
@@ -317,10 +324,15 @@ export class YasdServer {
   async start(): Promise<void> {
     if (this.netServer) return;
     if (this.loadOnStart) {
+      const snapshotMetadata: SnapshotLoadMetadata = {};
       if (this.snapshotPath) {
-        await loadSnapshot(this.kv, this.snapshotPath, { clearFirst: true, missingOk: true });
+        await loadSnapshot(this.kv, this.snapshotPath, {
+          clearFirst: true,
+          missingOk: true,
+          metadata: snapshotMetadata,
+        });
       }
-      await this.aof.replay(this.kv);
+      await this.aof.replay(this.kv, snapshotMetadata.aofSeq);
     }
     this.netServer = this.tlsOptions
       ? tls.createServer(this.tlsOptions, socket => this.onConnection(socket))
@@ -351,8 +363,9 @@ export class YasdServer {
   async save(snapshotPath?: string): Promise<number> {
     const target = snapshotPath ?? this.snapshotPath;
     if (!target) throw new Error('SAVE requires a snapshot path');
-    const n = await saveSnapshot(this.kv, target);
-    await this.aof.truncate();
+    const snapshotSeq = this.aof.sequence;
+    const n = await saveSnapshot(this.kv, target, { aofSeq: snapshotSeq });
+    this.aof.rotateAfter(snapshotSeq);
     return n;
   }
 
