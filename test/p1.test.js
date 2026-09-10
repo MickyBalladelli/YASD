@@ -318,6 +318,28 @@ async function runTests() {
     await server.close();
   });
 
+  await test('server: CAS PX 0 stays absent after AOF replay', async () => {
+    const dir = tmpDir();
+    const aof = path.join(dir, 'cas-zero.aof');
+    const server = new YasdServer({ host: '127.0.0.1', port: 0, aofPath: aof });
+    await server.start();
+    const { port } = server.address();
+    const client = new YasdClient({ host: '127.0.0.1', port });
+    await client.connect();
+    await client.set('cas:zero', { old: true });
+    assert.strictEqual(await client.cas('cas:zero', { old: true }, { new: true }, 0), true);
+    assert.strictEqual(await client.get('cas:zero'), undefined);
+    await client.close();
+    await server.close();
+
+    const records = fs.readFileSync(aof, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.ok(records.some(record => record.op?.op === 'del' && record.op.keys.includes('cas:zero')));
+    const recovered = new YasdServer({ host: '127.0.0.1', port: 0, aofPath: aof });
+    await recovered.start();
+    assert.strictEqual(recovered.cache.get('cas:zero'), undefined);
+    await recovered.close();
+  });
+
   await test('server: /healthz + SAVE/LOAD + graceful close', async () => {
     const dir = tmpDir();
     const snap = path.join(dir, 's.json');

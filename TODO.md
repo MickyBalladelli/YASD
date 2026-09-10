@@ -28,7 +28,7 @@ source.
   each TTL from replay time (`src/persistence.ts:82-105`), extending entries
   after a restart. Store `expiresAt` or an operation timestamp and preserve the
   original deadline.
-- [ ] Fix CAS persistence with `PX 0`. A successful immediate-expiry CAS is
+- [x] Fix CAS persistence with `PX 0`. A successful immediate-expiry CAS is
   logged as a normal `set` without a TTL because the key is already gone
   (`src/server.ts:664-686`), so restart can resurrect it. Log the exact expiry
   result or omit the operation when it leaves no key.

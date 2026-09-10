@@ -734,12 +734,12 @@ export class YasdServer {
         const expected = expectedRaw === '' ? undefined : (JSON.parse(expectedRaw) as SnapshotEntry['value']);
         const ok = this.kv.cas(key, expected, value, ttlMs);
         if (ok) {
-          this.logAof({
-            op: 'set',
-            key,
-            value,
-            expiresAt: this.aofExpiry(key),
-          }, effects);
+          const expiresAt = this.kv.expiration(key);
+          if (expiresAt === null) {
+            this.logAof({ op: 'del', keys: [key] }, effects);
+          } else {
+            this.logAof({ op: 'set', key, value, expiresAt: expiresAt ?? null }, effects);
+          }
           this.publishInvalidate({ event: 'set', key }, effects);
         }
         return { kind: 'int', value: ok ? 1 : 0 };
