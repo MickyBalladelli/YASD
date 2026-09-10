@@ -14,6 +14,59 @@ export type RespReply =
 
 const CRLF = '\r\n';
 
+export interface RespDecoderOptions {
+  /** Maximum bytes in one complete RESP value. Default 8 MiB. */
+  maxFrameBytes?: number;
+  /** Maximum items in any RESP array. Default 1024. */
+  maxArguments?: number;
+  /** Maximum bulk-string payload bytes. Default 4 MiB. */
+  maxBulkBytes?: number;
+  /** Maximum nested array depth. Default 32. */
+  maxDepth?: number;
+  /** Maximum unparsed bytes retained between pushes. Default 8 MiB. */
+  maxBufferedBytes?: number;
+}
+
+interface RespLimits {
+  maxFrameBytes: number;
+  maxArguments: number;
+  maxBulkBytes: number;
+  maxDepth: number;
+  maxBufferedBytes: number;
+}
+
+const DEFAULT_RESP_LIMITS: RespLimits = {
+  maxFrameBytes: 8 * 1024 * 1024,
+  maxArguments: 1024,
+  maxBulkBytes: 4 * 1024 * 1024,
+  maxDepth: 32,
+  maxBufferedBytes: 8 * 1024 * 1024,
+};
+
+function positiveLimit(value: number | undefined, name: string, fallback: number): number {
+  const limit = value ?? fallback;
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new Error(`${name} must be a safe integer >= 1`);
+  }
+  return limit;
+}
+
+function resolveLimits(options: RespDecoderOptions): RespLimits {
+  return {
+    maxFrameBytes: positiveLimit(options.maxFrameBytes, 'maxFrameBytes', DEFAULT_RESP_LIMITS.maxFrameBytes),
+    maxArguments: positiveLimit(options.maxArguments, 'maxArguments', DEFAULT_RESP_LIMITS.maxArguments),
+    maxBulkBytes: positiveLimit(options.maxBulkBytes, 'maxBulkBytes', DEFAULT_RESP_LIMITS.maxBulkBytes),
+    maxDepth: positiveLimit(options.maxDepth, 'maxDepth', DEFAULT_RESP_LIMITS.maxDepth),
+    maxBufferedBytes: positiveLimit(options.maxBufferedBytes, 'maxBufferedBytes', DEFAULT_RESP_LIMITS.maxBufferedBytes),
+  };
+}
+
+function checkFrameBytes(frameStart: number, pos: number, limits: RespLimits): void {
+  if (pos - frameStart > limits.maxFrameBytes) {
+    throw new Error(`RESP frame exceeds ${limits.maxFrameBytes} bytes`);
+  }
+}
+
 export function encodeSimple(s: string): Buffer {
   return Buffer.from(`+${s}${CRLF}`, 'utf8');
 }
@@ -76,22 +129,32 @@ function readLine(buf: Buffer, pos: number): [string, number] | null {
  * Returns [reply, nextPos], or null when more bytes are needed.
  * Throws on malformed input.
  */
-function parseValue(buf: Buffer, pos: number): [RespReply, number] | null {
+function parseValue(
+  buf: Buffer,
+  pos: number,
+  limits: RespLimits,
+  depth: number,
+  frameStart: number
+): [RespReply, number] | null {
   if (pos >= buf.length) return null;
+  checkFrameBytes(frameStart, pos, limits);
   const prefix = buf[pos];
   if (prefix === 0x2b /* + */) {
     const line = readLine(buf, pos + 1);
     if (!line) return null;
+    checkFrameBytes(frameStart, line[1], limits);
     return [{ kind: 'simple', value: line[0] }, line[1]];
   }
   if (prefix === 0x2d /* - */) {
     const line = readLine(buf, pos + 1);
     if (!line) return null;
+    checkFrameBytes(frameStart, line[1], limits);
     return [{ kind: 'error', message: line[0] }, line[1]];
   }
   if (prefix === 0x3a /* : */) {
     const line = readLine(buf, pos + 1);
     if (!line) return null;
+    checkFrameBytes(frameStart, line[1], limits);
     const n = parseInt(line[0], 10);
     if (!Number.isFinite(n)) throw new Error(`malformed RESP integer: ${line[0]}`);
     return [{ kind: 'int', value: n }, line[1]];
@@ -99,9 +162,14 @@ function parseValue(buf: Buffer, pos: number): [RespReply, number] | null {
   if (prefix === 0x24 /* $ */) {
     const line = readLine(buf, pos + 1);
     if (!line) return null;
+    checkFrameBytes(frameStart, line[1], limits);
     const len = parseInt(line[0], 10);
     if (len === -1) return [{ kind: 'bulk', value: null }, line[1]];
     if (!Number.isInteger(len) || len < -1) throw new Error(`malformed RESP bulk length: ${line[0]}`);
+    if (len > limits.maxBulkBytes) {
+      throw new Error(`RESP bulk length exceeds ${limits.maxBulkBytes} bytes`);
+    }
+    checkFrameBytes(frameStart, line[1] + len + 2, limits);
     if (line[1] + len + 2 > buf.length) return null;
     const value = buf.toString('utf8', line[1], line[1] + len);
     if (buf[line[1] + len] !== 0x0d || buf[line[1] + len + 1] !== 0x0a) {
@@ -112,16 +180,24 @@ function parseValue(buf: Buffer, pos: number): [RespReply, number] | null {
   if (prefix === 0x2a /* * */) {
     const line = readLine(buf, pos + 1);
     if (!line) return null;
+    checkFrameBytes(frameStart, line[1], limits);
+    if (depth >= limits.maxDepth) {
+      throw new Error(`RESP nesting exceeds depth ${limits.maxDepth}`);
+    }
     const count = parseInt(line[0], 10);
     if (count === -1) return [{ kind: 'nil' }, line[1]];
     if (!Number.isInteger(count) || count < -1) throw new Error(`malformed RESP array length: ${line[0]}`);
+    if (count > limits.maxArguments) {
+      throw new Error(`RESP array length exceeds ${limits.maxArguments} items`);
+    }
     const items: Array<RespReply | null> = [];
     let p = line[1];
     for (let i = 0; i < count; i++) {
-      const parsed = parseValue(buf, p);
+      const parsed = parseValue(buf, p, limits, depth + 1, frameStart);
       if (!parsed) return null;
       items.push(parsed[0]);
       p = parsed[1];
+      checkFrameBytes(frameStart, p, limits);
     }
     return [{ kind: 'array', items }, p];
   }
@@ -131,16 +207,28 @@ function parseValue(buf: Buffer, pos: number): [RespReply, number] | null {
 /** Incremental streaming decoder: push bytes, drain complete values. */
 export class RespDecoder {
   private buf: Buffer = Buffer.alloc(0);
+  private readonly limits: RespLimits;
+
+  constructor(options: RespDecoderOptions = {}) {
+    this.limits = resolveLimits(options);
+  }
 
   push(chunk: Buffer | string): RespReply[] {
     const piece = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
+    if (this.buf.length + piece.length > this.limits.maxBufferedBytes) {
+      this.buf = Buffer.alloc(0);
+      throw new Error(`RESP buffered bytes exceed ${this.limits.maxBufferedBytes}`);
+    }
     this.buf = this.buf.length === 0 ? piece : Buffer.concat([this.buf, piece]);
     const out: RespReply[] = [];
     for (;;) {
       if (this.buf.length === 0) break;
       let parsed: [RespReply, number] | null;
       try {
-        parsed = parseValue(this.buf, 0);
+        parsed = parseValue(this.buf, 0, this.limits, 0, 0);
+        if (!parsed && this.buf.length > this.limits.maxFrameBytes) {
+          throw new Error(`RESP frame exceeds ${this.limits.maxFrameBytes} bytes`);
+        }
       } catch (err) {
         this.buf = Buffer.alloc(0);
         throw err;

@@ -36,7 +36,7 @@ source.
   (`src/server.ts:536-542`) even though the command is acknowledged. Surface a
   write failure, expose degraded persistence in `INFO`, and define whether the
   server rejects or serves writes when durability is unavailable.
-- [ ] Add hard limits to RESP decoding. `RespDecoder` grows its buffer and
+- [x] Add hard limits to RESP decoding. `RespDecoder` grows its buffer and
   recursively parses arrays without limits (`src/protocol.ts:79-151`). Enforce
   maximum frame bytes, argument count, bulk length, nesting depth, and buffered
   bytes; close abusive connections cleanly.

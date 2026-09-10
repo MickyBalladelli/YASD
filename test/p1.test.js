@@ -219,6 +219,15 @@ async function runTests() {
     assert.deepStrictEqual(replies[3], { kind: 'array', items: [{ kind: 'bulk', value: 'x' }, { kind: 'bulk', value: null }] });
   });
 
+  await test('protocol decoder enforces frame, bulk, args, depth, and buffer limits', async () => {
+    const { RespDecoder } = mod;
+    assert.throws(() => new RespDecoder({ maxFrameBytes: 4 }).push('+OK\r\n'), /frame exceeds/);
+    assert.throws(() => new RespDecoder({ maxBulkBytes: 3 }).push('$4\r\n1234\r\n'), /bulk length exceeds/);
+    assert.throws(() => new RespDecoder({ maxArguments: 1 }).push('*2\r\n$1\r\na\r\n$1\r\nb\r\n'), /array length exceeds/);
+    assert.throws(() => new RespDecoder({ maxDepth: 1 }).push('*1\r\n*1\r\n$1\r\na\r\n'), /nesting exceeds/);
+    assert.throws(() => new RespDecoder({ maxBufferedBytes: 4 }).push('*9999'), /buffered bytes exceeds/);
+  });
+
   await test('CACHE_URL parsing + fromEnv', async () => {
     assert.deepStrictEqual(parseCacheUrl('yasd://cache.internal:7379?poolSize=8'), {
       host: 'cache.internal', port: 7379, poolSize: 8,

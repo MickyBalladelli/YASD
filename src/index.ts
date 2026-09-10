@@ -64,7 +64,7 @@ export {
   encodeArray,
   requestArgv,
 } from './protocol';
-export type { RespReply } from './protocol';
+export type { RespReply, RespDecoderOptions } from './protocol';
 
 /**
  * YASD constructor options: KV cache tuning plus SQL observability.

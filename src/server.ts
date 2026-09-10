@@ -463,10 +463,10 @@ export class YasdServer {
       } catch {
         try {
           socket.write(encodeReply({ kind: 'error', message: 'ERR protocol error' }));
+          socket.end();
         } catch {
-          // ignore
+          socket.destroy();
         }
-        socket.destroy();
       }
     });
     const cleanup = (): void => {
