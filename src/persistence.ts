@@ -19,8 +19,8 @@ export interface SnapshotStore {
   restore(entries: SnapshotEntry[]): number;
 }
 
-/** Replayable mutation ops for the append-only log. */
-export type AofOp =
+/** One replayable mutation inside an AOF transaction. */
+export type AofMutation =
   | { op: 'set'; key: string; value: SnapshotEntry['value']; ttlMs?: number }
   | { op: 'mset'; entries: KVBatchEntry[] }
   | { op: 'del'; keys: string[] }
@@ -28,6 +28,9 @@ export type AofOp =
   | { op: 'expire'; key: string; ttlMs: number }
   | { op: 'persist'; key: string }
   | { op: 'incr'; key: string; by: number };
+
+/** Replayable mutation ops for the append-only log. */
+export type AofOp = AofMutation | { op: 'transaction'; ops: AofMutation[] };
 
 function ensureDir(filePath: string): void {
   const dir = path.dirname(filePath);
@@ -102,6 +105,11 @@ export function applyAofOp(cache: KVCache, op: AofOp): void {
       break;
     case 'incr':
       cache.incr(op.key, op.by);
+      break;
+    case 'transaction':
+      cache.atomic(() => {
+        for (const child of op.ops) applyAofOp(cache, child);
+      });
       break;
   }
 }

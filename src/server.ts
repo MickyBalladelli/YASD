@@ -36,8 +36,8 @@ import {
   KVBatchEntry,
   SnapshotEntry,
 } from './cache';
-import { PubSubHub, PubSubListener, INVALIDATE_CHANNEL, invalidateMessage } from './pubsub';
-import { saveSnapshot, loadSnapshot, AofLog, AofOp } from './persistence';
+import { PubSubHub, PubSubListener, INVALIDATE_CHANNEL, invalidateMessage, InvalidationEvent } from './pubsub';
+import { saveSnapshot, loadSnapshot, AofLog, AofOp, AofMutation } from './persistence';
 import {
   RespDecoder,
   RespReply,
@@ -130,6 +130,11 @@ interface ConnState {
   watchVersions: Map<string, number> | null;
   /** Queued commands between MULTI and EXEC (null = not in MULTI). */
   txQueue: Array<{ cmd: string; args: string[] }> | null;
+}
+
+interface TransactionEffects {
+  aof: AofMutation[];
+  invalidations: InvalidationEvent[];
 }
 
 function parsePort(value: string | undefined, fallback: number): number {
@@ -533,7 +538,7 @@ export class YasdServer {
     return 'ok';
   }
 
-  private logAof(op: AofOp): void {
+  private appendAof(op: AofOp): void {
     try {
       this.aof.append(op);
     } catch {
@@ -541,7 +546,19 @@ export class YasdServer {
     }
   }
 
-  private publishInvalidate(event: { event: 'set' | 'del' | 'clear' | 'expire'; key?: string; prefix?: string }): void {
+  private logAof(op: AofMutation, effects?: TransactionEffects): void {
+    if (effects) {
+      effects.aof.push(op);
+      return;
+    }
+    this.appendAof(op);
+  }
+
+  private publishInvalidate(event: InvalidationEvent, effects?: TransactionEffects): void {
+    if (effects) {
+      effects.invalidations.push(event);
+      return;
+    }
     try {
       this.hub.publish(INVALIDATE_CHANNEL, invalidateMessage(event));
     } catch {
@@ -610,8 +627,8 @@ export class YasdServer {
   /**
    * Commit the queued transaction. Returns an array of per-op replies, or
    * nil (`*-1`) when a watched key changed — in which case nothing is
-   * applied. Watches clear either way. Single-threaded dispatch makes the
-   * apply loop uninterrupted (atomic).
+   * applied. A command error rolls back the complete batch. AOF and
+   * invalidations flush only after the cache commit succeeds.
    */
   private execTransaction(state: ConnState): RespReply {
     const queue = state.txQueue ?? [];
@@ -626,22 +643,46 @@ export class YasdServer {
       }
     }
     const items: Array<RespReply | null> = [];
-    for (const op of queue) {
-      try {
-        const reply = this.executeCommand(state, op.cmd, op.args);
-        if (reply === 'silent' || reply === 'close') {
-          items.push({ kind: 'error', message: `${op.cmd} cannot run inside MULTI` });
-        } else {
-          items.push(reply);
+    const effects: TransactionEffects = { aof: [], invalidations: [] };
+    const abort = Symbol('transaction aborted');
+    try {
+      this.kv.atomic(() => {
+        let failed = false;
+        for (const op of queue) {
+          try {
+            const reply = this.executeCommand(state, op.cmd, op.args, effects);
+            if (reply === 'silent' || reply === 'close') {
+              failed = true;
+              items.push({ kind: 'error', message: `${op.cmd} cannot run inside MULTI` });
+            } else {
+              items.push(reply);
+            }
+          } catch (err) {
+            failed = true;
+            items.push({ kind: 'error', message: `ERR ${(err as Error).message}` });
+          }
         }
-      } catch (err) {
-        items.push({ kind: 'error', message: `ERR ${(err as Error).message}` });
-      }
+        if (failed) throw abort;
+      });
+    } catch (err) {
+      if (err !== abort) throw err;
+      return { kind: 'array', items };
+    }
+    if (effects.aof.length > 0) {
+      this.appendAof({ op: 'transaction', ops: effects.aof });
+    }
+    for (const event of effects.invalidations) {
+      this.publishInvalidate(event);
     }
     return { kind: 'array', items };
   }
 
-  private executeCommand(state: ConnState, cmd: string, args: string[]): RespReply | 'silent' | 'close' {
+  private executeCommand(
+    state: ConnState,
+    cmd: string,
+    args: string[],
+    effects?: TransactionEffects
+  ): RespReply | 'silent' | 'close' {
     switch (cmd) {
       case 'PING':
         return args.length > 0
@@ -681,8 +722,8 @@ export class YasdServer {
             key,
             value,
             ...(remaining >= 0 ? { ttlMs: remaining } : {}),
-          });
-          this.publishInvalidate({ event: 'set', key });
+          }, effects);
+          this.publishInvalidate({ event: 'set', key }, effects);
         }
         return { kind: 'int', value: ok ? 1 : 0 };
       }
@@ -700,8 +741,8 @@ export class YasdServer {
         const value = this.parseValue(args[1] as string);
         const ttlMs = this.parsePx(args.slice(2));
         this.kv.set(key, value, ttlMs);
-        this.logAof({ op: 'set', key, value, ...(ttlMs === undefined ? {} : { ttlMs }) });
-        this.publishInvalidate({ event: 'set', key });
+        this.logAof({ op: 'set', key, value, ...(ttlMs === undefined ? {} : { ttlMs }) }, effects);
+        this.publishInvalidate({ event: 'set', key }, effects);
         return { kind: 'simple', value: 'OK' };
       }
 
@@ -714,8 +755,8 @@ export class YasdServer {
           entries.push({ key: args[i] as string, value: this.parseValue(args[i + 1] as string) });
         }
         this.kv.mset(entries);
-        this.logAof({ op: 'mset', entries });
-        for (const e of entries) this.publishInvalidate({ event: 'set', key: e.key });
+        this.logAof({ op: 'mset', entries }, effects);
+        for (const e of entries) this.publishInvalidate({ event: 'set', key: e.key }, effects);
         return { kind: 'simple', value: 'OK' };
       }
 
@@ -737,8 +778,8 @@ export class YasdServer {
             deleted.push(key);
           }
         }
-        if (deleted.length > 0) this.logAof({ op: 'del', keys: deleted });
-        for (const key of deleted) this.publishInvalidate({ event: 'del', key });
+        if (deleted.length > 0) this.logAof({ op: 'del', keys: deleted }, effects);
+        for (const key of deleted) this.publishInvalidate({ event: 'del', key }, effects);
         return { kind: 'int', value: count };
       }
 
@@ -746,8 +787,8 @@ export class YasdServer {
         this.requireArgs(cmd, args, 1);
         const prefix = args[0] as string;
         const count = this.kv.clearPrefix(prefix);
-        this.logAof({ op: 'clear', prefix });
-        this.publishInvalidate({ event: 'clear', prefix });
+        this.logAof({ op: 'clear', prefix }, effects);
+        this.publishInvalidate({ event: 'clear', prefix }, effects);
         return { kind: 'int', value: count };
       }
 
@@ -761,8 +802,8 @@ export class YasdServer {
         const ttlMs = this.parseMs(args[1] as string);
         const ok = this.kv.expire(args[0] as string, ttlMs);
         if (ok) {
-          this.logAof({ op: 'expire', key: args[0] as string, ttlMs });
-          this.publishInvalidate({ event: 'expire', key: args[0] as string });
+          this.logAof({ op: 'expire', key: args[0] as string, ttlMs }, effects);
+          this.publishInvalidate({ event: 'expire', key: args[0] as string }, effects);
         }
         return { kind: 'int', value: ok ? 1 : 0 };
       }
@@ -770,7 +811,7 @@ export class YasdServer {
       case 'PERSIST': {
         this.requireArgs(cmd, args, 1);
         const ok = this.kv.persist(args[0] as string);
-        if (ok) this.logAof({ op: 'persist', key: args[0] as string });
+        if (ok) this.logAof({ op: 'persist', key: args[0] as string }, effects);
         return { kind: 'int', value: ok ? 1 : 0 };
       }
 
@@ -780,8 +821,8 @@ export class YasdServer {
         const rawBy = args[1] === undefined ? 1 : Number(args[1]);
         if (!Number.isFinite(rawBy)) throw new Error('delta must be a finite number');
         const next = cmd === 'INCR' ? this.kv.incr(args[0] as string, rawBy) : this.kv.decr(args[0] as string, rawBy);
-        this.logAof({ op: 'incr', key: args[0] as string, by: cmd === 'INCR' ? rawBy : -rawBy });
-        this.publishInvalidate({ event: 'set', key: args[0] as string });
+        this.logAof({ op: 'incr', key: args[0] as string, by: cmd === 'INCR' ? rawBy : -rawBy }, effects);
+        this.publishInvalidate({ event: 'set', key: args[0] as string }, effects);
         return Number.isInteger(next)
           ? { kind: 'int', value: next }
           : { kind: 'bulk', value: JSON.stringify(next) };

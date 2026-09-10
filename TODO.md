@@ -11,7 +11,7 @@ source.
   can mutate a value without updating bytes, LRU order, versions, or
   invalidation. Validate JSON values at the API boundary and either deep-clone
   on read/write or clearly enforce immutable values.
-- [ ] Make embedded and server transactions truly all-or-nothing. Server
+- [x] Make embedded and server transactions truly all-or-nothing. Server
   `EXEC` applies each command and catches errors after earlier commands already
   changed state (`src/server.ts:616-641`). It also writes AOF entries and
   publishes invalidations during the partial commit. Plan/validate first, then

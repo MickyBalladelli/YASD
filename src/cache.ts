@@ -73,6 +73,16 @@ interface Entry {
   size: number; // bytes estimate (key + value)
 }
 
+interface CacheState {
+  entries: Array<[string, Entry]>;
+  bytes: number;
+  hits: number;
+  misses: number;
+  evictions: number;
+  expiries: number;
+  keyVersions: Map<string, number>;
+}
+
 function estimateSize(key: string, value: Value): number {
   let jsonLen = 8;
   try {
@@ -223,6 +233,50 @@ export class KVCache {
     this.bytes -= entry.size;
     this.expiries++;
     this.bumpVersion(key);
+  }
+
+  private captureState(): CacheState {
+    const entries: Array<[string, Entry]> = [];
+    for (const [key, entry] of this.map) {
+      entries.push([
+        key,
+        {
+          value: cloneJsonValue(entry.value, 'cache value'),
+          expiresAt: entry.expiresAt,
+          size: entry.size,
+        },
+      ]);
+    }
+    return {
+      entries,
+      bytes: this.bytes,
+      hits: this.hits,
+      misses: this.misses,
+      evictions: this.evictions,
+      expiries: this.expiries,
+      keyVersions: new Map(this.keyVersions),
+    };
+  }
+
+  private restoreState(state: CacheState): void {
+    this.map = new Map(state.entries);
+    this.bytes = state.bytes;
+    this.hits = state.hits;
+    this.misses = state.misses;
+    this.evictions = state.evictions;
+    this.expiries = state.expiries;
+    this.keyVersions = new Map(state.keyVersions);
+  }
+
+  /** Run synchronous work atomically, restoring all cache state on failure. */
+  atomic<T>(fn: () => T): T {
+    const state = this.captureState();
+    try {
+      return fn();
+    } catch (err) {
+      this.restoreState(state);
+      throw err;
+    }
   }
 
   /**
@@ -929,17 +983,11 @@ export class KVTransaction {
     this.queue = [];
     this.watched.clear();
     if (ops.length === 0) return [];
-    // Snapshot touched keys so a commit-time failure rolls back to
-    // all-or-nothing (single-threaded: no interleaving inside this loop).
-    const snapshot = this.snapshotTouched(ops);
-    try {
+    return this.cache.atomic(() => {
       const results: TxResult[] = [];
       for (const op of ops) results.push(this.apply(op));
       return results;
-    } catch (err) {
-      this.rollback(snapshot);
-      throw err;
-    }
+    });
   }
 
   // ---- internals ----
@@ -972,49 +1020,6 @@ export class KVTransaction {
     if (typeof by !== 'number' || !Number.isFinite(by)) {
       throw new TransactionError(`delta must be a finite number, got ${String(by)}`);
     }
-  }
-
-  private snapshotTouched(ops: TxQueuedOp[]): Map<string, SnapshotEntry | undefined> {
-    const keys = new Set<string>();
-    for (const op of ops) {
-      switch (op.op) {
-        case 'mset':
-          for (const e of op.entries) keys.add(e.key);
-          break;
-        case 'clearPrefix': {
-          const needle = op.prefix + ':';
-          for (const e of this.cache.dump()) {
-            if (e.key === op.prefix || e.key.startsWith(needle)) keys.add(e.key);
-          }
-          break;
-        }
-        default:
-          keys.add(op.key);
-      }
-    }
-    const snap = new Map<string, SnapshotEntry | undefined>();
-    for (const key of keys) {
-      const value = this.cache.get(key);
-      if (value === undefined) {
-        snap.set(key, undefined);
-      } else {
-        const ttl = this.cache.ttl(key);
-        snap.set(
-          key,
-          ttl >= 0 ? { key, value, expiresAt: Date.now() + ttl } : { key, value }
-        );
-      }
-    }
-    return snap;
-  }
-
-  private rollback(snapshot: Map<string, SnapshotEntry | undefined>): void {
-    const restore: SnapshotEntry[] = [];
-    for (const [key, entry] of snapshot) {
-      this.cache.del(key);
-      if (entry !== undefined) restore.push(entry);
-    }
-    if (restore.length > 0) this.cache.restore(restore);
   }
 
   private apply(op: TxQueuedOp): TxResult {
