@@ -165,6 +165,37 @@ async function runTests() {
     db.close();
   });
 
+  await test('embedded: failed clearPrefix restores full cache state', async () => {
+    const db = new YASD({ maxEntries: 4, sweepIntervalMs: 0 });
+    db.set('outside', 'keep');
+    db.set('ns:one', 'one', 60000);
+    db.set('ns:two', 'two');
+    db.set('bad', 'not-a-number');
+    db.get('bad');
+    const beforeStats = db.cacheStats();
+    const beforeTtl = db.ttl('ns:one');
+
+    const tx = db.multi();
+    tx.set('bad', 'not-a-number');
+    tx.clearPrefix('ns');
+    tx.set('ns:new', 'new');
+    tx.set('ns:newer', 'newer');
+    tx.set('ns:newest', 'newest');
+    tx.incr('bad');
+    assert.throws(() => tx.exec(), /numeric/);
+
+    assert.deepStrictEqual(db.cacheStats(), beforeStats);
+    db.set('probe', 'probe');
+    assert.strictEqual(db.get('outside'), undefined, 'original LRU oldest entry evicted');
+    assert.strictEqual(db.get('bad'), 'not-a-number');
+    assert.deepStrictEqual(db.mget(['ns:one', 'ns:two']), ['one', 'two']);
+    assert.strictEqual(db.get('ns:new'), undefined);
+    assert.strictEqual(db.get('ns:newer'), undefined);
+    assert.strictEqual(db.get('ns:newest'), undefined);
+    assert.ok(db.ttl('ns:one') <= beforeTtl && db.ttl('ns:one') > 0, 'TTL deadline restored');
+    db.close();
+  });
+
   await test('embedded: cas/mset/clearPrefix/expire/persist inside tx', async () => {
     const db = new YASD({ sweepIntervalMs: 0 });
     db.set('c', 1, 60000);

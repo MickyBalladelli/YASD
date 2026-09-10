@@ -74,6 +74,8 @@ interface Entry {
 }
 
 interface CacheState {
+  // Keep the complete ordered map. A transaction can clear a prefix, create
+  // new keys, and evict unrelated LRU entries before a later op fails.
   entries: Array<[string, Entry]>;
   bytes: number;
   hits: number;

@@ -16,7 +16,7 @@ source.
   changed state (`src/server.ts:616-641`). It also writes AOF entries and
   publishes invalidations during the partial commit. Plan/validate first, then
   commit once, with one transaction-level persistence and fanout step.
-- [ ] Fix transaction rollback coverage. Embedded rollback snapshots only keys
+- [x] Fix transaction rollback coverage. Embedded rollback snapshots only keys
   found before `clearPrefix()` and can leave newly created matching keys behind
   after a later failure (`src/cache.ts:899-939`). Preserve the full affected
   namespace and restore data, TTL, LRU order, and relevant counters exactly.
