@@ -227,6 +227,11 @@ async function runTests() {
     assert.throws(() => serverOptionsFromEnv({ YASD_SLOW_COMMAND_MS: '-1' }), />= 0/);
   });
 
+  await test('server defaults to loopback', async () => {
+    assert.strictEqual(serverOptionsFromEnv({}).host, '127.0.0.1')
+    assert.strictEqual(new YasdServer().host, '127.0.0.1')
+  })
+
   // Summary
   console.log('\n' + '='.repeat(50));
   console.log(`Metrics tests completed: ${passed + failed}`);

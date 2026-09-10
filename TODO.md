@@ -40,10 +40,8 @@ source.
   recursively parses arrays without limits (`src/protocol.ts:79-151`). Enforce
   maximum frame bytes, argument count, bulk length, nesting depth, and buffered
   bytes; close abusive connections cleanly.
-- [ ] Make the default server safer. The default host is `0.0.0.0` and auth/TLS
-  are optional (`src/server.ts:237-253`). Prefer loopback for local use, or
-  require an explicit security configuration before binding publicly, with a
-  clear startup warning.
+- [x] Make the default server safer. The default host is loopback. Explicit
+  public binds without auth/TLS print a clear startup warning.
 
 ## P1 — Server, cache, and client reliability
 

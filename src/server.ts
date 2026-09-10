@@ -54,6 +54,7 @@ import {
   requestArgv,
 } from './protocol';
 
+export const DEFAULT_HOST = '127.0.0.1'
 export const DEFAULT_PORT = 7379;
 
 /** TLS identity plus optional client-certificate and protocol settings. */
@@ -168,6 +169,14 @@ function parsePort(value: string | undefined, fallback: number): number {
   return n;
 }
 
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, '')
+  if (normalized === 'localhost' || normalized === '::1') return true
+  if (net.isIP(normalized) !== 4) return false
+  const firstOctet = Number.parseInt(normalized.split('.')[0] as string, 10)
+  return firstOctet === 127
+}
+
 function parseBoolean(value: string, name: string): boolean {
   if (value === '1' || value.toLowerCase() === 'true') return true;
   if (value === '0' || value.toLowerCase() === 'false') return false;
@@ -193,7 +202,7 @@ export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Yasd
     }
   }
   const opts: YasdServerOptions = {
-    host: env.YASD_HOST ?? '0.0.0.0',
+    host: env.YASD_HOST ?? DEFAULT_HOST,
     port: parsePort(env.YASD_PORT, DEFAULT_PORT),
     cache,
   };
@@ -266,7 +275,7 @@ export class YasdServer {
   private slow = new SlowLog();
 
   constructor(options: YasdServerOptions = {}) {
-    this.host = options.host ?? '0.0.0.0';
+    this.host = options.host ?? DEFAULT_HOST;
     this.port = options.port ?? DEFAULT_PORT;
     this.kv = new KVCache(options.cache);
     this.aof = new AofLog(options.aofPath);
@@ -359,6 +368,12 @@ export class YasdServer {
     this.netServer = this.tlsOptions
       ? tls.createServer(this.tlsOptions, socket => this.onConnection(socket))
       : net.createServer(socket => this.onConnection(socket));
+    if (!isLoopbackHost(this.host) && !this.authRequired && !this.tlsEnabled) {
+      console.warn(
+        `yasd: WARNING: listening on ${this.host}:${this.port} without authentication or TLS. ` +
+          'This exposes the cache to the network; use 127.0.0.1 or configure a password/TLS.'
+      )
+    }
     await new Promise<void>((resolve, reject) => {
       const onError = (err: Error): void => {
         this.netServer?.off('listening', onListening);
