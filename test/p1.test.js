@@ -415,6 +415,29 @@ async function runTests() {
     await server2.close();
   });
 
+  await test('server serializes concurrent SAVE and LOAD calls', async () => {
+    const dir = tmpDir();
+    const snap = path.join(dir, 'serialized.json');
+    const server = new YasdServer({
+      snapshotPath: snap, loadOnStart: false, saveOnShutdown: false,
+    });
+    server.cache.set('old', 1);
+    await server.save();
+
+    server.cache.set('new', 2);
+    const loading = server.load();
+    const saving = server.save();
+    await Promise.all([loading, saving]);
+
+    const restored = new YASD({ sweepIntervalMs: 0 });
+    await loadSnapshot(restored, snap, { missingOk: false });
+    assert.strictEqual(restored.get('old'), 1);
+    assert.strictEqual(restored.get('new'), undefined);
+
+    restored.close();
+    await server.close();
+  });
+
   await test('server rejects bad input without dropping the connection', async () => {
     const server = new YasdServer({ host: '127.0.0.1', port: 0 });
     await server.start();

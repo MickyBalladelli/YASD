@@ -256,6 +256,7 @@ export class YasdServer {
   private netServer?: net.Server;
   private sockets = new Set<net.Socket>();
   private autoSaveTimer?: ReturnType<typeof setInterval>;
+  private persistenceQueue: Promise<void> = Promise.resolve();
   private closing = false;
   private startedAt = Date.now();
   private aofDegraded = false;
@@ -400,6 +401,10 @@ export class YasdServer {
   async save(snapshotPath?: string): Promise<number> {
     const target = snapshotPath ?? this.snapshotPath;
     if (!target) throw new Error('SAVE requires a snapshot path');
+    return this.enqueuePersistence(() => this.saveUnlocked(target));
+  }
+
+  private async saveUnlocked(target: string): Promise<number> {
     const snapshotSeq = this.aof.sequence;
     const n = await saveSnapshot(this.kv, target, { aofSeq: snapshotSeq });
     try {
@@ -414,7 +419,9 @@ export class YasdServer {
   async load(snapshotPath?: string): Promise<number> {
     const target = snapshotPath ?? this.snapshotPath;
     if (!target) throw new Error('LOAD requires a snapshot path');
-    return loadSnapshot(this.kv, target, { clearFirst: true, missingOk: false });
+    return this.enqueuePersistence(() =>
+      loadSnapshot(this.kv, target, { clearFirst: true, missingOk: false })
+    );
   }
 
   /** Graceful shutdown: stop accepting, drain sockets, final SAVE, stop timers. */
@@ -453,12 +460,23 @@ export class YasdServer {
       } catch {
         // best effort on shutdown
       }
+    } else {
+      await this.persistenceQueue;
     }
     this.hub.unsubscribeAll();
     this.kv.close();
   }
 
   // ---- internals ----
+
+  private enqueuePersistence<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.persistenceQueue.then(operation, operation);
+    this.persistenceQueue = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
 
   private onConnection(socket: net.Socket): void {
     this.sockets.add(socket);

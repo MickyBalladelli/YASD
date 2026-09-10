@@ -45,10 +45,9 @@ source.
 
 ## P1 — Server, cache, and client reliability
 
-- [ ] Serialize `save()` and `load()` operations. Autosave, explicit SAVE, and
-  shutdown can overlap (`src/server.ts:336-351`), producing an older snapshot
-  or truncating an AOF at the wrong time. Add one persistence queue/lock and
-  test concurrent calls.
+- [x] Serialize `save()` and `load()` operations. Autosave, explicit SAVE, and
+  shutdown now share one persistence queue; concurrent calls are covered by a
+  regression test.
 - [ ] Treat AOF corruption deliberately. Replay currently skips every bad line
   (`src/persistence.ts:145-154`), which can silently lose a middle operation.
   Only tolerate an incomplete final line; stop, quarantine, or report other
