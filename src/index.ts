@@ -49,6 +49,7 @@ export type {
   SnapshotSaveOptions,
   SnapshotLoadMetadata,
   SnapshotLoadOptions,
+  AofBatchEntry,
   AofOp,
   AofMutation,
 } from './persistence';

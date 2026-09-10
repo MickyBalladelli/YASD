@@ -24,7 +24,7 @@ source.
   before AOF truncation can replay old `INCR` operations on top of the snapshot
   and double-count (`src/persistence.ts:42-53,158-163`). Use AOF generation or
   offset metadata plus atomic log rotation and a recovery test.
-- [ ] Persist TTL deadlines, not only relative TTLs. AOF replay currently starts
+- [x] Persist TTL deadlines, not only relative TTLs. AOF replay currently starts
   each TTL from replay time (`src/persistence.ts:82-105`), extending entries
   after a restart. Store `expiresAt` or an operation timestamp and preserve the
   original deadline.

@@ -43,6 +43,7 @@ import {
   AofLog,
   AofOp,
   AofMutation,
+  AofBatchEntry,
   SnapshotLoadMetadata,
 } from './persistence';
 import {
@@ -583,6 +584,12 @@ export class YasdServer {
     return JSON.parse(json) as SnapshotEntry['value'];
   }
 
+  /** AOF TTL marker: null persists, 0 means the key was already gone. */
+  private aofExpiry(key: string): number | null {
+    const expiresAt = this.kv.expiration(key);
+    return expiresAt === undefined ? null : expiresAt === null ? 0 : expiresAt;
+  }
+
   /**
    * Transaction entry point: WATCH/UNWATCH/MULTI/EXEC/DISCARD plus queueing
    * while in MULTI. Everything else delegates to `executeCommand`.
@@ -727,14 +734,11 @@ export class YasdServer {
         const expected = expectedRaw === '' ? undefined : (JSON.parse(expectedRaw) as SnapshotEntry['value']);
         const ok = this.kv.cas(key, expected, value, ttlMs);
         if (ok) {
-          // AOF replay uses relative TTL; convert an absolute preserved
-          // expiry to remaining ms so the log stays meaningful.
-          const remaining = this.kv.ttl(key);
           this.logAof({
             op: 'set',
             key,
             value,
-            ...(remaining >= 0 ? { ttlMs: remaining } : {}),
+            expiresAt: this.aofExpiry(key),
           }, effects);
           this.publishInvalidate({ event: 'set', key }, effects);
         }
@@ -754,7 +758,7 @@ export class YasdServer {
         const value = this.parseValue(args[1] as string);
         const ttlMs = this.parsePx(args.slice(2));
         this.kv.set(key, value, ttlMs);
-        this.logAof({ op: 'set', key, value, ...(ttlMs === undefined ? {} : { ttlMs }) }, effects);
+        this.logAof({ op: 'set', key, value, expiresAt: this.aofExpiry(key) }, effects);
         this.publishInvalidate({ event: 'set', key }, effects);
         return { kind: 'simple', value: 'OK' };
       }
@@ -768,7 +772,11 @@ export class YasdServer {
           entries.push({ key: args[i] as string, value: this.parseValue(args[i + 1] as string) });
         }
         this.kv.mset(entries);
-        this.logAof({ op: 'mset', entries }, effects);
+        const aofEntries: AofBatchEntry[] = entries.map(entry => ({
+          ...entry,
+          expiresAt: this.aofExpiry(entry.key),
+        }));
+        this.logAof({ op: 'mset', entries: aofEntries }, effects);
         for (const e of entries) this.publishInvalidate({ event: 'set', key: e.key }, effects);
         return { kind: 'simple', value: 'OK' };
       }
@@ -815,7 +823,7 @@ export class YasdServer {
         const ttlMs = this.parseMs(args[1] as string);
         const ok = this.kv.expire(args[0] as string, ttlMs);
         if (ok) {
-          this.logAof({ op: 'expire', key: args[0] as string, ttlMs }, effects);
+          this.logAof({ op: 'expire', key: args[0] as string, expiresAt: this.aofExpiry(args[0] as string) ?? 0 }, effects);
           this.publishInvalidate({ event: 'expire', key: args[0] as string }, effects);
         }
         return { kind: 'int', value: ok ? 1 : 0 };

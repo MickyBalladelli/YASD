@@ -142,6 +142,24 @@ async function runTests() {
     db.close();
   });
 
+  await test('AOF replay preserves absolute TTL deadlines', async () => {
+    const dir = tmpDir();
+    const aofPath = path.join(dir, 'ttl.aof');
+    const deadline = Date.now() + 120;
+    const log = new AofLog(aofPath);
+    log.append({ op: 'set', key: 'ttl', value: 1, expiresAt: deadline });
+    await sleep(40);
+
+    const db = new YASD({ sweepIntervalMs: 0 });
+    assert.strictEqual(await log.replay(db), 1);
+    const afterReplay = Date.now();
+    const remaining = db.ttl('ttl');
+    assert.ok(remaining > 0 && remaining <= deadline - afterReplay + 5, 'TTL was not restarted from replay time');
+    await sleep(100);
+    assert.strictEqual(db.get('ttl'), undefined, 'original deadline still wins after replay');
+    db.close();
+  });
+
   await test('snapshot/AOF recovery skips superseded records after crash', async () => {
     const dir = tmpDir();
     const snap = path.join(dir, 'recovery-snapshot.json');

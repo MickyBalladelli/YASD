@@ -331,6 +331,19 @@ export class KVCache {
     const ownedValue = cloneJsonValue(value, 'cache value');
     const ttl = this.resolveTTLMs(key, ttlMs);
     const expiresAt = ttl === undefined ? undefined : Date.now() + ttl;
+    return this.setOwned(key, ownedValue, expiresAt, value);
+  }
+
+  /** Store a value with an absolute expiry deadline (used by AOF replay). */
+  setAt(key: string, value: Value, expiresAt?: number): Value {
+    if (expiresAt !== undefined && !Number.isFinite(expiresAt)) {
+      throw new Error(`expiresAt must be a finite epoch ms, got ${String(expiresAt)}`);
+    }
+    const ownedValue = cloneJsonValue(value, 'cache value');
+    return this.setOwned(key, ownedValue, expiresAt, value);
+  }
+
+  private setOwned(key: string, ownedValue: Value, expiresAt: number | undefined, returned: Value): Value {
     // Immediate expiry (ttl 0): behave like a write-through miss.
     if (expiresAt !== undefined && expiresAt <= Date.now()) {
       const old = this.map.get(key);
@@ -341,7 +354,7 @@ export class KVCache {
       }
       this.expiries++;
       this.misses++;
-      return value;
+      return returned;
     }
     const size = estimateSize(key, ownedValue);
     const old = this.map.get(key);
@@ -353,7 +366,7 @@ export class KVCache {
     this.bytes += size;
     this.bumpVersion(key);
     this.evictIfNeeded(key);
-    return value;
+    return returned;
   }
 
   private evictIfNeeded(newestKey: string): void {
@@ -642,6 +655,42 @@ export class KVCache {
     }
     if (entry.expiresAt === undefined) return -1;
     return Math.max(0, entry.expiresAt - Date.now());
+  }
+
+  /** Absolute expiry deadline; undefined = persistent, null = missing/expired. */
+  expiration(key: string): number | undefined | null {
+    const entry = this.map.get(key);
+    if (!entry) return null;
+    if (this.isExpired(entry, Date.now())) {
+      this.removeExpired(key, entry);
+      return null;
+    }
+    return entry.expiresAt;
+  }
+
+  /** Apply an absolute expiry deadline without extending it during replay. */
+  expireAt(key: string, expiresAt: number): boolean {
+    if (!Number.isFinite(expiresAt)) {
+      throw new Error(`expiresAt must be a finite epoch ms, got ${String(expiresAt)}`);
+    }
+    const entry = this.map.get(key);
+    if (!entry) return false;
+    if (this.isExpired(entry, Date.now())) {
+      this.removeExpired(key, entry);
+      return false;
+    }
+    if (expiresAt <= Date.now()) {
+      this.map.delete(key);
+      this.bytes -= entry.size;
+      this.expiries++;
+      this.bumpVersion(key);
+      return true;
+    }
+    entry.expiresAt = expiresAt;
+    this.map.delete(key);
+    this.map.set(key, entry);
+    this.bumpVersion(key);
+    return true;
   }
 
   /** Replace a key's TTL. Returns false if missing/expired. */

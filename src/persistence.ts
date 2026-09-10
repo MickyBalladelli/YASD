@@ -39,13 +39,18 @@ export interface SnapshotStore {
 
 /** One replayable mutation inside an AOF transaction. */
 export type AofMutation =
-  | { op: 'set'; key: string; value: SnapshotEntry['value']; ttlMs?: number }
-  | { op: 'mset'; entries: KVBatchEntry[] }
+  | { op: 'set'; key: string; value: SnapshotEntry['value']; ttlMs?: number; expiresAt?: number | null }
+  | { op: 'mset'; entries: AofBatchEntry[] }
   | { op: 'del'; keys: string[] }
   | { op: 'clear'; prefix: string }
-  | { op: 'expire'; key: string; ttlMs: number }
+  | { op: 'expire'; key: string; ttlMs?: number; expiresAt?: number }
   | { op: 'persist'; key: string }
   | { op: 'incr'; key: string; by: number };
+
+export type AofBatchEntry = KVBatchEntry & {
+  /** null = persistent, number = exact absolute expiry deadline. */
+  expiresAt?: number | null;
+};
 
 /** Replayable mutation ops for the append-only log. */
 export type AofOp = AofMutation | { op: 'transaction'; ops: AofMutation[] };
@@ -148,10 +153,20 @@ export async function loadSnapshot(
 export function applyAofOp(cache: KVCache, op: AofOp): void {
   switch (op.op) {
     case 'set':
-      cache.set(op.key, op.value, op.ttlMs);
+      if (Object.prototype.hasOwnProperty.call(op, 'expiresAt')) {
+        cache.setAt(op.key, op.value, op.expiresAt === null ? undefined : op.expiresAt);
+      } else {
+        cache.set(op.key, op.value, op.ttlMs);
+      }
       break;
     case 'mset':
-      cache.mset(op.entries);
+      for (const entry of op.entries) {
+        if (Object.prototype.hasOwnProperty.call(entry, 'expiresAt')) {
+          cache.setAt(entry.key, entry.value, entry.expiresAt === null ? undefined : entry.expiresAt);
+        } else {
+          cache.set(entry.key, entry.value, entry.ttlMs);
+        }
+      }
       break;
     case 'del':
       for (const key of op.keys) cache.del(key);
@@ -160,7 +175,11 @@ export function applyAofOp(cache: KVCache, op: AofOp): void {
       cache.clearPrefix(op.prefix);
       break;
     case 'expire':
-      cache.expire(op.key, op.ttlMs);
+      if (Object.prototype.hasOwnProperty.call(op, 'expiresAt')) {
+        cache.expireAt(op.key, op.expiresAt as number);
+      } else if (op.ttlMs !== undefined) {
+        cache.expire(op.key, op.ttlMs);
+      }
       break;
     case 'persist':
       cache.persist(op.key);
