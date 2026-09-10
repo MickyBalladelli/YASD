@@ -79,6 +79,19 @@ const TX_QUEUEABLE = new Set([
   'CAS',
 ]);
 
+/** Commands whose cache mutation must be covered by AOF persistence. */
+const AOF_COMMANDS = new Set([
+  'SET',
+  'MSET',
+  'DEL',
+  'CLEAR',
+  'EXPIRE',
+  'PERSIST',
+  'INCR',
+  'DECR',
+  'CAS',
+]);
+
 export interface YasdServerOptions {
   host?: string;
   port?: number;
@@ -119,6 +132,9 @@ export interface ServerInfo {
   misses: number;
   evictions: number;
   expiries: number;
+  aofEnabled: boolean;
+  aofDegraded: boolean;
+  aofLastError?: string;
   subscribers: number;
   channels: string[];
   /** Slow-command threshold in ms (0 = off). */
@@ -233,6 +249,8 @@ export class YasdServer {
   private autoSaveTimer?: ReturnType<typeof setInterval>;
   private closing = false;
   private startedAt = Date.now();
+  private aofDegraded = false;
+  private aofLastError?: string;
 
   readonly host: string;
   readonly port: number;
@@ -293,6 +311,9 @@ export class YasdServer {
       misses: s.misses,
       evictions: s.evictions,
       expiries: s.expiries,
+      aofEnabled: this.aof.enabled,
+      aofDegraded: this.aofDegraded,
+      ...(this.aofLastError === undefined ? {} : { aofLastError: this.aofLastError }),
       subscribers: this.hub.subscriberCount(),
       channels: this.hub.channelNames(),
       slowCommandMs: this.slow.threshold,
@@ -366,7 +387,12 @@ export class YasdServer {
     if (!target) throw new Error('SAVE requires a snapshot path');
     const snapshotSeq = this.aof.sequence;
     const n = await saveSnapshot(this.kv, target, { aofSeq: snapshotSeq });
-    this.aof.rotateAfter(snapshotSeq);
+    try {
+      this.aof.rotateAfter(snapshotSeq);
+      this.aofDegraded = false;
+    } catch (err) {
+      throw this.aofWriteError(err);
+    }
     return n;
   }
 
@@ -553,11 +579,20 @@ export class YasdServer {
   }
 
   private appendAof(op: AofOp): void {
+    if (!this.aof.enabled) return;
     try {
       this.aof.append(op);
-    } catch {
-      // AOF failures must not break serving; snapshot still works.
+      this.aofDegraded = false;
+    } catch (err) {
+      throw this.aofWriteError(err);
     }
+  }
+
+  private aofWriteError(err: unknown): Error {
+    const detail = err instanceof Error ? err.message : String(err);
+    this.aofDegraded = true;
+    this.aofLastError = detail;
+    return new Error(`AOF write failed: ${detail}`);
   }
 
   private logAof(op: AofMutation, effects?: TransactionEffects): void {
@@ -639,6 +674,9 @@ export class YasdServer {
           state.txQueue.push({ cmd, args });
           return { kind: 'simple', value: 'QUEUED' };
         }
+        if (this.aof.enabled && AOF_COMMANDS.has(cmd)) {
+          return this.kv.atomic(() => this.executeCommand(state, cmd, args));
+        }
         return this.executeCommand(state, cmd, args);
       }
     }
@@ -683,13 +721,13 @@ export class YasdServer {
           }
         }
         if (failed) throw abort;
+        if (effects.aof.length > 0) {
+          this.appendAof({ op: 'transaction', ops: effects.aof });
+        }
       });
     } catch (err) {
       if (err !== abort) throw err;
       return { kind: 'array', items };
-    }
-    if (effects.aof.length > 0) {
-      this.appendAof({ op: 'transaction', ops: effects.aof });
     }
     for (const event of effects.invalidations) {
       this.publishInvalidate(event);

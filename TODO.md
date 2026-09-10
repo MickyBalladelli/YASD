@@ -32,7 +32,7 @@ source.
   logged as a normal `set` without a TTL because the key is already gone
   (`src/server.ts:664-686`), so restart can resurrect it. Log the exact expiry
   result or omit the operation when it leaves no key.
-- [ ] Do not hide AOF write failures. `YasdServer.logAof()` swallows all errors
+- [x] Do not hide AOF write failures. `YasdServer.logAof()` swallows all errors
   (`src/server.ts:536-542`) even though the command is acknowledged. Surface a
   write failure, expose degraded persistence in `INFO`, and define whether the
   server rejects or serves writes when durability is unavailable.

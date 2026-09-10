@@ -340,6 +340,29 @@ async function runTests() {
     await recovered.close();
   });
 
+  await test('server: AOF write failure is surfaced and rolled back', async () => {
+    const dir = tmpDir();
+    const aof = path.join(dir, 'write-failure.aof');
+    const server = new YasdServer({ host: '127.0.0.1', port: 0, aofPath: aof });
+    await server.start();
+    const { port } = server.address();
+    const client = new YasdClient({ host: '127.0.0.1', port });
+    await client.connect();
+
+    await client.set('seed', 0);
+    fs.unlinkSync(aof);
+    fs.mkdirSync(aof);
+    await assert.rejects(client.set('lost', 1), /AOF write failed/);
+    assert.strictEqual(server.cache.get('lost'), undefined);
+    const info = await client.info();
+    assert.strictEqual(info.aofEnabled, true);
+    assert.strictEqual(info.aofDegraded, true);
+    assert.ok(info.aofLastError);
+
+    await client.close();
+    await server.close();
+  });
+
   await test('server: /healthz + SAVE/LOAD + graceful close', async () => {
     const dir = tmpDir();
     const snap = path.join(dir, 's.json');
