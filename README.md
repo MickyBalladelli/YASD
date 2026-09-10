@@ -229,6 +229,7 @@ await client.expire('ratelimit:post:alice', 60_000);
 
 // Pub/sub (invalidation, presence/typing). The server also publishes every
 // mutation on `__yasd__:invalidate` for other replicas to consume.
+// Invalidation events: set, del, clear, expire, persist, and load.
 const stop = await client.subscribe('presence', (ch, msg) => console.log(ch, msg));
 await client.publish('presence', JSON.stringify({ user: 'bob' }));
 

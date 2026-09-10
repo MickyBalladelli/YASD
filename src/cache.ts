@@ -172,6 +172,8 @@ function validateTTL(ttlMs: number, what: string): number {
   return ttlMs;
 }
 
+export type KVExpiryListener = (key: string) => void
+
 export class KVCache {
   private map = new Map<string, Entry>();
   private bytes = 0;
@@ -180,6 +182,8 @@ export class KVCache {
   private evictions = 0;
   private expiries = 0;
   private timer?: ReturnType<typeof setInterval>;
+  private expiryListener?: KVExpiryListener
+  private atomicFrames: Array<{ state: CacheState; expiredKeys: Set<string> }> = []
   /**
    * Per-key mutation generation for optimistic transactions (WATCH).
    * Bumped on every state change (writes, deletes, TTL changes, expiry).
@@ -195,12 +199,13 @@ export class KVCache {
   readonly namespaceTTLMs: Record<string, number>;
   readonly sweepIntervalMs: number;
 
-  constructor(options: KVOptions = {}) {
+  constructor(options: KVOptions = {}, expiryListener?: KVExpiryListener) {
     this.maxEntries = options.maxEntries ?? 10_000;
     this.maxBytes = options.maxBytes ?? 64 * 1024 * 1024;
     this.defaultTTLMs = options.defaultTTLMs;
     this.namespaceTTLMs = { ...DEFAULT_NAMESPACE_TTLS, ...(options.namespaceTTLMs ?? {}) };
     this.sweepIntervalMs = options.sweepIntervalMs ?? 1000;
+    this.expiryListener = expiryListener
     if (this.sweepIntervalMs > 0) {
       this.startSweeper(this.sweepIntervalMs);
     }
@@ -230,11 +235,36 @@ export class KVCache {
     return entry.expiresAt !== undefined && entry.expiresAt <= now;
   }
 
+  private notifyExpired(key: string): void {
+    const frame = this.atomicFrames[this.atomicFrames.length - 1]
+    if (frame) {
+      frame.expiredKeys.add(key)
+      return
+    }
+    try {
+      this.expiryListener?.(key)
+    } catch {
+      // Expiry observers must not break cache mutation.
+    }
+  }
+
+  private flushExpiryEvents(keys: Set<string>): void {
+    if (!this.expiryListener) return
+    for (const key of keys) {
+      try {
+        this.expiryListener(key)
+      } catch {
+        // Expiry observers must not break cache mutation.
+      }
+    }
+  }
+
   private removeExpired(key: string, entry: Entry): void {
     this.map.delete(key);
     this.bytes -= entry.size;
     this.expiries++;
     this.bumpVersion(key);
+    this.notifyExpired(key)
   }
 
   private captureState(): CacheState {
@@ -272,11 +302,21 @@ export class KVCache {
 
   /** Run synchronous work atomically, restoring all cache state on failure. */
   atomic<T>(fn: () => T): T {
-    const state = this.captureState();
+    const frame = { state: this.captureState(), expiredKeys: new Set<string>() }
+    this.atomicFrames.push(frame)
     try {
-      return fn();
+      const result = fn()
+      this.atomicFrames.pop()
+      const parent = this.atomicFrames[this.atomicFrames.length - 1]
+      if (parent) {
+        for (const key of frame.expiredKeys) parent.expiredKeys.add(key)
+      } else {
+        this.flushExpiryEvents(frame.expiredKeys)
+      }
+      return result
     } catch (err) {
-      this.restoreState(state);
+      this.atomicFrames.pop()
+      this.restoreState(frame.state)
       throw err;
     }
   }
@@ -684,6 +724,7 @@ export class KVCache {
       this.bytes -= entry.size;
       this.expiries++;
       this.bumpVersion(key);
+      this.notifyExpired(key)
       return true;
     }
     entry.expiresAt = expiresAt;
@@ -731,10 +772,7 @@ export class KVCache {
     let count = 0;
     for (const [key, entry] of Array.from(this.map)) {
       if (entry.expiresAt !== undefined && entry.expiresAt <= now) {
-        this.map.delete(key);
-        this.bytes -= entry.size;
-        this.expiries++;
-        this.bumpVersion(key);
+        this.removeExpired(key, entry)
         count++;
       }
     }

@@ -50,10 +50,8 @@ source.
   regression test.
 - [x] Treat AOF corruption deliberately. Replay now stops at middle corruption,
   tolerates only an incomplete final line, and exposes recovery state in INFO.
-- [ ] Publish every state mutation. `PERSIST` changes key state but emits no
-  invalidation (`src/server.ts:770-775`); background expiry and `LOAD` also do
-  not fan out changes. Add expiry/clear-load events or document the consistency
-  contract for local replica caches.
+- [x] Publish every state mutation. `PERSIST`, background expiry, and `LOAD`
+  now publish invalidation events for local replica caches.
 - [ ] Prevent public bypasses of server hooks. `YasdServer.cache` exposes the
   raw `KVCache` (`src/server.ts:259-262`), so callers can mutate data without
   AOF logging or invalidation. Return a controlled facade or make the raw cache

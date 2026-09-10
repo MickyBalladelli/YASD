@@ -10,7 +10,7 @@ export const INVALIDATE_CHANNEL = '__yasd__:invalidate';
 export type PubSubListener = (channel: string, message: string) => void;
 
 export interface InvalidationEvent {
-  event: 'set' | 'del' | 'clear' | 'expire';
+  event: 'set' | 'del' | 'clear' | 'expire' | 'persist' | 'load'
   key?: string;
   prefix?: string;
 }

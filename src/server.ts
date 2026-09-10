@@ -281,7 +281,7 @@ export class YasdServer {
   constructor(options: YasdServerOptions = {}) {
     this.host = options.host ?? DEFAULT_HOST;
     this.port = options.port ?? DEFAULT_PORT;
-    this.kv = new KVCache(options.cache);
+    this.kv = new KVCache(options.cache, key => this.onCacheExpiry(key))
     this.aof = new AofLog(options.aofPath);
     this.snapshotPath = options.snapshotPath;
     this.aofPath = options.aofPath;
@@ -427,9 +427,11 @@ export class YasdServer {
   async load(snapshotPath?: string): Promise<number> {
     const target = snapshotPath ?? this.snapshotPath;
     if (!target) throw new Error('LOAD requires a snapshot path');
-    return this.enqueuePersistence(() =>
-      loadSnapshot(this.kv, target, { clearFirst: true, missingOk: false })
-    );
+    return this.enqueuePersistence(async () => {
+      const count = await loadSnapshot(this.kv, target, { clearFirst: true, missingOk: false })
+      this.publishInvalidate({ event: 'load' })
+      return count
+    })
   }
 
   /** Graceful shutdown: stop accepting, drain sockets, final SAVE, stop timers. */
@@ -654,6 +656,10 @@ export class YasdServer {
     } catch {
       // ignore
     }
+  }
+
+  private onCacheExpiry(key: string): void {
+    this.publishInvalidate({ event: 'expire', key })
   }
 
   private parseValue(json: string): SnapshotEntry['value'] {
@@ -911,7 +917,10 @@ export class YasdServer {
       case 'PERSIST': {
         this.requireArgs(cmd, args, 1);
         const ok = this.kv.persist(args[0] as string);
-        if (ok) this.logAof({ op: 'persist', key: args[0] as string }, effects);
+        if (ok) {
+          this.logAof({ op: 'persist', key: args[0] as string }, effects)
+          this.publishInvalidate({ event: 'persist', key: args[0] as string }, effects)
+        }
         return { kind: 'int', value: ok ? 1 : 0 };
       }
 

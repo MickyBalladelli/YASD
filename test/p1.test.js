@@ -353,6 +353,40 @@ async function runTests() {
     await server.close();
   });
 
+  await test('server: PERSIST, expiry, and LOAD publish invalidations', async () => {
+    const dir = tmpDir()
+    const snap = path.join(dir, 'invalidation-load.json')
+    const server = new YasdServer({
+      host: '127.0.0.1', port: 0, snapshotPath: snap,
+      cache: { sweepIntervalMs: 10 },
+    })
+    await server.start()
+    const { port } = server.address()
+    const sub = new YasdClient({ host: '127.0.0.1', port })
+    const client = new YasdClient({ host: '127.0.0.1', port })
+    await sub.connect()
+    await client.connect()
+
+    const invalid = []
+    const unsub = await sub.subscribe('__yasd__:invalidate', (ch, msg) => invalid.push(JSON.parse(msg)))
+    await client.set('persist:key', 1, 1000)
+    assert.strictEqual(await client.persist('persist:key'), true)
+    await client.set('expire:key', 1, 50)
+    await client.save()
+    await client.set('stale:key', 2)
+    await client.load()
+    await sleep(150)
+
+    assert.ok(invalid.some(e => e.event === 'persist' && e.key === 'persist:key'))
+    assert.ok(invalid.some(e => e.event === 'expire' && e.key === 'expire:key'))
+    assert.ok(invalid.some(e => e.event === 'load'))
+
+    await unsub()
+    await sub.close()
+    await client.close()
+    await server.close()
+  })
+
   await test('server: CAS PX 0 stays absent after AOF replay', async () => {
     const dir = tmpDir();
     const aof = path.join(dir, 'cas-zero.aof');

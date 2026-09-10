@@ -3,7 +3,7 @@
 // path (for Echo hot feeds, channel lists, presence/typing, rate limits).
 
 import { Executor, SlowQueryEntry, QueryPlan, QueryProfile } from './executor';
-import { KVCache, KVOptions, KVStats, KVBatchEntry, KVTransaction, TransactionError, TxResult, SnapshotEntry, DEFAULT_NAMESPACE_TTLS } from './cache';
+import { KVCache, KVOptions, KVExpiryListener, KVStats, KVBatchEntry, KVTransaction, TransactionError, TxResult, SnapshotEntry, DEFAULT_NAMESPACE_TTLS } from './cache'
 import { PubSubHub, PubSubListener, INVALIDATE_CHANNEL, InvalidationEvent } from './pubsub';
 import { parse } from './parser';
 import {
@@ -26,6 +26,7 @@ export type {
   TableSchema,
   SqlStatement,
   KVOptions,
+  KVExpiryListener,
   KVStats,
   KVBatchEntry,
   TxResult,
