@@ -153,6 +153,13 @@ export interface YasdServerOptions {
   password?: string;
   /** TLS identity and optional client-certificate settings. */
   tls?: YasdServerTlsOptions;
+  /** Aggregate per-connection and server admission budgets. */
+  maxConnections?: number;
+  maxQueuedRequests?: number;
+  maxTransactionCommands?: number;
+  maxTransactionBytes?: number;
+  maxWatchedKeys?: number;
+  maxSubscriptions?: number;
 }
 
 export interface YasdHealthOptions {
@@ -593,18 +600,44 @@ export class YasdServer {
   readonly healthExposeDetails: boolean;
   readonly authRequired: boolean;
   readonly tlsEnabled: boolean;
+  readonly maxConnections: number;
+  readonly maxQueuedRequests: number;
+  readonly maxTransactionCommands: number;
+  readonly maxTransactionBytes: number;
+  readonly maxWatchedKeys: number;
+  readonly maxSubscriptions: number;
   private password: string | undefined;
   private healthToken: string | undefined;
   private tlsOptions: YasdServerTlsOptions | undefined;
   private slow = new SlowLog();
 
   constructor(options: YasdServerOptions = {}) {
+    if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error('server options must be an object');
+    for (const key of ['loadOnStart', 'saveOnShutdown'] as const) {
+      if (options[key] !== undefined && typeof options[key] !== 'boolean') throw new Error(`${key} must be true or false`);
+    }
+    for (const key of ['snapshotPath', 'aofPath'] as const) {
+      if (options[key] !== undefined && (typeof options[key] !== 'string' || !options[key]?.trim() || options[key]?.includes('\0'))) {
+        throw new Error(`${key} must be a non-empty file path`);
+      }
+    }
+    if (options.snapshotPath && options.aofPath && path.resolve(options.snapshotPath) === path.resolve(options.aofPath)) {
+      throw new Error('snapshotPath and aofPath must be different files');
+    }
+    if (options.password !== undefined && typeof options.password !== 'string') throw new Error('password must be a string');
+    const cacheOptions = validateKVOptions(options.cache);
+    if ((cacheOptions.maxValueBytes as number) > 4 * 1024 * 1024 || (cacheOptions.maxKeyBytes as number) > 1024 * 1024) {
+      throw new Error('server cache limits exceed the RESP wire limits (4 MiB values, 1 MiB keys)');
+    }
+    this.maxConnections = validatePositiveSafeInteger(options.maxConnections ?? 1024, 'maxConnections');
+    this.maxQueuedRequests = validatePositiveSafeInteger(options.maxQueuedRequests ?? 1024, 'maxQueuedRequests');
+    this.maxTransactionCommands = validatePositiveSafeInteger(options.maxTransactionCommands ?? 1024, 'maxTransactionCommands', 1024);
+    this.maxTransactionBytes = validatePositiveSafeInteger(options.maxTransactionBytes ?? 8 * 1024 * 1024, 'maxTransactionBytes');
+    this.maxWatchedKeys = validatePositiveSafeInteger(options.maxWatchedKeys ?? 1024, 'maxWatchedKeys');
+    this.maxSubscriptions = validatePositiveSafeInteger(options.maxSubscriptions ?? 1024, 'maxSubscriptions');
     const health = resolveHealthOptions(options.health);
     this.host = options.host === undefined ? DEFAULT_HOST : validateHost(options.host, 'host');
     this.port = options.port === undefined ? DEFAULT_PORT : validatePort(options.port, 'port');
-    this.kv = new KVCache(options.cache, key => this.onCacheExpiry(key))
-    this.aof = new AofLog(options.aofPath);
-    this.syncAofRecoveryStatus();
     this.snapshotPath = options.snapshotPath;
     this.aofPath = options.aofPath;
     this.loadOnStart = options.loadOnStart ?? true;
@@ -1252,6 +1285,10 @@ export class YasdServer {
       if (reply !== 'silent') {
         this.writeReply(state, reply);
       }
+      if (overBudget) {
+        this.endSocket(state);
+        return 'close';
+      }
     } catch (err) {
       this.writeReply(state, { kind: 'error', message: `ERR ${(err as Error).message}` });
     } finally {
@@ -1788,31 +1825,9 @@ export class YasdServer {
         return { kind: 'bulk', value: JSON.stringify(this.info()) };
       }
 
-      case 'SAVE': {
-        if (args.length > 1) throw new Error('SAVE takes an optional path');
-        const path = args[0];
-        // save() is async; block the event loop minimally by chaining.
-        // To keep command handling synchronous, run and reply when done.
-        this.save(path)
-          .then(
-            () => this.writeReply(state, { kind: 'simple', value: 'OK' }),
-            () => this.writeReply(state, { kind: 'error', message: 'ERR SAVE failed; inspect INFO persistence' })
-          )
-          .catch(() => undefined);
-        return 'silent';
-      }
-
-      case 'LOAD': {
-        if (args.length > 1) throw new Error('LOAD takes an optional path');
-        const path = args[0];
-        this.load(path)
-          .then(
-            count => this.writeReply(state, { kind: 'simple', value: `OK ${count}` }),
-            () => this.writeReply(state, { kind: 'error', message: 'ERR LOAD failed; inspect INFO persistence' })
-          )
-          .catch(() => undefined);
-        return 'silent';
-      }
+      case 'SAVE':
+      case 'LOAD':
+        throw new DatabaseError(`${cmd} requires asynchronous dispatch`, 'COMMAND_ERROR');
 
       default:
         throw new Error(`unknown command: ${cmd}`);

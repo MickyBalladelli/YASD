@@ -1241,7 +1241,11 @@ export class YasdTransaction {
   /** Immediate TTL read (must precede MULTI). */
   async ttl(key: string): Promise<number> {
     this.assertReadable('TTL');
-    const reply = await this.send(['TTL', key]);
+    const reply = await this.serialize(async () => {
+      if (this.begun) throw new TransactionError('TTL must precede MULTI');
+      await this.connect();
+      return this.send(['TTL', key]);
+    });
     if (reply.kind === 'int') return reply.value;
     throw new Error(`unexpected TTL reply: ${JSON.stringify(reply)}`);
   }

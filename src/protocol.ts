@@ -105,7 +105,7 @@ export function encodeSimple(s: string): Buffer {
 }
 
 export function encodeError(message: string): Buffer {
-  const oneLine = String(message).split('\r\n')[0];
+  const oneLine = String(message).replace(/[\r\n]/g, ' ');
   return Buffer.from(`-${oneLine}${CRLF}`, 'utf8');
 }
 

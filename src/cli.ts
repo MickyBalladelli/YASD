@@ -1,229 +1,85 @@
 #!/usr/bin/env node
-// `yasd-server` — standalone YASD cache server for multi-instance Echo.
-// Config via flags or env (flags win):
-//   --port 7379            YASD_PORT
-//   --host 0.0.0.0         YASD_HOST
-//   --snapshot /data/s.json YASD_SNAPSHOT
-//   --aof /data/a.aof      YASD_AOF
-//   --auto-save-ms 60000   YASD_AUTO_SAVE_MS
-//   --no-load              YASD_LOAD_ON_START=0
-//   --no-save-on-shutdown  YASD_SAVE_ON_SHUTDOWN=0
-//   --max-entries 10000    CACHE_MAX_ENTRIES
-//   --max-bytes 67108864   CACHE_MAX_BYTES
-//   --max-key-bytes 1024   CACHE_MAX_KEY_BYTES
-//   --max-value-bytes 4194304 CACHE_MAX_VALUE_BYTES
-//   --default-ttl-ms 15000 CACHE_DEFAULT_TTL_MS
-//   --slow-command-ms 5    YASD_SLOW_COMMAND_MS (slow-command log threshold)
-//   --max-pending-output-bytes 1048576 YASD_MAX_PENDING_OUTPUT_BYTES
-//   --max-command-ms 1000  YASD_MAX_COMMAND_MS
-//   --idle-connection-timeout-ms 60000 YASD_IDLE_CONNECTION_TIMEOUT_MS
-//   --shutdown-deadline-ms 2000 YASD_SHUTDOWN_DEADLINE_MS
-//   --health-details        YASD_HEALTH_DETAILS (expose operational health data)
-//   --health-token secret   YASD_HEALTH_TOKEN (protect operational health data)
-//   --password s3cret      YASD_PASSWORD (AUTH required)
-//   --tls-key key.pem      YASD_TLS_KEY (PEM path; needs --tls-cert)
-//   --tls-cert cert.pem    YASD_TLS_CERT (PEM path; needs --tls-key)
-//   --tls-ca ca.pem        YASD_TLS_CA (optional client CA)
-//   --tls-min-version      YASD_TLS_MIN_VERSION (for example TLSv1.3)
+import { YasdServer, YasdServerOptions, serverOptionsFromEnv } from './server';
 
-import * as fs from 'fs';
-import { YasdServer, serverOptionsFromEnv } from './server';
-import {
-  parsePort,
-  parseStrictInteger,
-  parseStrictNonNegativeNumber,
-  validateTimeout,
-} from './validation';
+const flags: Record<string, string> = {
+  port: 'YASD_PORT', host: 'YASD_HOST', snapshot: 'YASD_SNAPSHOT', aof: 'YASD_AOF',
+  'auto-save-ms': 'YASD_AUTO_SAVE_MS', load: 'YASD_LOAD_ON_START',
+  'save-on-shutdown': 'YASD_SAVE_ON_SHUTDOWN', 'max-entries': 'CACHE_MAX_ENTRIES',
+  'max-bytes': 'CACHE_MAX_BYTES', 'max-key-bytes': 'CACHE_MAX_KEY_BYTES',
+  'max-value-bytes': 'CACHE_MAX_VALUE_BYTES', 'default-ttl-ms': 'CACHE_DEFAULT_TTL_MS',
+  'namespace-ttls': 'CACHE_NAMESPACE_TTLS', 'slow-command-ms': 'YASD_SLOW_COMMAND_MS',
+  'max-pending-output-bytes': 'YASD_MAX_PENDING_OUTPUT_BYTES', 'max-command-ms': 'YASD_MAX_COMMAND_MS',
+  'idle-connection-timeout-ms': 'YASD_IDLE_CONNECTION_TIMEOUT_MS', 'shutdown-deadline-ms': 'YASD_SHUTDOWN_DEADLINE_MS',
+  'health-details': 'YASD_HEALTH_DETAILS', 'health-token': 'YASD_HEALTH_TOKEN',
+  password: 'YASD_PASSWORD', requirepass: 'YASD_PASSWORD', 'tls-key': 'YASD_TLS_KEY',
+  'tls-cert': 'YASD_TLS_CERT', 'tls-ca': 'YASD_TLS_CA', 'tls-min-version': 'YASD_TLS_MIN_VERSION',
+  'tls-request-cert': 'YASD_TLS_REQUEST_CERT', 'tls-reject-unauthorized': 'YASD_TLS_REJECT_UNAUTHORIZED',
+  'max-connections': 'YASD_MAX_CONNECTIONS', 'max-queued-requests': 'YASD_MAX_QUEUED_REQUESTS',
+  'max-transaction-commands': 'YASD_MAX_TRANSACTION_COMMANDS', 'max-transaction-bytes': 'YASD_MAX_TRANSACTION_BYTES',
+  'max-watched-keys': 'YASD_MAX_WATCHED_KEYS', 'max-subscriptions': 'YASD_MAX_SUBSCRIPTIONS',
+};
+const booleans = new Set(['load', 'save-on-shutdown', 'health-details', 'tls-request-cert', 'tls-reject-unauthorized']);
 
-function parseArgv(argv: string[]): Record<string, string | boolean> {
-  const out: Record<string, string | boolean> = {};
+/** Merge flags before parsing: a valid flag can override an invalid environment value. */
+export function resolveCliOptions(argv: string[], env: NodeJS.ProcessEnv = process.env): YasdServerOptions {
+  const merged = { ...env };
   for (let i = 0; i < argv.length; i++) {
-    const raw = argv[i] as string;
-    if (!raw.startsWith('--')) continue;
-    const eq = raw.indexOf('=');
-    if (eq !== -1) {
-      out[raw.slice(2, eq)] = raw.slice(eq + 1);
-      continue;
+    const match = /^--([^=]+)(?:=(.*))?$/.exec(argv[i]);
+    if (!match) throw new Error(`unexpected argument: ${argv[i]}`);
+    let name = match[1];
+    const negated = name.startsWith('no-');
+    if (negated) name = name.slice(3);
+    if (!Object.prototype.hasOwnProperty.call(flags, name) || (negated && !booleans.has(name))) {
+      throw new Error(`unknown option: --${match[1]}`);
     }
-    const key = raw.slice(2);
-    if (key.startsWith('no-')) {
-      out[key] = false;
-      continue;
+    let value = match[2];
+    if (negated) {
+      if (value !== undefined) throw new Error(`--no-${name} takes no value`);
+      value = 'false';
+    } else if (value === undefined) {
+      if (booleans.has(name)) {
+        const next = argv[i + 1];
+        if (next && /^(true|false|0|1)$/i.test(next)) { value = next; i++; }
+        else value = 'true';
+      } else {
+        value = argv[++i];
+        if (value === undefined || value.startsWith('--')) throw new Error(`--${name} requires a value`);
+      }
     }
-    const next = argv[i + 1];
-    if (next !== undefined && !next.startsWith('--')) {
-      out[key] = next;
-      i++;
-    } else {
-      out[key] = true;
-    }
+    merged[flags[name]] = value;
   }
-  return out;
-}
-
-function stringArg(args: Record<string, string | boolean>, name: string): string | undefined {
-  const value = args[name];
-  if (value === undefined) return undefined;
-  if (typeof value !== 'string') throw new Error(`--${name} requires a value`);
-  return value;
-}
-
-function booleanArg(args: Record<string, string | boolean>, name: string): boolean | undefined {
-  const value = args[name];
-  if (value === undefined) return undefined;
-  if (typeof value === 'boolean') return value;
-  if (value === '1' || value.toLowerCase() === 'true') return true;
-  if (value === '0' || value.toLowerCase() === 'false') return false;
-  throw new Error(`--${name} must be true/false or 1/0`);
+  return serverOptionsFromEnv(merged);
 }
 
 async function main(): Promise<void> {
-  const args = parseArgv(process.argv.slice(2));
-  if (args.help === true || args.h === true) {
-    console.log('Usage: yasd-server [options]');
-    console.log('  --port, --host, --snapshot, --aof, --auto-save-ms,');
-    console.log('  --no-load, --no-save-on-shutdown,');
-    console.log('  --max-entries, --max-bytes, --max-key-bytes, --max-value-bytes,');
-    console.log('  --default-ttl-ms, --slow-command-ms, --max-pending-output-bytes,');
-    console.log('  --max-command-ms, --idle-connection-timeout-ms, --shutdown-deadline-ms,');
-    console.log('  --health-details, --health-token <token>,');
-    console.log('  --password, --tls-key <pem>, --tls-cert <pem>, --tls-ca <pem>');
-    console.log('Env: YASD_PORT YASD_HOST YASD_SNAPSHOT YASD_AOF YASD_AUTO_SAVE_MS');
-    console.log('     YASD_SLOW_COMMAND_MS YASD_MAX_PENDING_OUTPUT_BYTES YASD_MAX_COMMAND_MS');
-    console.log('     YASD_IDLE_CONNECTION_TIMEOUT_MS YASD_SHUTDOWN_DEADLINE_MS');
-    console.log('     YASD_HEALTH_DETAILS YASD_HEALTH_TOKEN');
-    console.log('     CACHE_MAX_ENTRIES CACHE_MAX_BYTES CACHE_MAX_KEY_BYTES CACHE_MAX_VALUE_BYTES');
-    console.log('     CACHE_DEFAULT_TTL_MS CACHE_NAMESPACE_TTLS');
-    console.log('     YASD_PASSWORD YASD_TLS_KEY YASD_TLS_CERT YASD_TLS_CA YASD_TLS_MIN_VERSION');
-    console.log('     YASD_TLS_REQUEST_CERT YASD_TLS_REJECT_UNAUTHORIZED');
+  const argv = process.argv.slice(2);
+  if (argv.includes('--help') || argv.includes('-h') || argv.includes('--h')) {
+    console.log('Usage: yasd-server [options]\nBoolean options also accept --no-<option>.');
+    for (const [flag, env] of Object.entries(flags)) console.log(`  --${flag}${booleans.has(flag) ? '[=true|false]' : ' <value>'}  ${env}`);
     return;
   }
-
-  const base = serverOptionsFromEnv(process.env);
-  const port = stringArg(args, 'port');
-  if (port !== undefined) base.port = parsePort(port, '--port');
-  const host = stringArg(args, 'host');
-  if (host !== undefined) base.host = host;
-  const snapshot = stringArg(args, 'snapshot');
-  if (snapshot !== undefined) base.snapshotPath = snapshot;
-  const aof = stringArg(args, 'aof');
-  if (aof !== undefined) base.aofPath = aof;
-  const autoSaveMs = stringArg(args, 'auto-save-ms');
-  if (autoSaveMs !== undefined) {
-    base.autoSaveMs = parseStrictNonNegativeNumber(autoSaveMs, '--auto-save-ms');
-  }
-  if (args.load === false) base.loadOnStart = false;
-  if (args['save-on-shutdown'] === false) base.saveOnShutdown = false;
-  base.cache = base.cache ?? {};
-  const maxEntries = stringArg(args, 'max-entries');
-  if (maxEntries !== undefined) {
-    base.cache.maxEntries = parseStrictInteger(maxEntries, '--max-entries', 1);
-  }
-  const maxBytes = stringArg(args, 'max-bytes');
-  if (maxBytes !== undefined) {
-    base.cache.maxBytes = parseStrictInteger(maxBytes, '--max-bytes', 1);
-  }
-  const maxKeyBytes = stringArg(args, 'max-key-bytes');
-  if (maxKeyBytes !== undefined) {
-    base.cache.maxKeyBytes = parseStrictInteger(maxKeyBytes, '--max-key-bytes', 1);
-  }
-  const maxValueBytes = stringArg(args, 'max-value-bytes');
-  if (maxValueBytes !== undefined) {
-    base.cache.maxValueBytes = parseStrictInteger(maxValueBytes, '--max-value-bytes', 1);
-  }
-  const defaultTtlMs = stringArg(args, 'default-ttl-ms');
-  if (defaultTtlMs !== undefined) {
-    base.cache.defaultTTLMs = parseStrictNonNegativeNumber(defaultTtlMs, '--default-ttl-ms');
-  }
-  const slowCommandMs = stringArg(args, 'slow-command-ms');
-  if (slowCommandMs !== undefined) {
-    base.slowCommandMs = parseStrictNonNegativeNumber(slowCommandMs, '--slow-command-ms');
-  }
-  const maxPendingOutputBytes = stringArg(args, 'max-pending-output-bytes');
-  if (maxPendingOutputBytes !== undefined) {
-    base.maxPendingOutputBytes = parseStrictInteger(
-      maxPendingOutputBytes,
-      '--max-pending-output-bytes',
-      1
-    );
-  }
-  const maxCommandMs = stringArg(args, 'max-command-ms');
-  if (maxCommandMs !== undefined) {
-    base.maxCommandMs = validateTimeout(
-      parseStrictNonNegativeNumber(maxCommandMs, '--max-command-ms'),
-      '--max-command-ms'
-    );
-  }
-  const idleConnectionTimeoutMs = stringArg(args, 'idle-connection-timeout-ms');
-  if (idleConnectionTimeoutMs !== undefined) {
-    base.idleConnectionTimeoutMs = validateTimeout(
-      parseStrictNonNegativeNumber(
-        idleConnectionTimeoutMs,
-        '--idle-connection-timeout-ms'
-      ),
-      '--idle-connection-timeout-ms'
-    );
-  }
-  const shutdownDeadlineMs = stringArg(args, 'shutdown-deadline-ms');
-  if (shutdownDeadlineMs !== undefined) {
-    base.shutdownDeadlineMs = validateTimeout(
-      parseStrictNonNegativeNumber(
-        shutdownDeadlineMs,
-        '--shutdown-deadline-ms'
-      ),
-      '--shutdown-deadline-ms'
-    );
-  }
-  const healthDetails = booleanArg(args, 'health-details');
-  const healthToken = stringArg(args, 'health-token');
-  if (healthDetails !== undefined || healthToken !== undefined) {
-    base.health = {
-      ...base.health,
-      ...(healthDetails === undefined ? {} : { exposeDetails: healthDetails }),
-      ...(healthToken === undefined ? {} : { token: healthToken }),
-    };
-  }
-  const password = stringArg(args, 'password');
-  if (password !== undefined) base.password = password;
-  const requirepass = stringArg(args, 'requirepass');
-  if (requirepass !== undefined) base.password = requirepass;
-  const tlsKey = args['tls-key'];
-  const tlsCert = args['tls-cert'];
-  if (tlsKey !== undefined || tlsCert !== undefined) {
-    if (typeof tlsKey !== 'string' || typeof tlsCert !== 'string') {
-      throw new Error('--tls-key and --tls-cert must both be PEM file paths');
-    }
-    base.tls = { key: fs.readFileSync(tlsKey, 'utf8'), cert: fs.readFileSync(tlsCert, 'utf8') };
-  }
-  const tlsCa = args['tls-ca'];
-  if (tlsCa !== undefined) {
-    if (typeof tlsCa !== 'string') throw new Error('--tls-ca must be a PEM file path');
-    if (!base.tls) throw new Error('--tls-ca requires TLS key and cert');
-    base.tls.ca = fs.readFileSync(tlsCa, 'utf8');
-  }
-
-  const server = new YasdServer(base);
-  const shutdown = (signal: string): void => {
-    console.log(`yasd: ${signal}, shutting down...`);
-    server
-      .close()
-      .then(() => process.exit(0))
-      .catch(err => {
-        console.error(`yasd: shutdown error: ${(err as Error).message}`);
-        process.exit(1);
-      });
+  const server = new YasdServer(resolveCliOptions(argv));
+  let stopping: Promise<void> | undefined;
+  const shutdown = (): void => {
+    if (stopping) return;
+    stopping = server.close().then(() => { process.exitCode = 0; }, error => {
+      console.error(`yasd: shutdown error: ${error.message}`);
+      process.exitCode = 1;
+    });
   };
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-
-  await server.start();
-  const addr = server.address();
-  console.log(`yasd: listening on ${addr.host}:${addr.port} (ready: http://${addr.host}:${addr.port}/readyz)`);
-  if (base.snapshotPath) console.log(`yasd: snapshot: ${base.snapshotPath}`);
-  if (base.aofPath) console.log(`yasd: aof: ${base.aofPath}`);
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  try {
+    await server.start();
+    const addr = server.address();
+    console.log(`yasd: listening on ${addr.host}:${addr.port} (ready: ${server.tlsEnabled ? 'https' : 'http'}://${addr.host}:${addr.port}/readyz)`);
+  } catch (error) {
+    await server.close().catch(() => undefined);
+    throw error;
+  }
 }
 
-main().catch(err => {
-  console.error(`yasd: failed to start: ${(err as Error).message}`);
-  process.exit(1);
+if (require.main === module) main().catch(error => {
+  console.error(`yasd: failed to start: ${error.message}`);
+  process.exitCode = 1;
 });
