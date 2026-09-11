@@ -1223,7 +1223,11 @@ export class YasdTransaction {
   /** Immediate batch read (must precede MULTI). */
   async mget(keys: string[]): Promise<Array<Value | undefined>> {
     this.assertReadable('MGET');
-    const reply = await this.send(['MGET', ...keys]);
+    const reply = await this.serialize(async () => {
+      if (this.begun) throw new TransactionError('MGET must precede MULTI');
+      await this.connect();
+      return this.send(['MGET', ...keys]);
+    });
     if (reply.kind !== 'array') throw new Error(`unexpected MGET reply: ${JSON.stringify(reply)}`);
     return reply.items.map(item => {
       if (item === null) return undefined;

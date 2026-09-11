@@ -219,6 +219,7 @@ export async function loadSnapshot(
     !file ||
     typeof file !== 'object' ||
     (file.version !== 1 && file.version !== 2) ||
+    !Number.isFinite(file.savedAt) ||
     !Array.isArray(file.entries) ||
     (file.aofSeq !== undefined && (!Number.isSafeInteger(file.aofSeq) || file.aofSeq < 0))
   ) {

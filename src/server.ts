@@ -55,6 +55,7 @@ import {
   RespDecoder,
   RespReply,
   encodeReply,
+  replyByteLength,
   encodeCommand,
   requestArgv,
 } from './protocol';
@@ -1207,7 +1208,7 @@ export class YasdServer {
   }
 
   /** Returns 'close' when the connection was ended (QUIT). */
-  private onRequest(state: ConnState, request: RespReply): 'ok' | 'close' {
+  private async onRequest(state: ConnState, request: RespReply): Promise<'ok' | 'close'> {
     let argv: string[];
     try {
       argv = requestArgv(request);
@@ -1227,16 +1228,22 @@ export class YasdServer {
     const started = performance.now();
     let durationMs: number | undefined;
     try {
-      const reply = this.dispatch(state, cmd, argv.slice(1));
-      durationMs = performance.now() - started;
-      if (this.maxCommandMs > 0 && durationMs > this.maxCommandMs) {
-        this.writeReply(state, {
-          kind: 'error',
-          message: `ERR command exceeded maxCommandMs (${this.maxCommandMs} ms)`,
-        });
-        this.endSocket(state);
-        return 'close';
+      let reply: RespReply | 'silent' | 'close';
+      if ((cmd === 'SAVE' || cmd === 'LOAD') && state.txQueue === null) {
+        this.requireArgs(cmd, argv.slice(1), 0, 1);
+        const requested = argv[1];
+        if (requested !== undefined && (!this.snapshotPath || path.resolve(requested) !== path.resolve(this.snapshotPath))) {
+          throw new DatabaseError('remote SAVE/LOAD may only use the configured snapshot path', 'AUTH_ERROR');
+        }
+        if (cmd === 'SAVE') { await this.save(); reply = { kind: 'simple', value: 'OK' }; }
+        else { const count = await this.load(); reply = { kind: 'simple', value: `OK ${count}` }; }
+      } else {
+        reply = this.dispatch(state, cmd, argv.slice(1));
       }
+      durationMs = performance.now() - started;
+      // Synchronous work cannot be cancelled after commit. Return its real outcome,
+      // then close after draining if it exceeded the configured command budget.
+      const overBudget = this.maxCommandMs > 0 && durationMs > this.maxCommandMs;
       if (reply === 'close') {
         this.writeReply(state, { kind: 'simple', value: 'OK' });
         this.endSocket(state);
