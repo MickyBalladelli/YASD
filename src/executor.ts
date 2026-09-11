@@ -528,22 +528,21 @@ export class Executor {
 
     // Apply ORDER BY
     if (orderBy) {
-      rows.sort((a, b) => {
-        const aVal = a[orderBy.column];
-        const bVal = b[orderBy.column];
-
-        if (aVal === null || aVal === undefined) return 1;
-        if (bVal === null || bVal === undefined) return -1;
-
-        let comparison = 0;
-        if (typeof aVal === 'number' && typeof bVal === 'number') {
-          comparison = aVal - bVal;
-        } else {
-          comparison = String(aVal).localeCompare(String(bVal));
+      const orderedRows = rows.map((row, position) => ({ row, position }));
+      orderedRows.sort((a, b) => {
+        const comparison = this.compareOrderValues(
+          a.row[orderBy.column],
+          b.row[orderBy.column]
+        );
+        if (comparison !== 0) {
+          const aNull = a.row[orderBy.column] === null || a.row[orderBy.column] === undefined;
+          const bNull = b.row[orderBy.column] === null || b.row[orderBy.column] === undefined;
+          if (!aNull && !bNull && orderBy.direction === 'desc') return -comparison;
+          return comparison;
         }
-
-        return orderBy.direction === 'asc' ? comparison : -comparison;
+        return a.position - b.position;
       });
+      rows = orderedRows.map(entry => entry.row);
     }
 
     // Apply OFFSET and LIMIT
@@ -823,6 +822,50 @@ export class Executor {
     }
 
     return String(a).localeCompare(String(b));
+  }
+
+  private compareOrderValues(a: Value | undefined, b: Value | undefined): number {
+    const aNull = a === null || a === undefined;
+    const bNull = b === null || b === undefined;
+    if (aNull || bNull) {
+      if (aNull && bNull) return 0;
+      return aNull ? 1 : -1;
+    }
+
+    const aRank = this.orderTypeRank(a);
+    const bRank = this.orderTypeRank(b);
+    if (aRank !== bRank) return aRank - bRank;
+
+    if (typeof a === 'number' && typeof b === 'number') {
+      const aFinite = Number.isFinite(a);
+      const bFinite = Number.isFinite(b);
+      if (aFinite !== bFinite) return aFinite ? -1 : 1;
+      if (a < b) return -1;
+      if (a > b) return 1;
+      return 0;
+    }
+
+    if (typeof a === 'string' && typeof b === 'string') {
+      return a.localeCompare(b);
+    }
+
+    if (typeof a === 'boolean' && typeof b === 'boolean') {
+      return a === b ? 0 : a ? 1 : -1;
+    }
+
+    try {
+      return JSON.stringify(a).localeCompare(JSON.stringify(b));
+    } catch {
+      return String(a).localeCompare(String(b));
+    }
+  }
+
+  private orderTypeRank(value: Value): number {
+    if (typeof value === 'number') return 0;
+    if (typeof value === 'string') return 1;
+    if (typeof value === 'boolean') return 2;
+    if (Array.isArray(value)) return 3;
+    return 4;
   }
 
   private likeCompare(value: string, pattern: string): boolean {

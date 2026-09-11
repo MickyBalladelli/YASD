@@ -171,6 +171,11 @@ DROP TABLE table_name
 - OR: `age > 25 OR name = 'John'`
 - NOT: `NOT (age > 25)`
 
+ORDER BY places NULL values last for both ASC and DESC. When an `any` column
+contains mixed types, non-NULL values sort by type (`number`, `string`,
+`boolean`, `array`, then `object`), then by value. Equal sort keys keep their
+input row order.
+
 String literals use single or double quotes. Escape characters with backslash:
 `\\`, `\'`, `\"`, `\n`, `\r`, `\t`, `\0`, `\b`, `\f`, and `\v`; SQL-style
 doubled delimiters (`''` and `""`) are also supported. `NULL`, `TRUE`, and

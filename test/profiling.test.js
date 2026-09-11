@@ -337,6 +337,22 @@ async function runTests() {
     db.close()
   })
 
+  await test('ORDER BY keeps NULL last and mixed values deterministic', async () => {
+    const db = new YASD({ sweepIntervalMs: 0 })
+    db.query('CREATE TABLE order_values (id int, value any)')
+    db.query("INSERT INTO order_values VALUES (1, NULL), (2, '10'), (3, 2), (4, '2'), (5, false), (6, true), (7, '10')")
+
+    assert.deepStrictEqual(
+      db.query('SELECT id FROM order_values ORDER BY value').rows.map(row => row.id),
+      [3, 2, 7, 4, 5, 6, 1]
+    )
+    assert.deepStrictEqual(
+      db.query('SELECT id FROM order_values ORDER BY value DESC').rows.map(row => row.id),
+      [6, 5, 4, 2, 7, 3, 1]
+    )
+    db.close()
+  })
+
   // ---- PROFILE ----
 
   await test('profile: SELECT reports plan + timing + row counts', async () => {

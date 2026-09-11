@@ -126,7 +126,7 @@ source.
 - [x] Fix or remove unsupported SQL examples. `examples/basic.js:75-77` uses
   `COUNT(*) AS count`, but the parser has no aggregate or alias support. Either
   implement aggregates/aliases or change the example to count returned rows.
-- [ ] Fix ORDER BY NULL ordering and type mismatch behavior. Null placement
+- [x] Fix ORDER BY NULL ordering and type mismatch behavior. Null placement
   changes with ASC/DESC because the comparator applies direction after its null
   result (`src/executor.ts:372-389`). Define stable ordering for nulls and
   incompatible types.
