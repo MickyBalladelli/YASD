@@ -252,7 +252,7 @@ async function runTests() {
     assert.throws(() => new RespDecoder({ maxBulkBytes: 3 }).push('$4\r\n1234\r\n'), /bulk length exceeds/);
     assert.throws(() => new RespDecoder({ maxArguments: 1 }).push('*2\r\n$1\r\na\r\n$1\r\nb\r\n'), /array length exceeds/);
     assert.throws(() => new RespDecoder({ maxDepth: 1 }).push('*1\r\n*1\r\n$1\r\na\r\n'), /nesting exceeds/);
-    assert.throws(() => new RespDecoder({ maxBufferedBytes: 4 }).push('*9999'), /buffered bytes exceeds/);
+    assert.throws(() => new RespDecoder({ maxBufferedBytes: 4 }).push('*9999'), /buffered bytes exceed/);
   });
 
   await test('CACHE_URL parsing + fromEnv', async () => {
@@ -496,7 +496,7 @@ async function runTests() {
     await server.close();
 
     const records = fs.readFileSync(aof, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-    assert.ok(records.some(record => record.op?.op === 'del' && record.op.keys.includes('cas:zero')));
+    assert.ok(records.some(record => record.op?.op === 'patch' && record.op.deleted.includes('cas:zero')));
     const recovered = new YasdServer({ host: '127.0.0.1', port: 0, aofPath: aof });
     await recovered.start();
     assert.strictEqual(recovered.cache.get('cas:zero'), undefined);

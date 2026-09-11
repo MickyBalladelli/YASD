@@ -1022,7 +1022,7 @@ export class YasdServer {
       subMode: false,
       authed: !this.authRequired,
       watchVersions: null,
-      txQueue: null,
+      txQueue: null, txBytes: 0, txFailed: false,
       outputQueue: [],
       outputQueueBytes: 0,
       outputBackpressured: false,
@@ -1556,6 +1556,12 @@ export class YasdServer {
           if (!TX_QUEUEABLE.has(cmd)) {
             throw new Error(`${cmd} not allowed inside MULTI`);
           }
+          const bytes = Buffer.byteLength(cmd) + args.reduce((sum, arg) => sum + Buffer.byteLength(arg) + 16, 16);
+          if (state.txFailed || state.txQueue.length >= this.maxTransactionCommands || state.txBytes + bytes > this.maxTransactionBytes) {
+            state.txFailed = true;
+            throw new DatabaseError('transaction queue limit exceeded; DISCARD required', 'LIMIT_EXCEEDED');
+          }
+          state.txBytes += bytes;
           state.txQueue.push({ cmd, args });
           return { kind: 'simple', value: 'QUEUED' };
         }
@@ -1704,12 +1710,16 @@ export class YasdServer {
       }
 
       case 'MGET': {
-        const items = this.kv.mget(args).map(v =>
-          v === undefined
-            ? { kind: 'bulk', value: null }
-            : { kind: 'bulk', value: JSON.stringify(v) ?? 'null' }
-        );
-        return { kind: 'array', items } as RespReply;
+        const items: RespReply[] = [];
+        let bytes = String(args.length).length + 3;
+        for (const key of args) {
+          const value = this.kv.get(key);
+          const item: RespReply = { kind: 'bulk', value: value === undefined ? null : JSON.stringify(value) };
+          bytes += replyByteLength(item);
+          if (bytes > 8 * 1024 * 1024) throw new DatabaseError('MGET response exceeds RESP limit', 'LIMIT_EXCEEDED');
+          items.push(item);
+        }
+        return { kind: 'array', items };
       }
 
       case 'DEL': {
