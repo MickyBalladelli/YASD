@@ -411,6 +411,12 @@ Run `npm run benchmark:indexes -- 10000 1000` to compare indexed, allowlisted,
 and index-free memory, insert, update, and equality-query costs. It prints one
 JSON result per configuration.
 
+Run `npm run benchmark:load -- 5000 4 5000` for concurrent load coverage of
+LRU, expiry sweeping, indexed and full-scan reads, UPDATE/DELETE, pub/sub
+fanout, pooled client traffic, AOF appends, and snapshot saves. Results include
+p50/p95/p99/max latency, throughput, heap/RSS deltas and peaks. The persistence
+run leaves artifacts under a temporary directory named in its JSON output.
+
 ## Test Server
 
 A test server is included in the `test/` directory. Run it to see YASD in action:

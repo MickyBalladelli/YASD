@@ -171,7 +171,7 @@ source.
 - [x] Add property/fuzz tests for the SQL tokenizer/parser and RESP decoder.
   Include random chunk boundaries, malformed lengths, deep arrays, invalid
   UTF-8, quotes, numbers, and very large input.
-- [ ] Add concurrency and load benchmarks for LRU, expiry sweeping, indexed
+- [x] Add concurrency and load benchmarks for LRU, expiry sweeping, indexed
   reads, UPDATE/DELETE, pub/sub fanout, pooled client traffic, and persistence.
   Track latency percentiles and memory, not only operation counts.
 - [ ] Add CI that runs build, tests, type checks, packaging, and a short server
