@@ -94,7 +94,7 @@ export interface DropTableStatement {
   tableName: string;
 }
 
-export type WhereClause = AndClause | OrClause | ComparisonClause | NotClause;
+export type WhereClause = AndClause | OrClause | ComparisonClause | IsNullClause | NotClause;
 
 export interface AndClause {
   type: 'and';
@@ -111,6 +111,11 @@ export interface OrClause {
 export interface NotClause {
   type: 'not';
   clause: WhereClause;
+}
+
+export interface IsNullClause {
+  type: 'is_null' | 'is_not_null';
+  expression: Expression;
 }
 
 export type Expression = LiteralExpression | ColumnReferenceExpression;

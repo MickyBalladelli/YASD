@@ -291,6 +291,37 @@ async function runTests() {
     db.close()
   })
 
+  await test('NULL predicates follow SQL three-valued logic', async () => {
+    const db = new YASD({ sweepIntervalMs: 0 })
+    db.query('CREATE TABLE nullable_values (id int, value string)')
+    db.query("INSERT INTO nullable_values VALUES (1, NULL), (2, 'x')")
+
+    assert.strictEqual(db.query('SELECT * FROM nullable_values WHERE value = NULL').rows.length, 0)
+    assert.strictEqual(db.query('SELECT * FROM nullable_values WHERE value != NULL').rows.length, 0)
+    assert.strictEqual(db.query('SELECT * FROM nullable_values WHERE NOT value = NULL').rows.length, 0)
+    assert.deepStrictEqual(
+      db.query('SELECT id FROM nullable_values WHERE value IS NULL').rows.map(row => row.id),
+      [1]
+    )
+    assert.deepStrictEqual(
+      db.query('SELECT id FROM nullable_values WHERE value IS NOT NULL').rows.map(row => row.id),
+      [2]
+    )
+    assert.deepStrictEqual(
+      db.query("SELECT id FROM nullable_values WHERE value IN (NULL, 'x')").rows.map(row => row.id),
+      [2]
+    )
+    assert.deepStrictEqual(
+      db.query('SELECT id FROM nullable_values WHERE value = NULL OR id = 1').rows.map(row => row.id),
+      [1]
+    )
+
+    const update = db.query('UPDATE nullable_values SET id = 9 WHERE value != NULL')
+    assert.strictEqual(update.affectedRows, 0)
+    assert.deepStrictEqual(db.query('SELECT id FROM nullable_values').rows.map(row => row.id), [1, 2])
+    db.close()
+  })
+
   // ---- PROFILE ----
 
   await test('profile: SELECT reports plan + timing + row counts', async () => {

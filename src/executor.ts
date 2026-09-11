@@ -21,11 +21,14 @@ import {
   AndClause,
   OrClause,
   NotClause,
+  IsNullClause,
   Expression,
 } from './types';
 import { parse } from './parser';
 import { performance } from 'perf_hooks';
 import { SlowLog, checkSlowThreshold } from './metrics';
+
+type TruthValue = boolean | null;
 
 class DatabaseError extends Error {
   constructor(message: string, public code: string) {
@@ -446,12 +449,12 @@ export class Executor {
       rows = [];
       for (const i of planned) {
         const row = table.rows[i];
-        if (row && (!where || this.evaluateWhere(row, where, table))) {
+        if (row && (!where || this.evaluateWhere(row, where, table) === true)) {
           rows.push(row);
         }
       }
     } else if (where) {
-      rows = table.rows.filter(row => this.evaluateWhere(row, where, table));
+      rows = table.rows.filter(row => this.evaluateWhere(row, where, table) === true);
     } else {
       rows = [...table.rows];
     }
@@ -541,7 +544,7 @@ export class Executor {
       const row = table.rows[i];
 
       // Check WHERE condition
-      if (where && !this.evaluateWhere(row, where, table)) {
+      if (where && this.evaluateWhere(row, where, table) !== true) {
         continue;
       }
 
@@ -586,7 +589,7 @@ export class Executor {
     const keep: Row[] = [];
     let affectedRows = 0;
     for (const row of table.rows) {
-      if (this.evaluateWhere(row, where, table)) {
+      if (this.evaluateWhere(row, where, table) === true) {
         affectedRows++;
       } else {
         keep.push(row);
@@ -619,20 +622,37 @@ export class Executor {
     };
   }
 
-  private evaluateWhere(row: Row, where: WhereClause, table: TableData): boolean {
+  private evaluateWhere(row: Row, where: WhereClause, table: TableData): TruthValue {
     switch (where.type) {
-      case 'and':
-        return this.evaluateWhere(row, (where as AndClause).left, table) &&
-               this.evaluateWhere(row, (where as AndClause).right, table);
-      case 'or':
-        return this.evaluateWhere(row, (where as OrClause).left, table) ||
-               this.evaluateWhere(row, (where as OrClause).right, table);
-      case 'not':
-        return !this.evaluateWhere(row, (where as NotClause).clause, table);
+      case 'and': {
+        const left = this.evaluateWhere(row, (where as AndClause).left, table);
+        const right = this.evaluateWhere(row, (where as AndClause).right, table);
+        if (left === false || right === false) return false;
+        if (left === null || right === null) return null;
+        return true;
+      }
+      case 'or': {
+        const left = this.evaluateWhere(row, (where as OrClause).left, table);
+        const right = this.evaluateWhere(row, (where as OrClause).right, table);
+        if (left === true || right === true) return true;
+        if (left === null || right === null) return null;
+        return false;
+      }
+      case 'not': {
+        const value = this.evaluateWhere(row, (where as NotClause).clause, table);
+        return value === null ? null : !value;
+      }
+      case 'is_null':
+      case 'is_not_null': {
+        const expression = (where as IsNullClause).expression;
+        const value = this.evaluateExpression(row, expression);
+        const isNull = value === null || value === undefined;
+        return where.type === 'is_null' ? isNull : !isNull;
+      }
       case 'comparison':
         return this.evaluateComparison(row, where as ComparisonClause, table);
       default:
-        return false;
+        return null;
     }
   }
 
@@ -656,7 +676,7 @@ export class Executor {
     return expression.value;
   }
 
-  private evaluateComparison(row: Row, comp: ComparisonClause, _table: TableData): boolean {
+  private evaluateComparison(row: Row, comp: ComparisonClause, _table: TableData): TruthValue {
     const { left, operator, right } = comp;
 
     const leftValue = this.evaluateExpression(row, left);
@@ -667,19 +687,36 @@ export class Executor {
       rightValue = this.evaluateExpression(row, right);
     }
 
-    // Handle NULL comparisons
-    if (leftValue === null || leftValue === undefined) {
-      return operator === '!=';
-    }
-    if (Array.isArray(rightValue) && rightValue.length === 0) {
-      return false;
+    // Ordinary comparisons follow SQL's three-valued NULL behavior: any
+    // comparison involving NULL is UNKNOWN, not true or false. WHERE only
+    // keeps predicates whose final truth value is TRUE.
+    if (leftValue === null || leftValue === undefined) return null;
+    if (Array.isArray(rightValue)) {
+      if (rightValue.length === 0) return false;
+      if (operator === 'in') {
+        let hasUnknown = false;
+        for (const value of rightValue) {
+          if (value === null || value === undefined) {
+            hasUnknown = true;
+          } else if (this.valuesEqual(leftValue, value)) {
+            return true;
+          }
+        }
+        return hasUnknown ? null : false;
+      }
+      if (operator === 'between' && (rightValue[0] === null || rightValue[0] === undefined ||
+          rightValue[1] === null || rightValue[1] === undefined)) {
+        return null;
+      }
+    } else if (rightValue === null || rightValue === undefined) {
+      return null;
     }
 
     switch (operator) {
       case '=':
         return !Array.isArray(rightValue) && this.valuesEqual(leftValue, rightValue);
       case '!=':
-        return Array.isArray(rightValue) || !this.valuesEqual(leftValue, rightValue);
+        return !Array.isArray(rightValue) && !this.valuesEqual(leftValue, rightValue);
       case '>':
         return this.compareValues(leftValue, rightValue) > 0;
       case '>=':
@@ -691,9 +728,6 @@ export class Executor {
       case 'like':
         return this.likeCompare(String(leftValue), String(rightValue));
       case 'in':
-        if (Array.isArray(rightValue)) {
-          return rightValue.some(v => !Array.isArray(v) && this.valuesEqual(leftValue, v as Value));
-        }
         return false;
       case 'between':
         if (Array.isArray(rightValue) && rightValue.length === 2) {

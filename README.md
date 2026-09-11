@@ -166,6 +166,7 @@ DROP TABLE table_name
 - LIKE: `name LIKE '%John%'` (supports `%` and `_` wildcards)
 - IN: `id IN (1, 2, 3)`
 - BETWEEN: `age BETWEEN 20 AND 40`
+- NULL checks: `column IS NULL` and `column IS NOT NULL`
 - AND: `age > 25 AND name = 'John'`
 - OR: `age > 25 OR name = 'John'`
 - NOT: `NOT (age > 25)`
@@ -174,6 +175,11 @@ String literals use single or double quotes. Escape characters with backslash:
 `\\`, `\'`, `\"`, `\n`, `\r`, `\t`, `\0`, `\b`, `\f`, and `\v`; SQL-style
 doubled delimiters (`''` and `""`) are also supported. `NULL`, `TRUE`, and
 `FALSE` are case-insensitive.
+
+NULL follows SQL three-valued logic. Ordinary comparisons involving NULL are
+UNKNOWN and do not match a `WHERE` clause; use `IS NULL` or `IS NOT NULL` for
+explicit NULL checks. AND, OR, and NOT preserve UNKNOWN through compound
+predicates.
 
 ## Cache server, counters, batch, pub/sub, persistence (P1)
 

@@ -116,7 +116,7 @@ source.
 - [x] Make writes atomic on validation failure. Multi-row INSERT and UPDATE can
   modify earlier rows before a later row/clause fails. Validate the complete
   statement first or roll it back on error.
-- [ ] Define NULL behavior and implement it consistently. Current comparisons
+- [x] Define NULL behavior and implement it consistently. Current comparisons
   return `true` for many `NULL != value` cases (`src/executor.ts:591-604`) and
   there is no `IS NULL`/`IS NOT NULL`. Choose SQL-like three-valued behavior or
   explicitly document the simpler rules and test them.

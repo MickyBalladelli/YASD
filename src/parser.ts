@@ -141,7 +141,7 @@ class Parser {
         return op;
       }
     }
-    const wordOps = ['like', 'between', 'in', 'and', 'or', 'not'];
+    const wordOps = ['like', 'between', 'in', 'and', 'or', 'not', 'is'];
     for (const op of wordOps) {
       const candidate = this.state.sql.slice(this.state.pos, this.state.pos + op.length);
       const after = this.state.sql[this.state.pos + op.length] ?? '';
@@ -656,10 +656,17 @@ class Parser {
     const left = this.parseExpression();
 
     const op = this.peek()?.toLowerCase();
-    if (!op || !['=', '!=', '>', '>=', '<', '<=', 'like', 'in', 'between'].includes(op)) {
+    if (!op || !['=', '!=', '>', '>=', '<', '<=', 'like', 'in', 'between', 'is'].includes(op)) {
       throw new Error(`Expected comparison operator, got '${op}'`);
     }
     this.consume();
+
+    if (op === 'is') {
+      const isNotNull = this.peek()?.toLowerCase() === 'not';
+      if (isNotNull) this.consume();
+      this.consume('null');
+      return { type: isNotNull ? 'is_not_null' : 'is_null', expression: left };
+    }
 
     // `IN (...)` and `BETWEEN a AND b` take structured operands — parse them
     // before the generic single-value path (the old code called parseValue()

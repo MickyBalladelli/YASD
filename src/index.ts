@@ -17,6 +17,7 @@ import {
   Expression,
   LiteralExpression,
   ColumnReferenceExpression,
+  IsNullClause,
 } from './types';
 
 // Re-export types
@@ -31,6 +32,7 @@ export type {
   Expression,
   LiteralExpression,
   ColumnReferenceExpression,
+  IsNullClause,
   KVOptions,
   KVExpiryListener,
   KVStats,
