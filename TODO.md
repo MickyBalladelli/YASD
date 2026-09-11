@@ -182,10 +182,10 @@ source.
 
 - [x] Make README, examples, and implementation agree on transaction atomicity,
   NULL semantics, supported SQL, TTL behavior, and SAVE/LOAD behavior.
-- [ ] Document limits, persistence guarantees, AOF recovery rules, cache-only
+- [x] Document limits, persistence guarantees, AOF recovery rules, cache-only
   durability expectations, invalidation delivery guarantees, and whether
   messages can be lost during reconnect.
-- [ ] Harden the Docker image: use a multi-stage build, run as a non-root user,
+- [x] Harden the Docker image: use a multi-stage build, run as a non-root user,
   avoid the network-dependent `npm install` fallback, add resource/ulimit
   guidance, and make TLS healthchecks verify certificates when configured.
 - [ ] Provide a production integration example with explicit cache-key

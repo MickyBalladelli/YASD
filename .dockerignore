@@ -1,0 +1,14 @@
+node_modules
+dist
+.git
+.github
+.agents
+.codex
+test
+benchmark
+coverage
+*.log
+.env*
+Dockerfile*
+docker-compose*.yml
+docker-compose*.yaml

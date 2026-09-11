@@ -225,8 +225,34 @@ redacted by default (`{"status":"ok"}`).
 npm run build
 node dist/cli.js --port 7379 --snapshot ./data/snapshot.json \
   --aof ./data/appendonly.aof --auto-save-ms 60000
-# or: docker compose up --build
+# or: docker compose up --build  # builds src inside a multi-stage image
 ```
+
+### Docker deployment
+
+The Dockerfile builds from `src/` with `npm ci` and fails if the lockfile is
+not usable; it does not copy or require a pre-existing `dist/` directory and
+does not fall back to an unconstrained install. The runtime image contains
+only the compiled server and package metadata, runs as the unprivileged
+`yasd` user, and writes persistence files only under `/data`.
+
+The Compose example makes the root filesystem read-only, drops Linux
+capabilities, enables `no-new-privileges`, and sets a 512 MiB memory cap, one
+CPU, 256 processes, and a 65,536-file descriptor limit. Keep the memory cap
+comfortably above `CACHE_MAX_BYTES` for V8, sockets, temporary snapshots, and
+the AOF. If you use a bind mount instead of the named `yasd-data` volume, make
+sure the host directory is writable by the container's `yasd` user (UID/GID
+created by the image).
+
+The container healthcheck calls `/readyz`. Without TLS it uses HTTP. When
+`YASD_TLS_KEY` or `YASD_TLS_CERT` is set, it uses HTTPS with certificate and
+hostname verification enabled. Public-CA certificates need no extra setting;
+for a private CA, mount the CA and set `YASD_HEALTHCHECK_CA`. Set
+`YASD_HEALTHCHECK_SERVERNAME` when the certificate name differs from
+`127.0.0.1`. If the server requires client certificates, also set matching
+`YASD_HEALTHCHECK_CLIENT_CERT` and `YASD_HEALTHCHECK_CLIENT_KEY`. A missing or
+invalid trust/client-certificate setup makes the healthcheck fail instead of
+silently accepting an unverified TLS connection.
 
 Protect the RESP port with a password, TLS, or both. Password auth is per
 connection; `/livez` and `/readyz` stay open for load balancers. To expose
@@ -326,6 +352,89 @@ writes an atomic snapshot and rotates the AOF while retaining records written
 after that snapshot. `LOAD` replaces the cache with the selected snapshot; it
 does not replay the AOF and publishes a cache invalidation event. `SAVE` does
 not publish an invalidation because it does not change cache contents.
+
+### Limits, durability, recovery, and delivery guarantees
+
+The default resource limits are:
+
+| Resource | Default | Behavior |
+| --- | ---: | --- |
+| Live cache entries | 10,000 | Oldest LRU entries are evicted first |
+| Aggregate cache bytes | 64 MiB | UTF-8 key bytes plus UTF-8 JSON value bytes |
+| One key | 1 KiB | Larger keys are rejected |
+| One JSON value | 4 MiB | Larger values are rejected |
+| One RESP frame | 8 MiB | The connection is closed on a limit violation |
+| RESP bulk payload | 4 MiB | The connection is closed on a limit violation |
+| RESP array items | 1,024 | Applies to command arguments and nested arrays |
+| RESP nesting depth | 32 | Deeper arrays are rejected |
+| Buffered RESP input | 8 MiB | Excess incomplete input is rejected |
+| Pending socket output | 1 MiB | Slow consumers are disconnected |
+| HTTP request headers | 16 KiB | Larger or malformed headers are rejected |
+
+Cache limits are configurable through `YasdServer({ cache: ... })` and the
+documented CLI/environment settings. A value that exceeds either its own
+limit or `maxBytes` is rejected; it is never stored temporarily and never
+evicts the entry that caused the oversized write. `maxBytes` is not a heap
+size limit: it counts only each key and its JSON representation.
+
+`maxCommandMs`, `idleConnectionTimeoutMs`, and `shutdownDeadlineMs` are
+additional operational controls. The first two are disabled by default;
+`shutdownDeadlineMs` defaults to 2 seconds. Client requests time out after 5
+seconds by default, and the command pool defaults to four connections (maximum
+1,024). There is no separate SQL statement-size limit today; process memory
+remains the boundary for embedded SQL parsing.
+
+Durability is optional and cache data is not a source of truth:
+
+- With no `snapshotPath` and no `aofPath`, all data is process memory. A
+  restart, crash, `SIGKILL`, or host loss can remove everything.
+- A snapshot is written to a temporary file, synced, atomically renamed, and
+  directory-synced. It contains live values and absolute expiry deadlines.
+  Without an AOF, writes since the last completed snapshot can be lost.
+- An AOF records accepted cache mutations as JSON lines. A normal append is
+  synchronous, but does not call `fsync` for every write; an OS or power crash
+  can lose recent accepted records. A failed AOF append returns an error and
+  rolls back that cache mutation.
+- With both files configured, startup restores the snapshot first and applies
+  only newer sequenced AOF records. `SAVE` records the covered AOF sequence and
+  rotates the log while retaining mutations that arrived during the save.
+  This makes snapshot/AOF crash windows recoverable without replaying covered
+  mutations twice. `saveOnShutdown` only runs when a snapshot path is
+  configured, and its final wait is bounded by `shutdownDeadlineMs`.
+- `loadOnStart` defaults to true. `LOAD` is a runtime replacement: it loads
+  only the selected snapshot, does not replay or rotate the AOF, and is not a
+  restart checkpoint by itself. Run `SAVE` after `LOAD` when the loaded state
+  must become the restart baseline.
+
+AOF recovery is deliberately conservative. Startup replays valid records in
+order and stops at the first middle corruption, invalid record, or sequence
+error; records after that line are ignored. The server exposes
+`aofRecoveryState` as `clean`, `torn-tail`, or `corrupt`. An incomplete final
+JSON line is treated as a torn tail and discarded automatically. A corrupt
+AOF leaves readiness failing and rejects further AOF-backed writes until an
+operator repairs or replaces the file and restarts the server. Inspect
+`INFO.persistence` or embedded `server.persistenceStatus()` for safe error
+codes; raw paths and filesystem messages are not exposed.
+
+`__yasd__:invalidate` is a cache-invalidation hint channel, not a durable
+log. It publishes `set`, `del`, `clear`, `expire`, `persist`, and `load` after
+the corresponding cache commit (and after AOF append when AOF is enabled).
+Delivery is synchronous and ordered for listeners in one process, but network
+delivery is best-effort: there are no message IDs, acknowledgements, replay,
+or cross-server delivery guarantee. LRU evictions are local capacity events
+and do not publish invalidations. Expiry invalidation happens when lazy access
+or the sweeper notices expiry; disabling the sweeper can delay that hint.
+Consumers must tolerate missed hints and re-read the durable application
+source of truth when correctness matters.
+
+Command connections reconnect lazily when a later command needs them. A dead
+connection rejects its pending requests; the client does not blindly retry a
+command because retrying a write could duplicate it. Reconnection uses at
+most four dials with bounded exponential backoff. Subscriber connections need
+`reconnectSubscriptions()` (or a later `subscribe()` call) to restore their
+registered channels. Messages published while a subscriber is disconnected,
+while its subscription is being restored, or after a slow-consumer disconnect
+are lost. Resubscription restores the channel, not the missed history.
 
 Protocol commands: `AUTH PING GET SET[M PX] CAS MGET MSET DEL CLEAR TTL EXPIRE
 PERSIST INCR[BY] DECR[BY] WATCH UNWATCH MULTI EXEC DISCARD
