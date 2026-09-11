@@ -14,6 +14,8 @@ import * as tls from 'tls';
 import * as http from 'http';
 import * as https from 'https';
 import { Value, JsonValue } from './types';
+import { stringifyJsonValue } from './json';
+import { DatabaseError, errorFromWire } from './errors';
 import { KVStats, TransactionError } from './cache';
 import { RespDecoder, RespReply, encodeCommand } from './protocol';
 import { DEFAULT_PORT, HealthResponse, ServerInfo } from './server';
@@ -63,7 +65,7 @@ function decodeUrlPart(value: string, url: string): string {
   try {
     return decodeURIComponent(value);
   } catch {
-    throw new Error(`invalid CACHE_URL encoding: ${url}`);
+    throw new DatabaseError('invalid CACHE_URL encoding', 'INVALID_CONFIG');
   }
 }
 
@@ -209,7 +211,7 @@ function jsValue(reply: RespReply): unknown {
     case 'simple':
       return reply.value;
     case 'error':
-      throw new Error(reply.message.replace(/^ERR\s*/, ''));
+      throw errorFromWire(reply.message);
     case 'int':
       return reply.value;
     case 'bulk':
@@ -363,7 +365,7 @@ export class YasdClient {
 
   async set(key: string, value: Value, ttlMs?: number): Promise<'OK'> {
     if (value === undefined) throw new Error('cannot cache undefined (use null)');
-    const json = JSON.stringify(value);
+    const json = stringifyJsonValue(value);
     if (json === undefined) throw new Error('value is not JSON-serializable');
     const ttl = ttlMs === undefined ? undefined : validateNonNegativeNumber(ttlMs, 'ttlMs');
     const args = ttl === undefined ? ['SET', key, json] : ['SET', key, json, 'PX', String(ttl)];
@@ -388,7 +390,7 @@ export class YasdClient {
     const args: string[] = ['MSET'];
     for (const e of entries) {
       if (e.value === undefined) throw new Error('cannot cache undefined (use null)');
-      const json = JSON.stringify(e.value);
+      const json = stringifyJsonValue(e.value);
       if (json === undefined) throw new Error('value is not JSON-serializable');
       args.push(e.key, json);
     }
@@ -436,9 +438,9 @@ export class YasdClient {
    */
   async cas(key: string, expected: Value | undefined, value: Value, ttlMs?: number): Promise<boolean> {
     if (value === undefined) throw new Error('cannot cache undefined (use null)');
-    const valueJson = JSON.stringify(value);
+    const valueJson = stringifyJsonValue(value);
     if (valueJson === undefined) throw new Error('value is not JSON-serializable');
-    const expectedArg = expected === undefined ? '' : JSON.stringify(expected);
+    const expectedArg = expected === undefined ? '' : stringifyJsonValue(expected);
     if (expectedArg === undefined) throw new Error('expected is not JSON-serializable');
     const ttl = ttlMs === undefined ? undefined : validateNonNegativeNumber(ttlMs, 'ttlMs');
     const args =
@@ -741,7 +743,7 @@ export class YasdClient {
         if (!pending) continue; // stray reply (e.g. after timeout teardown)
         if (pending.timer) clearTimeout(pending.timer);
         if (reply.kind === 'error') {
-          pending.reject(new Error(reply.message.replace(/^ERR\s*/, '')));
+          pending.reject(errorFromWire(reply.message));
         } else {
           pending.resolve(reply);
         }
@@ -964,7 +966,7 @@ export class YasdClient {
     }
     for (const reply of replies) {
       if (reply.kind === 'error') {
-        this.rejectNextSubAck(new Error(reply.message.replace(/^ERR\s*/, '')));
+        this.rejectNextSubAck(errorFromWire(reply.message));
         continue;
       }
       if (reply.kind !== 'array') continue;
@@ -1072,7 +1074,7 @@ function txValue(reply: RespReply): TxExecResult {
     case 'nil':
       return null;
     case 'error':
-      throw new Error(reply.message.replace(/^ERR\s*/, ''));
+      throw errorFromWire(reply.message);
   }
 }
 
@@ -1225,7 +1227,7 @@ export class YasdTransaction {
   /** Queue a SET (first write auto-sends MULTI). */
   async set(key: string, value: Value, ttlMs?: number): Promise<void> {
     if (value === undefined) throw new TransactionError('cannot cache undefined (use null)');
-    const json = JSON.stringify(value);
+    const json = stringifyJsonValue(value);
     if (json === undefined) throw new TransactionError('value is not JSON-serializable');
     const ttl = ttlMs === undefined ? undefined : validateNonNegativeNumber(ttlMs, 'ttlMs');
     await this.queue(
@@ -1238,7 +1240,7 @@ export class YasdTransaction {
     const args: string[] = ['MSET'];
     for (const e of entries) {
       if (e.value === undefined) throw new TransactionError('cannot cache undefined (use null)');
-      const json = JSON.stringify(e.value);
+      const json = stringifyJsonValue(e.value);
       if (json === undefined) throw new TransactionError('value is not JSON-serializable');
       args.push(e.key, json);
     }
@@ -1279,9 +1281,9 @@ export class YasdTransaction {
   /** Queue a CAS (`expected === undefined` asserts absence). */
   async cas(key: string, expected: Value | undefined, value: Value, ttlMs?: number): Promise<void> {
     if (value === undefined) throw new TransactionError('cannot cache undefined (use null)');
-    const valueJson = JSON.stringify(value);
+    const valueJson = stringifyJsonValue(value);
     if (valueJson === undefined) throw new TransactionError('value is not JSON-serializable');
-    const expectedArg = expected === undefined ? '' : JSON.stringify(expected);
+    const expectedArg = expected === undefined ? '' : stringifyJsonValue(expected);
     if (expectedArg === undefined) throw new TransactionError('expected is not JSON-serializable');
     const ttl = ttlMs === undefined ? undefined : validateNonNegativeNumber(ttlMs, 'ttlMs');
     await this.queue(
@@ -1409,7 +1411,7 @@ export class YasdTransaction {
       if (!pending) continue;
       if (pending.timer) clearTimeout(pending.timer);
       if (reply.kind === 'error') {
-        pending.reject(new Error(reply.message.replace(/^ERR\s*/, '')));
+        pending.reject(errorFromWire(reply.message));
       } else {
         pending.resolve(reply);
       }

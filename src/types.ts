@@ -149,7 +149,5 @@ export interface QueryResult {
   affectedRows?: number;
 }
 
-export interface DatabaseError extends Error {
-  code: string;
-  message: string;
-}
+export { DatabaseError } from './errors';
+export type { DatabaseErrorCode } from './errors';

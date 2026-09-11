@@ -308,8 +308,8 @@ class Parser {
       throw new Error(`${name} must be an integer, got '${token}'`);
     }
     const value = Number(token);
-    if (!Number.isSafeInteger(value)) {
-      throw new Error(`${name} must be a safe integer, got '${token}'`);
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`${name} must be a non-negative safe integer, got '${token}'`);
     }
     this.consume();
     return value;
@@ -383,11 +383,16 @@ class Parser {
       }
       const columnType = this.parseType();
 
-      // Optional sized type params, e.g. varchar(255) / numeric(10,2).
+      // Sized declarations are accepted as metadata, not truncation/coercion.
       if (this.peek() === '(') {
         this.consume('(');
-        while (this.peek() !== null && this.peek() !== ')') {
-          this.consume();
+        const precision = this.parseInteger('type size');
+        if (precision === 0) throw new Error('type size must be positive');
+        if (this.peek() === ',') {
+          if (columnType !== 'number') throw new Error('scale requires a numeric type');
+          this.consume(',');
+          const scale = this.parseInteger('type scale');
+          if (scale > precision) throw new Error('type scale exceeds precision');
         }
         this.consume(')');
       }
@@ -432,10 +437,6 @@ class Parser {
     
     this.consume(')');
     
-    // Optional semicolon
-    if (this.peek() === ';') {
-      this.consume();
-    }
 
     this.validateCreateTableSchema(columns, primaryKey);
     
@@ -492,9 +493,6 @@ class Parser {
       values.push(nextRow);
     }
     
-    if (this.peek() === ';') {
-      this.consume();
-    }
     
     return { type: 'insert', tableName, columns, values };
   }
@@ -549,9 +547,6 @@ class Parser {
       offset = this.parseInteger('OFFSET');
     }
     
-    if (this.peek() === ';') {
-      this.consume();
-    }
     
     return { type: 'select', columns, tableName, where, orderBy, limit, offset };
   }
@@ -564,12 +559,14 @@ class Parser {
     
     const setClauses: { column: string; value: Value }[] = [];
     
-    do {
+    for (;;) {
       const column = this.expectIdentifier();
       this.consume('=');
       const value = this.parseValue();
       setClauses.push({ column, value });
-    } while (this.peek() === ',');
+      if (this.peek() !== ',') break;
+      this.consume(',');
+    }
     
     let where: WhereClause | undefined;
     if (this.peek()?.toLowerCase() === 'where') {
@@ -577,9 +574,6 @@ class Parser {
       where = this.parseWhereClause();
     }
     
-    if (this.peek() === ';') {
-      this.consume();
-    }
     
     return { type: 'update', tableName, set: setClauses, where };
   }
@@ -595,9 +589,6 @@ class Parser {
       where = this.parseWhereClause();
     }
     
-    if (this.peek() === ';') {
-      this.consume();
-    }
     
     return { type: 'delete', tableName, where };
   }
@@ -607,9 +598,6 @@ class Parser {
     this.consume('table');
     const tableName = this.expectIdentifier();
     
-    if (this.peek() === ';') {
-      this.consume();
-    }
     
     return { type: 'drop_table', tableName };
   }
@@ -649,6 +637,12 @@ class Parser {
       return { type: 'not', clause };
     }
     
+    if (this.peek() === '(') {
+      this.consume('(');
+      const clause = this.parseWhereClause();
+      this.consume(')');
+      return clause;
+    }
     return this.parseComparisonClause();
   }
 
@@ -700,7 +694,17 @@ class Parser {
   }
 }
 
+import { DatabaseError } from './errors';
+
 export function parse(sql: string): SqlStatement {
-  const parser = new Parser(sql);
-  return parser.parse();
+  try {
+    if (typeof sql !== 'string' || Buffer.byteLength(sql, 'utf8') > 4 * 1024 * 1024) {
+      throw new Error('SQL must be a string no larger than 4 MiB');
+    }
+    const parser = new Parser(sql);
+    return parser.parse();
+  } catch (error) {
+    if (error instanceof DatabaseError) throw error;
+    throw new DatabaseError(error instanceof Error ? error.message : String(error), 'PARSE_ERROR', { cause: error });
+  }
 }

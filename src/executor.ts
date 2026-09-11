@@ -31,12 +31,8 @@ import { structuralEqual } from './value';
 
 type TruthValue = boolean | null;
 
-class DatabaseError extends Error {
-  constructor(message: string, public code: string) {
-    super(message);
-    this.name = 'DatabaseError';
-  }
-}
+import { DatabaseError } from './errors';
+import { cloneJsonValue } from './json';
 
 export interface SlowQueryEntry {
   sql: string;
@@ -437,7 +433,7 @@ export class Executor {
         primaryKey
       },
       rows: [],
-      indexes: {}
+      indexes: Object.create(null)
     };
 
     // Create only configured indexes. The default configuration indexes all
@@ -496,17 +492,14 @@ export class Executor {
         );
       }
 
-      const row: Row = {};
+      const row: Row = Object.create(null);
 
       // Fill in values for specified columns or all columns in order
       for (let i = 0; i < insertColDefs.length; i++) {
         const colDef = insertColDefs[i];
-        row[colDef.name] = this.coerceWriteValue(
-          rowValues[i],
-          colDef,
-          tableName,
-          colDef.name === table.schema.primaryKey
-        );
+        Object.defineProperty(row, colDef.name, { value: this.coerceWriteValue(
+          rowValues[i], colDef, tableName, colDef.name === table.schema.primaryKey
+        ), enumerable: true, writable: true, configurable: true });
       }
 
       // Fill in default values for unspecified columns
@@ -616,7 +609,8 @@ export class Executor {
     const resultRows = rows.map(row => {
       const resultRow: Row = {};
       for (const col of selectedColumns) {
-        resultRow[col] = row[col] ?? null;
+        Object.defineProperty(resultRow, col, { value: cloneJsonValue(row[col] ?? null, 'SQL result'),
+          enumerable: true, writable: true, configurable: true });
       }
       return resultRow;
     });
@@ -839,9 +833,12 @@ export class Executor {
         }
         return hasUnknown ? null : false;
       }
-      if (operator === 'between' && (rightValue[0] === null || rightValue[0] === undefined ||
-          rightValue[1] === null || rightValue[1] === undefined)) {
-        return null;
+      if (operator === 'between') {
+        const [low, high] = rightValue;
+        const lower = low == null ? null : this.compareValues(leftValue, low) >= 0;
+        const upper = high == null ? null : this.compareValues(leftValue, high) <= 0;
+        if (lower === false || upper === false) return false;
+        return lower === null || upper === null ? null : true;
       }
     } else if (rightValue === null || rightValue === undefined) {
       return null;
@@ -1080,7 +1077,9 @@ export class Executor {
 
   getTableSchema(tableName: string) {
     const table = this.db.tables.get(tableName);
-    return table?.schema;
+    if (!table) return undefined;
+    return { ...table.schema, columns: table.schema.columns.map(column => ({ ...column,
+      ...(column.default === undefined ? {} : { default: cloneJsonValue(column.default, 'column default') }) })) };
   }
 
   reset(): void {

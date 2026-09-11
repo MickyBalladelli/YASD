@@ -37,6 +37,7 @@ export interface SnapshotStore {
   dump(): SnapshotEntry[];
   clear(): void;
   restore(entries: SnapshotEntry[]): number;
+  replace(entries: SnapshotEntry[]): number;
 }
 
 /** One replayable mutation inside an AOF transaction. */
@@ -47,7 +48,8 @@ export type AofMutation =
   | { op: 'clear'; prefix: string }
   | { op: 'expire'; key: string; ttlMs?: number; expiresAt?: number }
   | { op: 'persist'; key: string }
-  | { op: 'incr'; key: string; by: number };
+  | { op: 'incr'; key: string; by: number }
+  | { op: 'patch'; entries: SnapshotEntry[]; deleted: string[] };
 
 export type AofBatchEntry = KVBatchEntry & {
   /** null = persistent, number = exact absolute expiry deadline. */
@@ -218,9 +220,9 @@ export async function loadSnapshot(
   ) {
     throw new Error(`invalid snapshot file: ${filePath}`);
   }
+  const count = clearFirst ? store.replace(file.entries) : store.restore(file.entries);
   if (metadata) metadata.aofSeq = file.aofSeq;
-  if (clearFirst) store.clear();
-  return store.restore(file.entries);
+  return count;
 }
 
 /** Apply one AOF op without producing further log output. */

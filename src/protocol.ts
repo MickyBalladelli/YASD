@@ -77,7 +77,7 @@ export function encodeError(message: string): Buffer {
 }
 
 export function encodeInt(n: number): Buffer {
-  if (!Number.isInteger(n)) throw new Error('RESP integers must be integers');
+  if (!Number.isSafeInteger(n)) throw new Error('RESP integers must be safe integers');
   return Buffer.from(`:${n}${CRLF}`, 'utf8');
 }
 

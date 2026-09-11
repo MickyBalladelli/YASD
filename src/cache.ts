@@ -20,6 +20,7 @@ import {
   validateNonNegativeSafeInteger,
   validateNonNegativeNumber,
   validatePositiveSafeInteger,
+  validateTimeout,
 } from './validation';
 import { structuralEqual } from './value';
 
@@ -113,65 +114,9 @@ function valueByteLength(value: Value): number {
   return utf8ByteLength(json);
 }
 
-/**
- * Validate a runtime value as JSON data and return an owned deep copy.
- * TypeScript types do not protect JavaScript callers from undefined,
- * non-finite numbers, class instances, or cyclic objects.
- */
-function cloneJsonValue(value: unknown, what: string): Value {
-  const ancestors = new Set<object>();
-
-  const clone = (current: unknown, path: string): Value => {
-    if (current === null) return null;
-    if (typeof current === 'string' || typeof current === 'boolean') return current;
-    if (typeof current === 'number') {
-      if (!Number.isFinite(current)) {
-        throw new Error(`${what} must contain only finite JSON numbers at ${path}`);
-      }
-      return current;
-    }
-    if (typeof current === 'undefined') {
-      throw new Error(`${what} cannot contain undefined at ${path} (use null)`);
-    }
-    if (typeof current !== 'object') {
-      throw new Error(`${what} must contain only JSON values at ${path}`);
-    }
-    if (ancestors.has(current)) {
-      throw new Error(`${what} cannot contain circular references at ${path}`);
-    }
-
-    ancestors.add(current);
-    try {
-      if (Array.isArray(current)) {
-        if (Object.getPrototypeOf(current) !== Array.prototype) {
-          throw new Error(`${what} must contain plain JSON arrays at ${path}`);
-        }
-        const out: Value[] = [];
-        for (let i = 0; i < current.length; i++) {
-          if (!Object.prototype.hasOwnProperty.call(current, i)) {
-            throw new Error(`${what} cannot contain sparse arrays at ${path}[${i}]`);
-          }
-          out.push(clone(current[i], `${path}[${i}]`));
-        }
-        return out;
-      }
-
-      const prototype = Object.getPrototypeOf(current);
-      if (prototype !== Object.prototype && prototype !== null) {
-        throw new Error(`${what} must contain only plain JSON objects at ${path}`);
-      }
-      const out: { [key: string]: Value } = Object.create(null) as { [key: string]: Value };
-      for (const key of Object.keys(current)) {
-        out[key] = clone((current as Record<string, unknown>)[key], `${path}.${key}`);
-      }
-      return out;
-    } finally {
-      ancestors.delete(current);
-    }
-  };
-
-  return clone(value, '$');
-}
+// Shared with the network client so invalid values cannot be normalized away.
+import { cloneJsonValue } from './json';
+import { DatabaseError } from './errors';
 
 function validateTTL(ttlMs: number, what: string): number {
   return validateNonNegativeNumber(ttlMs, what);
@@ -198,10 +143,8 @@ export function validateKVOptions(options: KVOptions = {}): KVOptions {
     : validateTTL(options.defaultTTLMs, 'defaultTTLMs');
   const sweepIntervalMs = options.sweepIntervalMs === undefined
     ? 1000
-    : validateNonNegativeNumber(options.sweepIntervalMs, 'sweepIntervalMs');
-  const namespaceTTLMs: Record<string, number> = {
-    ...DEFAULT_NAMESPACE_TTLS,
-  };
+    : validateTimeout(options.sweepIntervalMs, 'sweepIntervalMs');
+  const namespaceTTLMs: Record<string, number> = Object.assign(Object.create(null), DEFAULT_NAMESPACE_TTLS);
   if (options.namespaceTTLMs !== undefined) {
     if (
       options.namespaceTTLMs === null ||
@@ -221,7 +164,7 @@ export function validateKVOptions(options: KVOptions = {}): KVOptions {
     maxKeyBytes,
     maxValueBytes,
     ...(defaultTTLMs === undefined ? {} : { defaultTTLMs }),
-    namespaceTTLMs,
+    namespaceTTLMs: Object.freeze(namespaceTTLMs),
     sweepIntervalMs,
   };
 }
@@ -332,7 +275,8 @@ export class KVCache {
       entries.push([
         key,
         {
-          value: cloneJsonValue(entry.value, 'cache value'),
+          // Owned values are never modified in place; only entry metadata changes.
+          value: entry.value,
           expiresAt: entry.expiresAt,
           size: entry.size,
         },
@@ -387,17 +331,53 @@ export class KVCache {
    */
   getVersion(key: string): number {
     this.assertKeyFits(key);
-    return this.keyVersions.get(key) ?? 0;
+    const entry = this.map.get(key);
+    if (entry && this.isExpired(entry, Date.now())) this.removeExpired(key, entry);
+    return this.keyVersions.get(key) ?? this.absentEpoch;
+  }
+
+  private generation = 0;
+  private absentEpoch = 0;
+  private changeFrames: Set<string>[] = [];
+
+  /** Final write effects, including evictions. The callback must durably commit or throw. */
+  atomicChanges<T>(fn: () => T, commit: (entries: SnapshotEntry[], deleted: string[]) => void): T {
+    const changed = new Set<string>();
+    this.changeFrames.push(changed);
+    try {
+      return this.atomic(() => {
+        const result = fn();
+        const entries: SnapshotEntry[] = [];
+        const deleted: string[] = [];
+        for (const key of changed) {
+          const entry = this.map.get(key);
+          if (!entry || this.isExpired(entry, Date.now())) deleted.push(key);
+          else entries.push({ key, value: cloneJsonValue(entry.value, 'AOF value'),
+            ...(entry.expiresAt === undefined ? {} : { expiresAt: entry.expiresAt }) });
+        }
+        commit(entries, deleted);
+        return result;
+      });
+    } finally {
+      this.changeFrames.pop();
+    }
   }
 
   private bumpVersion(key: string): void {
-    this.keyVersions.set(key, (this.keyVersions.get(key) ?? 0) + 1);
+    if (this.generation >= Number.MAX_SAFE_INTEGER) throw new DatabaseError('cache generation exhausted', 'LIMIT_EXCEEDED');
+    this.keyVersions.set(key, ++this.generation);
+    for (const frame of this.changeFrames) frame.add(key);
     // Bound the tombstone map: dropping versions for non-live keys can only
     // cause a false transaction abort (version reads as 0, mismatching any
     // earlier snapshot), never a missed conflict.
     if (this.keyVersions.size > this.maxEntries * 2 + 1024) {
       for (const k of this.keyVersions.keys()) {
-        if (!this.map.has(k)) this.keyVersions.delete(k);
+        if (!this.map.has(k)) {
+          // Advancing a global absent epoch may cause a conservative abort,
+          // but can never hide a create/delete cycle of an absent watched key.
+          this.absentEpoch = this.generation;
+          this.keyVersions.delete(k);
+        }
         if (this.keyVersions.size <= this.maxEntries + 512) break;
       }
     }
@@ -674,7 +654,8 @@ export class KVCache {
       }
     }
     if (!KVCache.valuesEqual(current, ownedExpected)) return false;
-    const resolvedDefault = ttlMs !== undefined ? undefined : this.resolveTTLMs(key, undefined);
+    const exists = current !== undefined;
+    const resolvedDefault = ttlMs !== undefined || exists ? undefined : this.resolveTTLMs(key, undefined);
     const expiresAt =
       ttlMs !== undefined
         ? now + validateTTL(ttlMs, 'ttlMs')
@@ -727,14 +708,31 @@ export class KVCache {
    * Restore entries from a snapshot (absolute `expiresAt` preserved).
    * Already-expired entries are skipped. Returns the number restored.
    */
+  replace(entries: SnapshotEntry[]): number {
+    return this.atomic(() => {
+      this.clear();
+      return this.restore(entries);
+    });
+  }
+
   restore(entries: SnapshotEntry[]): number {
+    if (!Array.isArray(entries)) throw new DatabaseError('snapshot entries must be an array', 'INVALID_VALUE');
     const now = Date.now();
     const pending: Array<{ entry: SnapshotEntry; value: Value }> = [];
-    for (const e of entries) {
-      if (!e || typeof e.key !== 'string' || e.value === undefined) continue;
-      if (e.expiresAt !== undefined && e.expiresAt <= now) continue;
+    const seen = new Set<string>();
+    for (const raw of entries) {
+      if (!raw || typeof raw.key !== 'string' || raw.value === undefined) {
+        throw new DatabaseError('invalid snapshot entry', 'INVALID_VALUE');
+      }
+      const e = { key: raw.key, value: raw.value, expiresAt: raw.expiresAt };
+      if (seen.has(e.key)) throw new DatabaseError('duplicate snapshot key', 'INVALID_VALUE');
+      seen.add(e.key);
+      if (e.expiresAt !== undefined && (typeof e.expiresAt !== 'number' || !Number.isFinite(e.expiresAt) || Math.abs(e.expiresAt) > Number.MAX_SAFE_INTEGER)) {
+        throw new DatabaseError('snapshot expiresAt must be a finite epoch ms', 'INVALID_VALUE');
+      }
       const value = cloneJsonValue(e.value, 'snapshot value');
       this.assertValueFits(e.key, value);
+      if (e.expiresAt !== undefined && e.expiresAt <= now) continue;
       pending.push({ entry: e, value });
     }
     let count = 0;

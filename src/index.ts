@@ -20,6 +20,9 @@ import {
   IsNullClause,
 } from './types';
 
+export { DatabaseError, DATABASE_ERROR_CODES } from './errors';
+export type { DatabaseErrorCode } from './errors';
+
 // Re-export types
 export type {
   QueryResult,
@@ -332,6 +335,11 @@ export class YASD {
   /** Restore snapshot entries (absolute expiry preserved). */
   restore(entries: SnapshotEntry[]): number {
     return this.cache.restore(entries);
+  }
+
+  /** Atomically replace cache state with a validated snapshot. */
+  replace(entries: SnapshotEntry[]): number {
+    return this.cache.replace(entries);
   }
 
   /** Clear cached entries (tables untouched; use reset() for everything). */

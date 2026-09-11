@@ -42,7 +42,7 @@
     "package:check": "npm pack --dry-run",
     "serve": "node dist/cli.js",
     "dev": "node test/server.js",
-    "prepublish": "npm run build"
+    "prepack": "npm run build"
   },
   "keywords": [
     "sql",

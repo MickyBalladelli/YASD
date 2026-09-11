@@ -8,7 +8,7 @@ services:
     container_name: yasd
     ports:
       # Single port serves RESP plus /livez, /readyz, and /healthz
-      - "7379:7379"
+      - "127.0.0.1:7379:7379"
     environment:
       YASD_PORT: "7379"
       YASD_HOST: "0.0.0.0"
