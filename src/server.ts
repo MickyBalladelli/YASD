@@ -64,6 +64,7 @@ import {
   validateHost,
   validateNonNegativeNumber,
   validatePort,
+  validatePositiveSafeInteger,
 } from './validation';
 
 export const DEFAULT_HOST = '127.0.0.1'
@@ -105,6 +106,9 @@ const AOF_COMMANDS = new Set([
   'CAS',
 ]);
 
+/** Maximum queued output per connection after socket backpressure. */
+const DEFAULT_MAX_PENDING_OUTPUT_BYTES = 1024 * 1024;
+
 export interface YasdServerOptions {
   host?: string;
   port?: number;
@@ -122,6 +126,8 @@ export interface YasdServerOptions {
    * (exposed via INFO). Default 0 (off); fractional values allowed.
    */
   slowCommandMs?: number;
+  /** Maximum queued output bytes per connection. Slow consumers are disconnected. Default 1 MiB. */
+  maxPendingOutputBytes?: number;
   /**
    * Password for the AUTH command. When set, every command except AUTH/QUIT
    * is rejected with NOAUTH until authenticated. HTTP /healthz stays open
@@ -169,6 +175,12 @@ interface ConnState {
   watchVersions: Map<string, number> | null;
   /** Queued commands between MULTI and EXEC (null = not in MULTI). */
   txQueue: Array<{ cmd: string; args: string[] }> | null;
+  /** User-space output waiting for the socket's drain event. */
+  outputQueue: Buffer[];
+  outputQueueBytes: number;
+  outputBackpressured: boolean;
+  closeWhenDrained: boolean;
+  outputClosed: boolean;
 }
 
 interface TransactionEffects {
@@ -227,6 +239,13 @@ export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Yasd
   }
   if (env.YASD_SLOW_COMMAND_MS !== undefined) {
     opts.slowCommandMs = parseStrictNonNegativeNumber(env.YASD_SLOW_COMMAND_MS, 'YASD_SLOW_COMMAND_MS');
+  }
+  if (env.YASD_MAX_PENDING_OUTPUT_BYTES !== undefined) {
+    opts.maxPendingOutputBytes = parseStrictInteger(
+      env.YASD_MAX_PENDING_OUTPUT_BYTES,
+      'YASD_MAX_PENDING_OUTPUT_BYTES',
+      1
+    );
   }
   if (env.YASD_LOAD_ON_START !== undefined) opts.loadOnStart = env.YASD_LOAD_ON_START !== '0';
   if (env.YASD_SAVE_ON_SHUTDOWN !== undefined) opts.saveOnShutdown = env.YASD_SAVE_ON_SHUTDOWN !== '0';
@@ -369,6 +388,7 @@ export class YasdServer {
   readonly loadOnStart: boolean;
   readonly saveOnShutdown: boolean;
   readonly autoSaveMs: number;
+  readonly maxPendingOutputBytes: number;
   readonly authRequired: boolean;
   readonly tlsEnabled: boolean;
   private password: string | undefined;
@@ -387,6 +407,9 @@ export class YasdServer {
     this.autoSaveMs = options.autoSaveMs === undefined
       ? 0
       : validateNonNegativeNumber(options.autoSaveMs, 'autoSaveMs');
+    this.maxPendingOutputBytes = options.maxPendingOutputBytes === undefined
+      ? DEFAULT_MAX_PENDING_OUTPUT_BYTES
+      : validatePositiveSafeInteger(options.maxPendingOutputBytes, 'maxPendingOutputBytes');
     this.password = options.password && options.password.length > 0 ? options.password : undefined;
     this.authRequired = this.password !== undefined;
     if (options.tls && (!options.tls.key || !options.tls.cert)) {
@@ -610,21 +633,26 @@ export class YasdServer {
       authed: !this.authRequired,
       watchVersions: null,
       txQueue: null,
+      outputQueue: [],
+      outputQueueBytes: 0,
+      outputBackpressured: false,
+      closeWhenDrained: false,
+      outputClosed: false,
     };
     socket.on('data', chunk => {
       try {
         this.onData(state, Buffer.from(chunk));
       } catch {
-        try {
-          socket.write(encodeReply({ kind: 'error', message: 'ERR protocol error' }));
-          socket.end();
-        } catch {
-          socket.destroy();
-        }
+        this.writeReply(state, { kind: 'error', message: 'ERR protocol error' });
+        this.endSocket(state);
       }
     });
+    socket.on('drain', () => this.flushOutput(state));
     const cleanup = (): void => {
       this.sockets.delete(socket);
+      state.outputClosed = true;
+      state.outputQueue.length = 0;
+      state.outputQueueBytes = 0;
       for (const [channel, listener] of state.subs) {
         this.hub.unsubscribe(channel, listener);
       }
@@ -632,6 +660,76 @@ export class YasdServer {
     };
     socket.on('close', cleanup);
     socket.on('error', () => undefined);
+  }
+
+  /** Write immediately until Node signals backpressure, then queue bounded output. */
+  private writeSocket(state: ConnState, data: Buffer): boolean {
+    if (state.outputClosed || state.closeWhenDrained || state.socket.destroyed) return false;
+    if (state.outputBackpressured || state.outputQueue.length > 0) {
+      if (state.outputQueueBytes + data.length > this.maxPendingOutputBytes) {
+        this.disconnectSlowConsumer(state);
+        return false;
+      }
+      state.outputQueue.push(data);
+      state.outputQueueBytes += data.length;
+      return true;
+    }
+    try {
+      state.outputBackpressured = !state.socket.write(data);
+      return true;
+    } catch {
+      this.disconnectSocket(state);
+      return false;
+    }
+  }
+
+  private writeReply(state: ConnState, reply: RespReply | null): boolean {
+    if (state.outputClosed || state.closeWhenDrained || state.socket.destroyed) return false;
+    return this.writeSocket(state, encodeReply(reply));
+  }
+
+  private flushOutput(state: ConnState): void {
+    if (state.outputClosed) return;
+    state.outputBackpressured = false;
+    while (state.outputQueue.length > 0) {
+      const data = state.outputQueue.shift() as Buffer;
+      state.outputQueueBytes -= data.length;
+      try {
+        if (!state.socket.write(data)) {
+          state.outputBackpressured = true;
+          return;
+        }
+      } catch {
+        this.disconnectSocket(state);
+        return;
+      }
+    }
+    if (state.closeWhenDrained) {
+      state.outputClosed = true;
+      state.socket.end();
+    }
+  }
+
+  private endSocket(state: ConnState): void {
+    if (state.outputClosed) return;
+    state.closeWhenDrained = true;
+    if (!state.outputBackpressured && state.outputQueue.length === 0) {
+      state.outputClosed = true;
+      state.socket.end();
+    }
+  }
+
+  private disconnectSlowConsumer(state: ConnState): void {
+    this.disconnectSocket(state);
+  }
+
+  private disconnectSocket(state: ConnState): void {
+    if (state.outputClosed) return;
+    state.outputClosed = true;
+    state.closeWhenDrained = false;
+    state.outputQueue.length = 0;
+    state.outputQueueBytes = 0;
+    state.socket.destroy();
   }
 
   private onData(state: ConnState, chunk: Buffer): void {
@@ -647,6 +745,7 @@ export class YasdServer {
     }
     const requests = state.decoder.push(chunk);
     for (const request of requests) {
+      if (state.outputClosed) return;
       const done = this.onRequest(state, request);
       if (done === 'close') return;
     }
@@ -664,7 +763,7 @@ export class YasdServer {
     const path = requestLine.split(' ')[1] ?? '/';
     if (path === '/healthz' || path === '/health') {
       const body = Buffer.from(JSON.stringify(this.info()), 'utf8');
-      state.socket.write(
+      this.writeSocket(state,
         Buffer.concat([
           Buffer.from(
             'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n' +
@@ -672,11 +771,10 @@ export class YasdServer {
             'utf8'
           ),
           body,
-        ])
-      );
+        ]));
     } else {
       const body = Buffer.from('{"error":"not found"}', 'utf8');
-      state.socket.write(
+      this.writeSocket(state,
         Buffer.concat([
           Buffer.from(
             'HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\n' +
@@ -684,10 +782,9 @@ export class YasdServer {
             'utf8'
           ),
           body,
-        ])
-      );
+        ]));
     }
-    state.socket.end();
+    this.endSocket(state);
   }
 
   /** Returns 'close' when the connection was ended (QUIT). */
@@ -696,35 +793,31 @@ export class YasdServer {
     try {
       argv = requestArgv(request);
     } catch (err) {
-      state.socket.write(encodeReply({ kind: 'error', message: `ERR ${(err as Error).message}` }));
+      this.writeReply(state, { kind: 'error', message: `ERR ${(err as Error).message}` });
       return 'ok';
     }
     const cmd = (argv[0] ?? '').toUpperCase();
     if (!state.authed && cmd !== 'AUTH' && cmd !== 'QUIT') {
-      state.socket.write(
-        encodeReply({ kind: 'error', message: 'NOAUTH Authentication required (send AUTH first)' })
-      );
+      this.writeReply(state, { kind: 'error', message: 'NOAUTH Authentication required (send AUTH first)' });
       return 'ok';
     }
     if (state.subMode && cmd !== 'SUBSCRIBE' && cmd !== 'UNSUBSCRIBE' && cmd !== 'PING' && cmd !== 'QUIT' && cmd !== 'AUTH') {
-      state.socket.write(
-        encodeReply({ kind: 'error', message: 'ERR only AUTH/SUBSCRIBE/UNSUBSCRIBE/PING/QUIT allowed in subscriber mode' })
-      );
+      this.writeReply(state, { kind: 'error', message: 'ERR only AUTH/SUBSCRIBE/UNSUBSCRIBE/PING/QUIT allowed in subscriber mode' });
       return 'ok';
     }
     const started = performance.now();
     try {
       const reply = this.dispatch(state, cmd, argv.slice(1));
       if (reply === 'close') {
-        state.socket.write(encodeReply({ kind: 'simple', value: 'OK' }));
-        state.socket.end();
+        this.writeReply(state, { kind: 'simple', value: 'OK' });
+        this.endSocket(state);
         return 'close';
       }
       if (reply !== 'silent') {
-        state.socket.write(encodeReply(reply));
+        this.writeReply(state, reply);
       }
     } catch (err) {
-      state.socket.write(encodeReply({ kind: 'error', message: `ERR ${(err as Error).message}` }));
+      this.writeReply(state, { kind: 'error', message: `ERR ${(err as Error).message}` });
     } finally {
       // SAVE/LOAD finish asynchronously; the sync portion is what's timed.
       this.slow.record(cmd, performance.now() - started, argv.length - 1);
@@ -1200,20 +1293,14 @@ export class YasdServer {
         for (const channel of args) {
           if (!state.subs.has(channel)) {
             const listener: PubSubListener = (ch, message) => {
-              try {
-                state.socket.write(
-                  encodeReply({
-                    kind: 'array',
-                    items: [
-                      { kind: 'bulk', value: 'message' },
-                      { kind: 'bulk', value: ch },
-                      { kind: 'bulk', value: message },
-                    ],
-                  })
-                );
-              } catch {
-                // ignore write failures; socket cleanup unsubscribes
-              }
+              this.writeReply(state, {
+                kind: 'array',
+                items: [
+                  { kind: 'bulk', value: 'message' },
+                  { kind: 'bulk', value: ch },
+                  { kind: 'bulk', value: message },
+                ],
+              });
             };
             state.subs.set(channel, listener);
             this.hub.subscribe(channel, listener);
@@ -1228,7 +1315,9 @@ export class YasdServer {
           });
         }
         // Multiple acks, one per channel (Redis-compatible).
-        for (const ack of acks) state.socket.write(encodeReply(ack));
+        for (const ack of acks) {
+          if (!this.writeReply(state, ack)) break;
+        }
         return 'silent';
       }
 
@@ -1240,16 +1329,14 @@ export class YasdServer {
             this.hub.unsubscribe(channel, listener);
             state.subs.delete(channel);
           }
-          state.socket.write(
-            encodeReply({
-              kind: 'array',
-              items: [
-                { kind: 'bulk', value: 'unsubscribe' },
-                { kind: 'bulk', value: channel },
-                { kind: 'int', value: state.subs.size },
-              ],
-            })
-          );
+          if (!this.writeReply(state, {
+            kind: 'array',
+            items: [
+              { kind: 'bulk', value: 'unsubscribe' },
+              { kind: 'bulk', value: channel },
+              { kind: 'int', value: state.subs.size },
+            ],
+          })) break;
         }
         if (state.subs.size === 0) state.subMode = false;
         return 'silent';
@@ -1266,8 +1353,8 @@ export class YasdServer {
         // To keep command handling synchronous, run and reply when done.
         this.save(path)
           .then(
-            () => state.socket.write(encodeReply({ kind: 'simple', value: 'OK' })),
-            err => state.socket.write(encodeReply({ kind: 'error', message: `ERR ${(err as Error).message}` }))
+            () => this.writeReply(state, { kind: 'simple', value: 'OK' }),
+            err => this.writeReply(state, { kind: 'error', message: `ERR ${(err as Error).message}` })
           )
           .catch(() => undefined);
         return 'silent';
@@ -1278,8 +1365,8 @@ export class YasdServer {
         const path = args[0];
         this.load(path)
           .then(
-            count => state.socket.write(encodeReply({ kind: 'simple', value: `OK ${count}` })),
-            err => state.socket.write(encodeReply({ kind: 'error', message: `ERR ${(err as Error).message}` }))
+            count => this.writeReply(state, { kind: 'simple', value: `OK ${count}` }),
+            err => this.writeReply(state, { kind: 'error', message: `ERR ${(err as Error).message}` })
           )
           .catch(() => undefined);
         return 'silent';

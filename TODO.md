@@ -68,7 +68,7 @@ source.
 - [x] Make byte accounting use UTF-8 for keys as well as values. The current
   estimate uses `key.length * 2` (`src/cache.ts:76-90`) while the public metric
   is called bytes. Use one documented size model and test non-ASCII keys.
-- [ ] Add backpressure and output limits. Server writes ignore the return value
+- [x] Add backpressure and output limits. Server writes ignore the return value
   of `socket.write()` (`src/server.ts:524-526,796-855`), so a slow subscriber can
   grow memory without bound. Queue bounded output, pause reads, or disconnect
   slow consumers.

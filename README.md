@@ -187,6 +187,11 @@ Protect the RESP port with a password, TLS, or both. Password auth is per
 connection; `/healthz` stays open for load balancers. Use `yasds://` on clients
 when TLS is enabled:
 
+Each connection has a bounded pending-output queue of 1 MiB by default. If a
+slow subscriber fills its queue, YASD disconnects it. Configure the limit with
+`maxPendingOutputBytes`, `--max-pending-output-bytes`, or
+`YASD_MAX_PENDING_OUTPUT_BYTES`.
+
 ```bash
 YASD_PASSWORD='change-me' \
 YASD_TLS_KEY=./tls/server.key \
