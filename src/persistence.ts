@@ -151,9 +151,6 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function isIncompleteJsonError(error: unknown): boolean {
-  return error instanceof SyntaxError && /unexpected end of JSON input/i.test(error.message)
-}
 
 async function writeDurableFile(filePath: string, contents: string): Promise<void> {
   const handle = await fs.promises.open(filePath, 'w');

@@ -35,13 +35,46 @@ interface RespLimits {
   maxBufferedBytes: number;
 }
 
-const DEFAULT_RESP_LIMITS: RespLimits = {
+export const DEFAULT_RESP_LIMITS: Readonly<RespLimits> = Object.freeze({
   maxFrameBytes: 8 * 1024 * 1024,
   maxArguments: 1024,
   maxBulkBytes: 4 * 1024 * 1024,
   maxDepth: 32,
   maxBufferedBytes: 8 * 1024 * 1024,
-};
+});
+
+/** Validate response shape and size without allocating its encoded buffer. */
+export function replyByteLength(reply: RespReply | null, depth = 0): number {
+  let bytes: number;
+  if (reply === null || reply.kind === 'nil') return 5;
+  switch (reply.kind) {
+    case 'bulk': {
+      if (reply.value === null) return 5;
+      const size = Buffer.byteLength(reply.value);
+      if (size > DEFAULT_RESP_LIMITS.maxBulkBytes) throw new Error('RESP bulk length exceeds limit');
+      bytes = size + String(size).length + 5;
+      break;
+    }
+    case 'array':
+      if (depth >= DEFAULT_RESP_LIMITS.maxDepth || reply.items.length > DEFAULT_RESP_LIMITS.maxArguments) {
+        throw new Error('RESP array/depth exceeds limit');
+      }
+      bytes = String(reply.items.length).length + 3;
+      for (const item of reply.items) {
+        bytes += replyByteLength(item, depth + 1);
+        if (bytes > DEFAULT_RESP_LIMITS.maxFrameBytes) throw new Error('RESP frame exceeds limit');
+      }
+      break;
+    case 'int':
+      if (!Number.isSafeInteger(reply.value)) throw new Error('RESP integers must be safe integers');
+      bytes = String(reply.value).length + 3;
+      break;
+    case 'simple': bytes = Buffer.byteLength(reply.value) + 3; break;
+    case 'error': bytes = Buffer.byteLength(reply.message) + 3; break;
+  }
+  if (bytes > DEFAULT_RESP_LIMITS.maxFrameBytes) throw new Error('RESP frame exceeds limit');
+  return bytes;
+}
 
 function positiveLimit(value: number | undefined, name: string, fallback: number): number {
   const limit = value ?? fallback;

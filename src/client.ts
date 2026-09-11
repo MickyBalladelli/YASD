@@ -1209,7 +1209,11 @@ export class YasdTransaction {
   /** Immediate read (must precede MULTI — read first, then write). */
   async get(key: string): Promise<Value | undefined> {
     this.assertReadable('GET');
-    const reply = await this.send(['GET', key]);
+    const reply = await this.serialize(async () => {
+      if (this.begun) throw new TransactionError('GET must precede MULTI');
+      await this.connect();
+      return this.send(['GET', key]);
+    });
     if (reply.kind === 'bulk') {
       return reply.value === null ? undefined : (JSON.parse(reply.value) as Value);
     }

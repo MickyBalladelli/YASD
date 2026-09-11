@@ -359,7 +359,7 @@ export class Executor {
 
     switch (column.type) {
       case 'any':
-        return value;
+        return cloneJsonValue(value, 'SQL value');
       case 'string':
         if (typeof value === 'string') return value;
         break;

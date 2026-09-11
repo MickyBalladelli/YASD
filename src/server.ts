@@ -972,6 +972,8 @@ export class YasdServer {
       socket,
       decoder: new RespDecoder(),
       httpBuf: null,
+      protocol: 'undecided',
+      requestQueue: [], requestQueueBytes: 0, processing: false,
       subs: new Map(),
       subMode: false,
       authed: !this.authRequired,
@@ -1092,21 +1094,40 @@ export class YasdServer {
   }
 
   private onData(state: ConnState, chunk: Buffer): void {
-    // Single-port HTTP: buffer an ASCII method prefix until the full header arrives.
-    if (state.httpBuf !== null) {
+    if (chunk.length === 0 || state.outputClosed || this.closing) return;
+    if (state.protocol === 'undecided') {
+      state.protocol = isHttpMethodStart(chunk) ? 'http' : 'resp';
+      if (state.protocol === 'http') state.httpBuf = Buffer.alloc(0);
+    }
+    if (state.protocol === 'http') {
       this.onHttpData(state, chunk);
       return;
     }
-    if (isHttpMethodStart(chunk)) {
-      state.httpBuf = Buffer.alloc(0);
-      this.onHttpData(state, chunk);
-      return;
+    for (const request of state.decoder.push(chunk)) {
+      const bytes = replyByteLength(request);
+      if (state.requestQueue.length >= this.maxQueuedRequests || state.requestQueueBytes + bytes > 8 * 1024 * 1024) {
+        this.disconnectSocket(state);
+        return;
+      }
+      state.requestQueue.push(request);
+      state.requestQueueBytes += bytes;
     }
-    const requests = state.decoder.push(chunk);
-    for (const request of requests) {
-      if (state.outputClosed) return;
-      const done = this.onRequest(state, request);
-      if (done === 'close') return;
+    if (!state.processing) void this.drainRequests(state);
+  }
+
+  private async drainRequests(state: ConnState): Promise<void> {
+    state.processing = true;
+    try {
+      while (state.requestQueue.length && !state.outputClosed) {
+        const request = state.requestQueue.shift() as RespReply;
+        state.requestQueueBytes -= replyByteLength(request);
+        if (await this.onRequest(state, request) === 'close') break;
+      }
+    } catch (error) {
+      this.writeReply(state, { kind: 'error', message: wireError(error) });
+      this.endSocket(state);
+    } finally {
+      state.processing = false;
     }
   }
 
