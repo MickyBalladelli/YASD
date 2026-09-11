@@ -25,11 +25,13 @@ import {
   validateNonNegativeNumber,
   validatePort,
   validatePositiveSafeInteger,
+  validateTimeout,
 } from './validation';
 
 const RECONNECT_MAX_ATTEMPTS = 4;
 const RECONNECT_BASE_DELAY_MS = 25;
 const RECONNECT_MAX_DELAY_MS = 1000;
+const MAX_CLIENT_POOL_SIZE = 1024;
 
 export interface YasdClientOptions {
   /** e.g. `yasd://127.0.0.1:7379?poolSize=4` (`yasds://` enables TLS). Host/port/poolSize fields win. */
@@ -54,6 +56,81 @@ export interface ParsedCacheUrl {
   tls?: boolean;
 }
 
+function decodeUrlPart(value: string, url: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new Error(`invalid CACHE_URL encoding: ${url}`);
+  }
+}
+
+function validatePassword(value: unknown, name: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') throw new Error(`${name} must be a string`);
+  return value.length === 0 ? undefined : value;
+}
+
+function resolveTlsOptions(
+  value: unknown,
+  urlTls: boolean | undefined,
+  name = 'tls'
+): tls.ConnectionOptions | undefined {
+  if (value === undefined) return urlTls === true ? {} : undefined;
+  if (typeof value === 'boolean') {
+    if (urlTls !== undefined && value !== urlTls) {
+      throw new Error(`${name} conflicts with the URL TLS scheme`);
+    }
+    return value ? {} : undefined;
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${name} must be true, false, or a TLS options object`);
+  }
+  if (urlTls === false) throw new Error(`${name} conflicts with the URL TLS scheme`);
+  const tlsOptions = value as tls.ConnectionOptions;
+  const hasKey = tlsOptions.key !== undefined;
+  const hasCert = tlsOptions.cert !== undefined;
+  if (hasKey !== hasCert && tlsOptions.pfx === undefined) {
+    throw new Error(`${name} requires both key and cert, or pfx`);
+  }
+  return { ...tlsOptions };
+}
+
+interface ResolvedClientOptions {
+  host: string;
+  port: number;
+  poolSize: number;
+  requestTimeoutMs: number;
+  password: string | undefined;
+  tlsOptions: tls.ConnectionOptions | undefined;
+}
+
+function resolveClientOptions(options: YasdClientOptions): ResolvedClientOptions {
+  const fromUrl = options.url === undefined ? undefined : parseCacheUrl(options.url);
+  const poolSize = options.poolSize === undefined
+    ? fromUrl?.poolSize ?? 4
+    : validatePositiveSafeInteger(options.poolSize, 'poolSize', MAX_CLIENT_POOL_SIZE);
+  return {
+    host: validateHost(
+      options.host === undefined ? fromUrl?.host ?? '127.0.0.1' : options.host,
+      'host'
+    ),
+    port: options.port === undefined
+      ? fromUrl?.port ?? DEFAULT_PORT
+      : validatePort(options.port, 'port'),
+    poolSize: validatePositiveSafeInteger(poolSize, 'poolSize', MAX_CLIENT_POOL_SIZE),
+    requestTimeoutMs: options.requestTimeoutMs === undefined
+      ? 5000
+      : validateTimeout(options.requestTimeoutMs, 'requestTimeoutMs'),
+    password: options.password === undefined
+      ? fromUrl?.password
+      : validatePassword(options.password, 'password'),
+    tlsOptions: resolveTlsOptions(
+      options.tls,
+      fromUrl === undefined ? undefined : fromUrl.tls === true
+    ),
+  };
+}
+
 export function parseCacheUrl(url: string): ParsedCacheUrl {
   if (typeof url !== 'string') {
     throw new Error(`invalid CACHE_URL (want yasd://host:port): ${String(url)}`);
@@ -65,29 +142,34 @@ export function parseCacheUrl(url: string): ParsedCacheUrl {
   const tls = match[1] === 'yasds';
   const userinfo = match[2];
   const rawHost = match[3] as string;
-  const host = rawHost.startsWith('[') && rawHost.endsWith(']') ? rawHost.slice(1, -1) : rawHost;
+  const decodedHost = decodeUrlPart(rawHost, url);
+  const host = decodedHost.startsWith('[') && decodedHost.endsWith(']')
+    ? decodedHost.slice(1, -1)
+    : decodedHost;
   validateHost(host, 'invalid CACHE_URL host');
   const port = match[4] === undefined ? DEFAULT_PORT : parsePort(match[4], 'invalid CACHE_URL port');
   let poolSize: number | undefined;
   let password: string | undefined;
   if (userinfo !== undefined && userinfo.length > 0) {
     const colon = userinfo.indexOf(':');
-    try {
-      password = decodeURIComponent(colon === -1 ? userinfo : userinfo.slice(colon + 1));
-    } catch {
-      throw new Error(`invalid CACHE_URL encoding: ${url}`);
-    }
-    if (password.length === 0) password = undefined;
+    decodeUrlPart(colon === -1 ? userinfo : userinfo.slice(0, colon), url);
+    password = validatePassword(
+      decodeUrlPart(colon === -1 ? userinfo : userinfo.slice(colon + 1), url),
+      'CACHE_URL password'
+    );
   }
-  if (match[5]) {
-    try {
-      decodeURIComponent(match[5]);
-    } catch {
-      throw new Error(`invalid CACHE_URL encoding: ${url}`);
-    }
+  if (match[5] !== undefined) {
+    decodeUrlPart(match[5], url);
+    const seen = new Set<string>();
     for (const [key, value] of new URLSearchParams(match[5])) {
-      if (key === 'poolSize') poolSize = parseStrictInteger(value, 'invalid CACHE_URL poolSize', 1);
-      if (key === 'password') password = value;
+      if ((key === 'poolSize' || key === 'password') && seen.has(key)) {
+        throw new Error(`invalid CACHE_URL: duplicate ${key}`);
+      }
+      seen.add(key);
+      if (key === 'poolSize') {
+        poolSize = parseStrictInteger(value, 'invalid CACHE_URL poolSize', 1, MAX_CLIENT_POOL_SIZE);
+      }
+      if (key === 'password') password = validatePassword(value, 'CACHE_URL password');
     }
   }
   const out: ParsedCacheUrl = { host, port };
@@ -154,27 +236,17 @@ export class YasdClient {
   private subCommandTail: Promise<void> = Promise.resolve();
 
   constructor(options: YasdClientOptions = {}) {
-    const fromUrl = options.url === undefined ? undefined : parseCacheUrl(options.url);
-    this.host = validateHost(
-      options.host === undefined ? fromUrl?.host ?? '127.0.0.1' : options.host,
-      'host'
-    );
-    this.port = options.port === undefined
-      ? fromUrl?.port ?? DEFAULT_PORT
-      : validatePort(options.port, 'port');
-    this.poolSize = options.poolSize === undefined
-      ? fromUrl?.poolSize ?? 4
-      : validatePositiveSafeInteger(options.poolSize, 'poolSize');
-    this.requestTimeoutMs = options.requestTimeoutMs === undefined
-      ? 5000
-      : validateNonNegativeNumber(options.requestTimeoutMs, 'requestTimeoutMs');
-    const password = options.password ?? fromUrl?.password;
-    this.password = password && password.length > 0 ? password : undefined;
-    if (options.tls !== undefined) {
-      this.tlsOptions = options.tls === true ? {} : options.tls === false ? undefined : { ...options.tls };
-    } else if (fromUrl?.tls) {
-      this.tlsOptions = {};
+    const rawOptions = options as unknown;
+    if (rawOptions === null || typeof rawOptions !== 'object' || Array.isArray(rawOptions)) {
+      throw new Error('client options must be an object');
     }
+    const resolved = resolveClientOptions(rawOptions as YasdClientOptions);
+    this.host = resolved.host;
+    this.port = resolved.port;
+    this.poolSize = resolved.poolSize;
+    this.requestTimeoutMs = resolved.requestTimeoutMs;
+    this.password = resolved.password;
+    this.tlsOptions = resolved.tlsOptions;
   }
 
   /** Build from `CACHE_URL` (falls back to localhost default when unset). */
@@ -232,7 +304,7 @@ export class YasdClient {
 
   /** HTTP(S) `/healthz` against the server port. Throws when unhealthy. */
   async healthcheck(timeoutMs = 3000): Promise<ServerInfo> {
-    const timeout = validateNonNegativeNumber(timeoutMs, 'healthcheck timeoutMs');
+    const timeout = validateTimeout(timeoutMs, 'healthcheck timeoutMs');
     return new Promise<ServerInfo>((resolve, reject) => {
       const requestOptions: http.RequestOptions = {
         host: this.host,
@@ -1027,10 +1099,10 @@ export class YasdTransaction {
     this.host = validateHost(options.host, 'host');
     this.port = validatePort(options.port, 'port');
     this.password = options.password;
-    this.tlsOptions = options.tlsOptions;
+    this.tlsOptions = resolveTlsOptions(options.tlsOptions, undefined, 'tlsOptions');
     this.requestTimeoutMs = options.requestTimeoutMs === undefined
       ? 5000
-      : validateNonNegativeNumber(options.requestTimeoutMs, 'requestTimeoutMs');
+      : validateTimeout(options.requestTimeoutMs, 'requestTimeoutMs');
   }
 
   /** True once `exec()`, `discard()`, or `close()` has run. */

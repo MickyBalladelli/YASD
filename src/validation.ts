@@ -1,5 +1,6 @@
 const DECIMAL_NUMBER = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 const DECIMAL_INTEGER = /^[+-]?\d+$/;
+export const MAX_TIMEOUT_MS = 2_147_483_647;
 
 export function validateFiniteNumber(value: unknown, name: string): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -15,16 +16,22 @@ export function validateNonNegativeNumber(value: unknown, name: string): number 
   return value;
 }
 
-export function validateSafeInteger(value: unknown, name: string, min?: number): number {
-  if (!Number.isSafeInteger(value) || (min !== undefined && (value as number) < min)) {
-    const bound = min === undefined ? 'a safe integer' : `a safe integer >= ${min}`;
+export function validateSafeInteger(value: unknown, name: string, min?: number, max?: number): number {
+  if (
+    !Number.isSafeInteger(value) ||
+    (min !== undefined && (value as number) < min) ||
+    (max !== undefined && (value as number) > max)
+  ) {
+    const bound = min === undefined
+      ? max === undefined ? 'a safe integer' : `a safe integer <= ${max}`
+      : max === undefined ? `a safe integer >= ${min}` : `a safe integer between ${min} and ${max}`;
     throw new Error(`${name} must be ${bound}, got ${String(value)}`);
   }
   return value as number;
 }
 
-export function validatePositiveSafeInteger(value: unknown, name: string): number {
-  return validateSafeInteger(value, name, 1);
+export function validatePositiveSafeInteger(value: unknown, name: string, max?: number): number {
+  return validateSafeInteger(value, name, 1, max);
 }
 
 export function validateNonNegativeSafeInteger(value: unknown, name: string): number {
@@ -51,12 +58,15 @@ export function parseStrictNonNegativeNumber(raw: string, name: string): number 
   }
 }
 
-export function parseStrictInteger(raw: string, name: string, min?: number): number {
+export function parseStrictInteger(raw: string, name: string, min?: number, max?: number): number {
   const value = raw.trim();
   if (value.length === 0 || !DECIMAL_INTEGER.test(value)) {
-    throw new Error(`${name} must be a safe integer${min === undefined ? '' : ` >= ${min}`}, got ${raw}`);
+    const bound = min === undefined
+      ? max === undefined ? '' : ` <= ${max}`
+      : max === undefined ? ` >= ${min}` : ` between ${min} and ${max}`;
+    throw new Error(`${name} must be a safe integer${bound}, got ${raw}`);
   }
-  return validateSafeInteger(Number(value), name, min);
+  return validateSafeInteger(Number(value), name, min, max);
 }
 
 export function validatePort(value: unknown, name = 'port'): number {
@@ -73,8 +83,21 @@ export function parsePort(raw: string, name = 'port'): number {
 }
 
 export function validateHost(value: unknown, name = 'host'): string {
-  if (typeof value !== 'string' || value.trim().length === 0 || /[\u0000-\u0020]/.test(value)) {
+  if (
+    typeof value !== 'string' ||
+    value.length > 253 ||
+    value.trim().length === 0 ||
+    /[\u0000-\u0020/\\]/.test(value)
+  ) {
     throw new Error(`${name} must be a non-empty host name`);
   }
   return value;
+}
+
+export function validateTimeout(value: unknown, name = 'timeoutMs'): number {
+  const timeout = validateNonNegativeNumber(value, name);
+  if (timeout > MAX_TIMEOUT_MS) {
+    throw new Error(`${name} must be <= ${MAX_TIMEOUT_MS} ms, got ${String(value)}`);
+  }
+  return timeout;
 }

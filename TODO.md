@@ -81,7 +81,7 @@ source.
   when another subscribe call happens (`src/client.ts:449-487,642-792`). Serialize
   channel commands, clean all waiter/timer state, and offer explicit reconnect
   or resubscribe behavior.
-- [ ] Add input validation and limits to `parseCacheUrl()` and client options.
+- [x] Add input validation and limits to `parseCacheUrl()` and client options.
   Validate host, port, timeout, pool size, URL decoding, and TLS combinations in
   one place (`src/client.ts:44-141`).
 - [ ] Separate the HTTP health endpoint from RESP detection, or make detection

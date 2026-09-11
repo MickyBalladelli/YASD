@@ -259,7 +259,25 @@ async function runTests() {
       host: 'cache.internal', port: 7379, poolSize: 8,
     });
     assert.deepStrictEqual(parseCacheUrl('yasd://127.0.0.1'), { host: '127.0.0.1', port: 7379 });
+    assert.deepStrictEqual(parseCacheUrl('yasd://:p%40ss@cache.internal?password=q%2Br'), {
+      host: 'cache.internal', port: 7379, password: 'q+r',
+    });
     assert.throws(() => parseCacheUrl('http://x'), /invalid CACHE_URL/);
+    assert.throws(() => parseCacheUrl('yasd://user%ZZ:pass@cache.internal'), /encoding/);
+    assert.throws(() => parseCacheUrl('yasd://cache.internal:65536'), /port/);
+    assert.throws(() => parseCacheUrl('yasd://cache.internal?poolSize=10oops'), /poolSize/);
+    assert.throws(() => parseCacheUrl('yasd://cache.internal?poolSize=1025'), /poolSize/);
+    assert.throws(() => parseCacheUrl('yasd://bad%2Fhost'), /host/);
+    assert.throws(() => new YasdClient({ host: 'bad/host' }), /host/);
+    assert.throws(() => new YasdClient({ port: 65536 }), /port/);
+    assert.throws(() => new YasdClient({ poolSize: 0 }), /poolSize/);
+    assert.throws(() => new YasdClient({ poolSize: 1025 }), /poolSize/);
+    assert.throws(() => new YasdClient({ requestTimeoutMs: NaN }), /requestTimeoutMs/);
+    assert.throws(() => new YasdClient({ requestTimeoutMs: 2_147_483_648 }), /requestTimeoutMs/);
+    assert.throws(() => new YasdClient({ url: 'yasds://cache.internal', tls: false }), /TLS/);
+    assert.throws(() => new YasdClient({ url: 'yasd://cache.internal', tls: true }), /TLS/);
+    assert.throws(() => new YasdClient({ url: 'yasd://cache.internal', tls: {} }), /TLS/);
+    assert.throws(() => new YasdClient({ tls: null }), /TLS/);
     const c = YasdClient.fromEnv({ CACHE_URL: 'yasd://127.0.0.1:7379?poolSize=2' });
     assert.deepStrictEqual(c.endpoint, { host: '127.0.0.1', port: 7379 });
     await c.close();
