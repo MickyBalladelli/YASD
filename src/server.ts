@@ -610,6 +610,10 @@ export class YasdServer {
   private healthToken: string | undefined;
   private tlsOptions: YasdServerTlsOptions | undefined;
   private slow = new SlowLog();
+  private persistenceDepth = 0;
+  private starting?: Promise<void>;
+  private stopping?: Promise<void>;
+  private recovered = false;
 
   constructor(options: YasdServerOptions = {}) {
     if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error('server options must be an object');
@@ -768,9 +772,20 @@ export class YasdServer {
     return { host: this.host, port: this.port };
   }
 
-  async start(): Promise<void> {
-    if (this.netServer) return;
-    if (this.loadOnStart) {
+  start(): Promise<void> {
+    if (this.closing) return Promise.reject(new DatabaseError('closed server cannot be restarted; create a new server', 'CONNECTION_CLOSED'));
+    if (this.starting) return this.starting;
+    if (this.netServer?.listening) return Promise.resolve();
+    this.starting = this.startUnlocked().catch(error => {
+      this.netServer?.close();
+      this.netServer = undefined;
+      throw error;
+    }).finally(() => { this.starting = undefined; });
+    return this.starting;
+  }
+
+  private async startUnlocked(): Promise<void> {
+    if (this.loadOnStart && !this.recovered) {
       const snapshotMetadata: SnapshotLoadMetadata = {};
       if (this.snapshotPath) {
         try {
@@ -820,7 +835,7 @@ export class YasdServer {
     });
     if (this.autoSaveMs > 0) {
       this.autoSaveTimer = setInterval(() => {
-        this.save().catch(() => undefined);
+        if (this.persistenceDepth === 0 && !this.closing) this.save().catch(() => undefined);
       }, this.autoSaveMs);
       const t = this.autoSaveTimer as unknown as { unref?: () => void };
       if (typeof t.unref === 'function') t.unref();
@@ -1877,5 +1892,4 @@ export class YasdServer {
   }
 }
 
-// Re-exported so `encodeCommand` users (tests, client) share one import root.
-export { encodeCommand };
+// Re-exported so `encodeComm                                                                            
