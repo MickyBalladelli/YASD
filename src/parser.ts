@@ -431,6 +431,7 @@ class Parser {
       
       if (this.peek() === ',') {
         this.consume();
+        if (this.peek() === ')') throw new Error('Unexpected trailing comma');
       } else if (this.peek() !== ')') {
         throw new Error(`Expected ',' or ')', got '${this.peek()}'`);
       }

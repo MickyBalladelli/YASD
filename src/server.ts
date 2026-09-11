@@ -796,7 +796,10 @@ export class YasdServer {
       throw this.safePersistenceError('snapshot save', err);
     }
     try {
-      this.aof.rotateAfter(snapshotSeq);
+      // An alternate target is an export, not the authoritative startup checkpoint.
+      if (this.snapshotPath && path.resolve(target) === path.resolve(this.snapshotPath)) {
+        this.aof.rotateAfter(snapshotSeq);
+      }
       this.aofDegraded = false;
       this.aofLastError = undefined;
       this.forgetPersistenceError('aof', 'write');
@@ -1520,9 +1523,8 @@ export class YasdServer {
           }
         }
         if (failed) throw abort;
-        if (effects.aof.length > 0) {
-          this.appendAof({ op: 'transaction', ops: effects.aof });
-        }
+      }, (entries, deleted) => {
+        if (entries.length || deleted.length) this.appendAof({ op: 'patch', entries, deleted });
       });
     } catch (err) {
       if (err !== abort) throw err;

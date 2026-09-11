@@ -407,7 +407,7 @@ export class AofLog {
   private noteRecovery(lines: string[], index: number, error: unknown, raw: string): void {
     const lineNumber = index + 1
     const detail = `AOF recovery at line ${lineNumber}: ${errorMessage(error)}`
-    const isTornTail = index === lines.length - 1 && isIncompleteJsonError(error)
+    const isTornTail = index === lines.length - 1 && error instanceof SyntaxError && isIncompleteJson(lines[index])
     if (isTornTail) {
       if (this.recoveryStatus === 'clean') {
         this.recoveryStatus = 'torn-tail'
@@ -435,7 +435,10 @@ export class AofLog {
   /** Replay the log; stop at corruption and only tolerate a torn final line. */
   async replay(cache: KVCache, snapshotSeq?: number): Promise<number> {
     if (!this.filePath) return 0;
-    if (snapshotSeq !== undefined) checkAofSeq(snapshotSeq, 'snapshotSeq');
+    if (snapshotSeq !== undefined) {
+      checkAofSeq(snapshotSeq, 'snapshotSeq');
+      this.lastSeq = Math.max(this.lastSeq, snapshotSeq);
+    }
     let raw: string;
     try {
       raw = await fs.promises.readFile(this.filePath, 'utf8');

@@ -1110,13 +1110,21 @@ export class YasdTransaction {
   private pending: Pending[] = [];
   private connecting?: Promise<void>;
   private begun = false;
+  private operationTail: Promise<void> = Promise.resolve();
+  private finishing = false;
   private done = false;
+
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.operationTail.then(operation);
+    this.operationTail = result.then(() => undefined, () => undefined);
+    return result;
+  }
   private dead = false;
 
   constructor(options: YasdTransactionOptions) {
     this.host = validateHost(options.host, 'host');
     this.port = validatePort(options.port, 'port');
-    this.password = options.password;
+    this.password = validatePassword(options.password, 'password');
     this.tlsOptions = resolveTlsOptions(options.tlsOptions, undefined, 'tlsOptions');
     this.requestTimeoutMs = options.requestTimeoutMs === undefined
       ? 5000
@@ -1302,6 +1310,10 @@ export class YasdTransaction {
   /** Send MULTI explicitly (optional — the first write auto-sends it). */
   async begin(): Promise<'OK'> {
     this.assertWritable('MULTI');
+    return this.serialize(() => this.beginUnlocked());
+  }
+
+  private async beginUnlocked(): Promise<'OK'> {
     if (this.begun) throw new TransactionError('MULTI calls cannot nest');
     const ok = await this.expectOk(['MULTI']);
     this.begun = true;
@@ -1364,12 +1376,14 @@ export class YasdTransaction {
   /** Queue a write: auto-sends MULTI on the first write, expects QUEUED. */
   private async queue(cmd: string[]): Promise<void> {
     this.assertWritable(cmd[0] ?? 'queue');
-    await this.connect();
-    if (!this.begun) await this.begin();
-    const reply = await this.send(cmd);
-    if (reply.kind !== 'simple' || reply.value !== 'QUEUED') {
-      throw new Error(`unexpected ${cmd[0]} reply inside MULTI: ${JSON.stringify(reply)}`);
-    }
+    return this.serialize(async () => {
+      await this.connect();
+      if (!this.begun) await this.beginUnlocked();
+      const reply = await this.send(cmd);
+      if (reply.kind !== 'simple' || reply.value !== 'QUEUED') {
+        throw new Error(`unexpected ${cmd[0]} reply inside MULTI: ${JSON.stringify(reply)}`);
+      }
+    });
   }
 
   private async expectOk(cmd: string[]): Promise<'OK'> {
