@@ -14,6 +14,7 @@ import {
   UpdateStatement,
   DeleteStatement,
   DropTableStatement,
+  ColumnDefinition,
   WhereClause,
   QueryResult,
   ComparisonClause,
@@ -225,6 +226,80 @@ export class Executor {
     }
   }
 
+  private coerceWriteValue(
+    value: Value,
+    column: ColumnDefinition,
+    tableName: string,
+    primaryKey = false
+  ): Value {
+    if (value === null) {
+      if (column.nullable === false || primaryKey) {
+        const reason = primaryKey ? 'Primary key' : `Column '${column.name}'`;
+        throw new DatabaseError(`${reason} cannot be null`, primaryKey ? 'PRIMARY_KEY_CONSTRAINT' : 'NOT_NULL_CONSTRAINT');
+      }
+      return null;
+    }
+
+    switch (column.type) {
+      case 'any':
+        return value;
+      case 'string':
+        if (typeof value === 'string') return value;
+        break;
+      case 'number':
+        if (typeof value === 'number' && Number.isFinite(value)) return value;
+        if (typeof value === 'string' && value.trim() !== '') {
+          const converted = Number(value);
+          if (Number.isFinite(converted)) return converted;
+        }
+        break;
+      case 'boolean':
+        if (typeof value === 'boolean') return value;
+        if (typeof value === 'string') {
+          if (value.toLowerCase() === 'true') return true;
+          if (value.toLowerCase() === 'false') return false;
+        }
+        break;
+    }
+
+    throw new DatabaseError(
+      `Invalid ${column.type} value for column '${column.name}' in table '${tableName}'`,
+      'TYPE_CONSTRAINT'
+    );
+  }
+
+  private assertPrimaryKeyUnique(
+    table: TableData,
+    candidates: Array<{ index?: number; row: Row }>
+  ): void {
+    const primaryKey = table.schema.primaryKey;
+    if (!primaryKey) return;
+
+    const replacedRows = new Set(
+      candidates
+        .filter(candidate => candidate.index !== undefined)
+        .map(candidate => candidate.index)
+    );
+    const seen: Value[] = [];
+
+    for (let i = 0; i < table.rows.length; i++) {
+      if (!replacedRows.has(i)) {
+        seen.push(table.rows[i][primaryKey]);
+      }
+    }
+
+    for (const candidate of candidates) {
+      const value = candidate.row[primaryKey];
+      if (seen.some(existing => this.valuesEqual(existing, value))) {
+        throw new DatabaseError(
+          `Duplicate primary key value '${String(value)}' in table '${table.schema.name}'`,
+          'PRIMARY_KEY_CONSTRAINT'
+        );
+      }
+      seen.push(value);
+    }
+  }
+
   // Execute methods
 
   private executeCreateTable(statement: CreateTableStatement): QueryResult {
@@ -272,86 +347,85 @@ export class Executor {
     }
 
     const colDefs = table.schema.columns;
-    let affectedRows = 0;
+    const insertColDefs: typeof colDefs = [];
+    const seenColumns = new Set<string>();
 
-    for (const rowValues of values) {
+    if (columns.length > 0) {
+      for (const colName of columns) {
+        if (seenColumns.has(colName)) {
+          throw new DatabaseError(`Duplicate INSERT column '${colName}'`, 'DUPLICATE_COLUMN');
+        }
+        seenColumns.add(colName);
+
+        const colDef = colDefs.find(c => c.name === colName);
+        if (!colDef) {
+          throw new DatabaseError(`Column '${colName}' not found in table '${tableName}'`, 'COLUMN_NOT_FOUND');
+        }
+        insertColDefs.push(colDef);
+      }
+    } else {
+      insertColDefs.push(...colDefs);
+    }
+
+    const preparedRows: Row[] = [];
+    for (let rowIndex = 0; rowIndex < values.length; rowIndex++) {
+      const rowValues = values[rowIndex];
+      if (rowValues.length !== insertColDefs.length) {
+        throw new DatabaseError(
+          `Row ${rowIndex + 1} has ${rowValues.length} values; expected ${insertColDefs.length}`,
+          'ROW_ARITY'
+        );
+      }
+
       const row: Row = {};
 
       // Fill in values for specified columns or all columns in order
-      if (columns.length > 0) {
-        // Values for specified columns
-        for (let i = 0; i < columns.length; i++) {
-          const colName = columns[i];
-          const colDef = colDefs.find(c => c.name === colName);
-
-          if (!colDef) {
-            throw new DatabaseError(`Column '${colName}' not found in table '${tableName}'`, 'COLUMN_NOT_FOUND');
-          }
-
-          let value = rowValues[i];
-
-          // Convert value based on column type
-          if (colDef.type === 'number' && typeof value === 'string') {
-            value = Number(value);
-          } else if (colDef.type === 'boolean' && typeof value === 'string') {
-            value = value.toLowerCase() === 'true';
-          }
-
-          row[colName] = value;
-        }
-      } else {
-        // Values for all columns in table order
-        for (let i = 0; i < colDefs.length && i < rowValues.length; i++) {
-          const colDef = colDefs[i];
-          let value = rowValues[i];
-
-          // Convert value based on column type
-          if (colDef.type === 'number' && typeof value === 'string') {
-            value = Number(value);
-          } else if (colDef.type === 'boolean' && typeof value === 'string') {
-            value = value.toLowerCase() === 'true';
-          }
-
-          row[colDef.name] = value;
-        }
+      for (let i = 0; i < insertColDefs.length; i++) {
+        const colDef = insertColDefs[i];
+        row[colDef.name] = this.coerceWriteValue(
+          rowValues[i],
+          colDef,
+          tableName,
+          colDef.name === table.schema.primaryKey
+        );
       }
 
       // Fill in default values for unspecified columns
       for (const colDef of colDefs) {
-        if (!row.hasOwnProperty(colDef.name)) {
+        if (!Object.prototype.hasOwnProperty.call(row, colDef.name)) {
           if (colDef.default !== undefined) {
-            row[colDef.name] = colDef.default;
-          } else if (!colDef.nullable) {
-            throw new DatabaseError(`Column '${colDef.name}' cannot be null`, 'NOT_NULL_CONSTRAINT');
+            row[colDef.name] = this.coerceWriteValue(
+              colDef.default,
+              colDef,
+              tableName,
+              colDef.name === table.schema.primaryKey
+            );
           } else {
-            row[colDef.name] = null;
+            row[colDef.name] = this.coerceWriteValue(
+              null,
+              colDef,
+              tableName,
+              colDef.name === table.schema.primaryKey
+            );
           }
         }
       }
 
-      // Add to table
-      const rowIndex = table.rows.length;
-      table.rows.push(row);
-
-      // Update indexes (primitives only; objects/arrays are skipped)
-      for (const colDef of colDefs) {
-        const index = table.indexes[colDef.name];
-        const value = row[colDef.name];
-        if (index && this.isIndexableValue(value)) {
-          if (!index.has(value)) {
-            index.set(value, []);
-          }
-          index.get(value)!.push(rowIndex);
-        }
-      }
-
-      affectedRows++;
+      preparedRows.push(row);
     }
+
+    this.assertPrimaryKeyUnique(
+      table,
+      preparedRows.map(row => ({ row }))
+    );
+
+    table.rows.push(...preparedRows);
+    this.rebuildIndexes(table);
 
     return {
       columns: [],
       rows: [],
-      affectedRows
+      affectedRows: preparedRows.length
     };
   }
 
@@ -437,7 +511,31 @@ export class Executor {
       throw new DatabaseError(`Table '${tableName}' not found`, 'TABLE_NOT_FOUND');
     }
 
-    let affectedRows = 0;
+    const setColumns = new Set<string>();
+    const preparedSet: Array<{ column: string; value: Value }> = [];
+    for (const { column, value } of set) {
+      if (setColumns.has(column)) {
+        throw new DatabaseError(`Duplicate UPDATE column '${column}'`, 'DUPLICATE_COLUMN');
+      }
+      setColumns.add(column);
+
+      const colDef = table.schema.columns.find(c => c.name === column);
+      if (!colDef) {
+        throw new DatabaseError(`Column '${column}' not found in table '${tableName}'`, 'COLUMN_NOT_FOUND');
+      }
+
+      preparedSet.push({
+        column,
+        value: this.coerceWriteValue(
+          value,
+          colDef,
+          tableName,
+          column === table.schema.primaryKey
+        )
+      });
+    }
+
+    const updates: Array<{ index: number; row: Row }> = [];
 
     for (let i = 0; i < table.rows.length; i++) {
       const row = table.rows[i];
@@ -447,55 +545,24 @@ export class Executor {
         continue;
       }
 
-      // Apply SET changes
-      for (const { column, value } of set) {
-        const colDef = table.schema.columns.find(c => c.name === column);
-        if (!colDef) {
-          throw new DatabaseError(`Column '${column}' not found in table '${tableName}'`, 'COLUMN_NOT_FOUND');
-        }
-
-        let finalValue = value;
-        if (colDef.type === 'number' && typeof value === 'string') {
-          finalValue = Number(value);
-        } else if (colDef.type === 'boolean' && typeof value === 'string') {
-          finalValue = value.toLowerCase() === 'true';
-        }
-
-        // Remove old value from index
-        const index = table.indexes[column];
-        if (index && row[column] !== undefined && this.isIndexableValue(row[column])) {
-          const oldValue = row[column] as Primitive;
-          const indices = index.get(oldValue);
-          if (indices) {
-            const pos = indices.indexOf(i);
-            if (pos > -1) {
-              indices.splice(pos, 1);
-              if (indices.length === 0) {
-                index.delete(oldValue);
-              }
-            }
-          }
-        }
-
-        // Update value
-        row[column] = finalValue;
-
-        // Add new value to index
-        if (index && this.isIndexableValue(finalValue)) {
-          if (!index.has(finalValue)) {
-            index.set(finalValue, []);
-          }
-          index.get(finalValue)!.push(i);
-        }
+      const nextRow = { ...row };
+      for (const { column, value } of preparedSet) {
+        nextRow[column] = value;
       }
-
-      affectedRows++;
+      updates.push({ index: i, row: nextRow });
     }
+
+    this.assertPrimaryKeyUnique(table, updates);
+
+    for (const update of updates) {
+      table.rows[update.index] = update.row;
+    }
+    if (updates.length > 0) this.rebuildIndexes(table);
 
     return {
       columns: [],
       rows: [],
-      affectedRows
+      affectedRows: updates.length
     };
   }
 

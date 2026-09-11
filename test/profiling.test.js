@@ -222,6 +222,63 @@ async function runTests() {
     assert.doesNotThrow(() => YASD.parse('CREATE TABLE without_primary_key (id int)'));
   });
 
+  await test('executor enforces constraints on INSERT and UPDATE', async () => {
+    const db = new YASD({ sweepIntervalMs: 0 })
+    db.query('CREATE TABLE constrained (id int primary key, name string NOT NULL, enabled boolean, score number)')
+    db.query("INSERT INTO constrained VALUES (1, 'A', true, 10)")
+
+    assert.throws(
+      () => db.query("INSERT INTO constrained VALUES (2, 'B', true)"),
+      /expected 4/
+    )
+    assert.throws(
+      () => db.query("INSERT INTO constrained VALUES (2, 'B', true, 20, 30)"),
+      /expected 4/
+    )
+    assert.throws(
+      () => db.query("INSERT INTO constrained (id, id, name, enabled, score) VALUES (2, 2, 'B', true, 20)"),
+      /Duplicate INSERT column/
+    )
+    assert.throws(
+      () => db.query('INSERT INTO constrained VALUES (2, NULL, true, 20)'),
+      /cannot be null/
+    )
+    assert.throws(
+      () => db.query("INSERT INTO constrained VALUES (2, 'B', true, 'not-a-number')"),
+      /Invalid number value/
+    )
+    assert.throws(
+      () => db.query("INSERT INTO constrained VALUES (2, 'B', 'not-a-boolean', 20)"),
+      /Invalid boolean value/
+    )
+    assert.throws(
+      () => db.query("INSERT INTO constrained VALUES (1, 'B', true, 20)"),
+      /Duplicate primary key value/
+    )
+
+    assert.strictEqual(db.query('SELECT * FROM constrained').rows.length, 1)
+    db.query("INSERT INTO constrained VALUES (2, 'B', true, 20)")
+
+    assert.throws(
+      () => db.query('UPDATE constrained SET id = 1 WHERE id = 2'),
+      /Duplicate primary key value/
+    )
+    assert.throws(
+      () => db.query("UPDATE constrained SET score = 'not-a-number' WHERE id = 2"),
+      /Invalid number value/
+    )
+    assert.throws(
+      () => db.query('UPDATE constrained SET name = NULL WHERE id = 2'),
+      /cannot be null/
+    )
+    assert.strictEqual(db.query('SELECT * FROM constrained WHERE id = 2').rows.length, 1)
+
+    db.query('UPDATE constrained SET id = 3 WHERE id = 2')
+    assert.strictEqual(db.query('SELECT * FROM constrained WHERE id = 2').rows.length, 0)
+    assert.strictEqual(db.query('SELECT * FROM constrained WHERE id = 3').rows.length, 1)
+    db.close()
+  })
+
   // ---- PROFILE ----
 
   await test('profile: SELECT reports plan + timing + row counts', async () => {

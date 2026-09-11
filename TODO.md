@@ -110,7 +110,7 @@ source.
 - [x] Reject unknown types and invalid schemas. `parseType()` silently maps an
   unknown type to `any` (`src/parser.ts:162-185`). Validate duplicate columns,
   empty tables, primary-key existence, and multiple primary-key declarations.
-- [ ] Enforce constraints on every write. Validate row arity, duplicate INSERT
+- [x] Enforce constraints on every write. Validate row arity, duplicate INSERT
   columns, supplied `NULL` for `NOT NULL`, type conversion failures, primary-key
   uniqueness, and primary-key updates (`src/executor.ts:253-343,419-487`).
 - [ ] Make writes atomic on validation failure. Multi-row INSERT and UPDATE can
