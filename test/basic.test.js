@@ -1,30 +1,16 @@
 #!/usr/bin/env node
 // Basic test script for YASD database
 
-// Try to use the compiled version
-let YASD;
+let YASD
 try {
   YASD = require('../dist/index.js').YASD;
   console.log('Using compiled version from dist/index.js');
-} catch (e) {
-  // Try TypeScript version with ts-node
-  try {
-    require('ts-node').register();
-    YASD = require('../src/index.ts').YASD;
-    console.log('Using TypeScript version with ts-node');
-  } catch (e2) {
-    console.log('TypeScript not available, using fallback for testing');
-    // We'll create a minimal test without the actual package
-  }
+} catch {
+  console.error('YASD build missing: run npm run build before running tests');
+  process.exit(1);
 }
 
 function runTests() {
-  if (!YASD) {
-    console.log('YASD not available, skipping tests');
-    console.log('Please run: npm install && npm run build');
-    return;
-  }
-
   console.log('Starting YASD tests...\n');
 
   let passed = 0;

@@ -7,10 +7,9 @@ let mod;
 try {
   mod = require('../dist/index.js');
   console.log('Using compiled version from dist/index.js');
-} catch (e) {
-  console.log('YASD not available, skipping tests');
-  console.log('Please run: npm run build');
-  process.exit(0);
+} catch {
+  console.error('YASD build missing: run npm run build before running tests');
+  process.exit(1);
 }
 
 const assert = require('assert');

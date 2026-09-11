@@ -159,7 +159,7 @@ source.
 
 ## P2 — Tests and delivery
 
-- [ ] Make test execution fail when the build is missing. Several scripts exit
+- [x] Make test execution fail when the build is missing. Several scripts exit
   successfully after printing “skipping tests” when `dist` is unavailable
   (`test/basic.test.js:4-24`, `test/kv.test.js:5-13`). Build in the test script
   or use a runner that reports missing prerequisites as failures.
