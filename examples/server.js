@@ -4,7 +4,7 @@
 
 const { YasdServer, YasdClient } = require('../dist/index.js');
 
-const PORT = parseInt(process.env.YASD_PORT || '7379', 10);
+const PORT = Number(process.env.YASD_PORT || '7379');
 
 async function main() {
   // 1. Start the standalone cache server (one per deployment, or per dev box).

@@ -76,6 +76,11 @@ const result = db.query('SELECT * FROM users ORDER BY age DESC');
 const result = db.query('SELECT * FROM users LIMIT 10 OFFSET 5');
 ```
 
+Each `query()` accepts exactly one statement. A final semicolon is optional;
+extra tokens or a second statement are rejected. Multi-row `INSERT` and
+multi-row `UPDATE` validate the complete write before changing any rows, so a
+failed constraint leaves the statement's earlier rows unchanged.
+
 ### Table Management
 
 ```javascript
@@ -139,12 +144,22 @@ CREATE TABLE table_name (
 )
 ```
 
+Types are `string` (`text`/`varchar`), `number` (`int`/`integer`/`float`/
+`decimal`/`numeric`), `boolean` (`bool`), and `any`. A table must contain at
+least one column. A primary key may be declared inline or as `PRIMARY KEY
+(column)`; it must name an existing column, and there can be only one. Primary
+keys are unique and non-NULL.
+
 #### INSERT
 ```sql
 INSERT INTO table_name (column1, column2) VALUES (value1, value2)
 INSERT INTO table_name VALUES (value1, value2)
 INSERT INTO table_name VALUES (v1, v2), (v3, v4)
 ```
+
+When a column is omitted, its `DEFAULT` is used; otherwise it receives NULL.
+NOT NULL columns and primary keys reject NULL. Row arity, duplicate columns,
+type conversion, and primary-key uniqueness are checked before the write.
 
 #### SELECT
 ```sql
@@ -157,13 +172,15 @@ SELECT * FROM table_name LIMIT n [OFFSET m]
 
 #### UPDATE
 ```sql
-UPDATE table_name SET col1 = value1, col2 = value2 WHERE condition
+UPDATE table_name SET col1 = value1, col2 = value2 [WHERE condition]
 ```
 
 #### DELETE
 ```sql
-DELETE FROM table_name WHERE condition
+DELETE FROM table_name [WHERE condition]
 ```
+
+Joins, aggregates, aliases, and multi-statement scripts are not supported.
 
 #### DROP TABLE
 ```sql
@@ -287,11 +304,28 @@ await client.reconnectSubscriptions() // restore registered channels after a dro
 
 await client.healthcheck(); // { status: 'ok' } unless health details are enabled
 await client.info();         // includes safe persistence status and limits
-await client.save();        // snapshot now (also truncates the AOF)
+await client.save();        // snapshot now (rotates the AOF)
 await stop();
 await client.close();
-await server.close();       // graceful: drains sockets, final SAVE
+await server.close();       // graceful: drains sockets, final SAVE when configured
 ```
+
+### TTL and persistence behavior
+
+`set(key, value, ttlMs)` uses the explicit TTL when supplied. Without one,
+known namespaces use their configured default and other keys persist. `ttl()`
+returns remaining milliseconds, `-1` for a persistent key, or `-2` for a
+missing/expired key. `expire()` replaces a TTL, `persist()` removes it, and
+`ttlMs: 0` expires the key immediately. Expiry is lazy on access and can also
+be removed by the background sweeper.
+
+Snapshots contain live entries and their absolute expiry deadlines. When
+`loadOnStart` is enabled, a server startup loads the snapshot first, then
+replays newer AOF records, so a restart does not extend a key's TTL. `SAVE`
+writes an atomic snapshot and rotates the AOF while retaining records written
+after that snapshot. `LOAD` replaces the cache with the selected snapshot; it
+does not replay the AOF and publishes a cache invalidation event. `SAVE` does
+not publish an invalidation because it does not change cache contents.
 
 Protocol commands: `AUTH PING GET SET[M PX] CAS MGET MSET DEL CLEAR TTL EXPIRE
 PERSIST INCR[BY] DECR[BY] WATCH UNWATCH MULTI EXEC DISCARD

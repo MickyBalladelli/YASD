@@ -61,7 +61,7 @@ console.log('   John is now', updatedJohn.rows[0].age, 'years old\n');
 
 // Insert with specific columns
 console.log('7. Inserting with specific columns:');
-db.query("INSERT INTO users (name, email, age) VALUES ('Alice Brown', 'alice@example.com', 28)");
+db.query("INSERT INTO users (id, name, email, age) VALUES (4, 'Alice Brown', 'alice@example.com', 28)");
 const alice = db.query('SELECT * FROM users WHERE name = \'Alice Brown\'');
 console.log('   Alice:', alice.rows[0]);
 console.log();
@@ -85,5 +85,6 @@ console.log('    Schema for users:', JSON.stringify(db.getTableSchema('users').c
 console.log('\n11. Resetting database...');
 db.reset();
 console.log('    Database reset. Tables:', db.getTableNames().length);
+db.close();
 
 console.log('\n=== Example Complete ===');

@@ -180,7 +180,7 @@ source.
 
 ## P2 — Docs and deployment
 
-- [ ] Make README, examples, and implementation agree on transaction atomicity,
+- [x] Make README, examples, and implementation agree on transaction atomicity,
   NULL semantics, supported SQL, TTL behavior, and SAVE/LOAD behavior.
 - [ ] Document limits, persistence guarantees, AOF recovery rules, cache-only
   durability expectations, invalidation delivery guarantees, and whether
