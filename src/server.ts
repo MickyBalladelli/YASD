@@ -808,6 +808,8 @@ export class YasdServer {
       }
       this.syncAofRecoveryStatus();
     }
+    this.recovered = true;
+    if (this.closing) throw new DatabaseError('server closed during start', 'CONNECTION_CLOSED');
     if (this.aof.recoveryState !== 'clean') {
       console.error(`yasd: WARNING: ${this.safeAofRecoveryError() ?? 'AOF recovery required'}`)
     }
@@ -990,30 +992,19 @@ export class YasdServer {
   }
 
   private async waitForDeadline(promise: Promise<unknown>, deadline: number): Promise<void> {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) return;
-    await new Promise<void>(resolve => {
-      let settled = false;
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        resolve();
-      }, remaining);
-      promise.then(
-        () => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          resolve();
-        },
-        () => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          resolve();
-        }
-      );
-    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new DatabaseError(
+            'shutdown deadline exceeded; persistence completion is unknown', 'TIMEOUT'
+          )), Math.max(0, deadline - Date.now()));
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private enqueuePersistence<T>(operation: () => Promise<T>): Promise<T> {
@@ -1892,4 +1883,4 @@ export class YasdServer {
   }
 }
 
-// Re-exported so `encodeComm                                                                            
+// Re-exported so `encodeComm                                        
