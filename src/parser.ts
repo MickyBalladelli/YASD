@@ -217,9 +217,29 @@ class Parser {
       case 'boolean':
         this.consume();
         return 'boolean';
-      default:
+      case 'any':
         this.consume();
         return 'any';
+      default:
+        throw new Error(`Unknown column type '${this.peek()}'`);
+    }
+  }
+
+  private validateCreateTableSchema(columns: ColumnDefinition[], primaryKey: string | undefined): void {
+    if (columns.length === 0) {
+      throw new Error('CREATE TABLE requires at least one column');
+    }
+
+    const columnNames = new Set<string>();
+    for (const column of columns) {
+      if (columnNames.has(column.name)) {
+        throw new Error(`Duplicate column '${column.name}'`);
+      }
+      columnNames.add(column.name);
+    }
+
+    if (primaryKey !== undefined && !columnNames.has(primaryKey)) {
+      throw new Error(`Primary key column '${primaryKey}' does not exist`);
     }
   }
 
@@ -337,15 +357,20 @@ class Parser {
     
     const columns: ColumnDefinition[] = [];
     let primaryKey: string | undefined;
+    let primaryKeyDeclarations = 0;
     
     while (this.peek() !== ')') {
       // Table-level `PRIMARY KEY (col)` constraint (no column definition).
       if (this.peek()?.toLowerCase() === 'primary') {
+        if (primaryKeyDeclarations > 0) {
+          throw new Error('Multiple primary key declarations are not allowed');
+        }
         this.consume();
         this.consume('key');
         this.consume('(');
         primaryKey = this.expectIdentifier();
         this.consume(')');
+        primaryKeyDeclarations++;
         if (this.peek() === ',') {
           this.consume();
         }
@@ -353,6 +378,9 @@ class Parser {
       }
 
       const columnName = this.expectIdentifier();
+      if (columns.some(column => column.name === columnName)) {
+        throw new Error(`Duplicate column '${columnName}'`);
+      }
       const columnType = this.parseType();
 
       // Optional sized type params, e.g. varchar(255) / numeric(10,2).
@@ -381,9 +409,13 @@ class Parser {
           this.consume();
           defaultValue = this.parseValue();
         } else if (next === 'primary') {
+          if (primaryKeyDeclarations > 0) {
+            throw new Error('Multiple primary key declarations are not allowed');
+          }
           this.consume();
           this.consume('key');
           primaryKey = columnName;
+          primaryKeyDeclarations++;
         } else {
           break;
         }
@@ -404,6 +436,8 @@ class Parser {
     if (this.peek() === ';') {
       this.consume();
     }
+
+    this.validateCreateTableSchema(columns, primaryKey);
     
     return { type: 'create_table', tableName, columns, primaryKey };
   }

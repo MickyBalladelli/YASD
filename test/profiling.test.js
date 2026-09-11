@@ -193,6 +193,35 @@ async function runTests() {
     assert.throws(() => YASD.parse('SELECT * FROM t LIMIT 1.5'), /LIMIT must be an integer/);
   });
 
+  await test('parser rejects unknown types and invalid schemas', async () => {
+    assert.throws(
+      () => YASD.parse('CREATE TABLE unknown_type (id mystery)'),
+      /Unknown column type/
+    );
+    assert.throws(
+      () => YASD.parse('CREATE TABLE empty_table ()'),
+      /at least one column/
+    );
+    assert.throws(
+      () => YASD.parse('CREATE TABLE duplicate_columns (id int, id string)'),
+      /Duplicate column/
+    );
+    assert.throws(
+      () => YASD.parse('CREATE TABLE missing_primary_key (id int, PRIMARY KEY (missing))'),
+      /Primary key column.*does not exist/
+    );
+    assert.throws(
+      () => YASD.parse('CREATE TABLE multiple_primary_keys (id int primary key, name string primary key)'),
+      /Multiple primary key declarations/
+    );
+    assert.throws(
+      () => YASD.parse('CREATE TABLE multiple_table_primary_keys (id int, name string, PRIMARY KEY (id), PRIMARY KEY (name))'),
+      /Multiple primary key declarations/
+    );
+
+    assert.doesNotThrow(() => YASD.parse('CREATE TABLE without_primary_key (id int)'));
+  });
+
   // ---- PROFILE ----
 
   await test('profile: SELECT reports plan + timing + row counts', async () => {

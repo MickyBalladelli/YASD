@@ -107,7 +107,7 @@ source.
 - [x] Harden tokenization. Detect unterminated quotes, support documented SQL
   escaping, make `NULL/TRUE/FALSE` case-insensitive, and reject malformed
   numeric tokens. Replace parser `any` values with typed AST values.
-- [ ] Reject unknown types and invalid schemas. `parseType()` silently maps an
+- [x] Reject unknown types and invalid schemas. `parseType()` silently maps an
   unknown type to `any` (`src/parser.ts:162-185`). Validate duplicate columns,
   empty tables, primary-key existence, and multiple primary-key declarations.
 - [ ] Enforce constraints on every write. Validate row arity, duplicate INSERT
