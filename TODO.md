@@ -130,7 +130,7 @@ source.
   changes with ASC/DESC because the comparator applies direction after its null
   result (`src/executor.ts:372-389`). Define stable ordering for nulls and
   incompatible types.
-- [ ] Improve indexed query planning. UPDATE/DELETE still scan all rows, every
+- [x] Improve indexed query planning. UPDATE/DELETE still scan all rows, every
   column is indexed by default, and index lists use linear removal
   (`src/executor.ts:234-242,419-477`). Add range indexes or better plans where
   useful, make index creation configurable, and benchmark memory/write costs.

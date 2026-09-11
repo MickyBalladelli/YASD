@@ -35,8 +35,9 @@ export interface TableData {
   schema: TableSchema;
   rows: Row[];
   // Indexes only cover Primitive values; objects/arrays are not indexed
-  // (reference-equality Map keys would be useless for lookups).
-  indexes: { [columnName: string]: Map<Primitive, number[]> };
+  // (reference-equality Map keys would be useless for lookups). Sets make
+  // row membership removal O(1); row positions are rebuilt after DELETE.
+  indexes: { [columnName: string]: Map<Primitive, Set<number>> };
 }
 
 export interface Database {

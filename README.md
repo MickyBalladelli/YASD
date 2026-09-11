@@ -96,6 +96,10 @@ db.query('DROP TABLE users');
 #### `new YASD()`
 Creates a new in-memory database instance.
 
+Pass `indexColumns` to control automatic SQL indexes. By default every column
+is indexed; `indexColumns: ['id', 'email']` limits indexes to those names on
+each table, and `indexColumns: []` disables automatic indexes.
+
 #### `db.query(sql: string): QueryResult`
 Executes a SQL query and returns the result.
 
@@ -369,11 +373,16 @@ db.profile('SELECT * FROM users WHERE age > 40');
 ```
 
 `explain()` plans without running: `=` / `IN` (including `AND`s of those) on
-indexed columns report `index-scan` with the columns used; ranges, `LIKE`,
-`OR`, and mixed predicates report `full-scan`. Non-`SELECT` statements report
+indexed columns report `index-scan` with the columns used; other predicates,
+`LIKE`, `OR`, and mixed predicates report `full-scan`. UPDATE and DELETE use
+the same equality/IN index plans internally. Non-`SELECT` statements report
 strategy `'n/a'`. `profile()` runs the query and adds sub-ms `durationMs`,
 `rowsReturned`, and `affectedRows` for writes — and the run feeds the
 slow-query log when over threshold.
+
+Run `npm run benchmark:indexes -- 10000 1000` to compare indexed, allowlisted,
+and index-free memory, insert, update, and equality-query costs. It prints one
+JSON result per configuration.
 
 ## Test Server
 

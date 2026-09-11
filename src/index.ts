@@ -91,6 +91,8 @@ export type { RespReply, RespDecoderOptions } from './protocol';
 export interface YasdOptions extends KVOptions {
   /** Log SQL queries slower than this (ms) into the slow-query log. 0 = off. */
   slowQueryMs?: number;
+  /** Columns automatically indexed on every table. Omit for all; [] for none. */
+  indexColumns?: string[];
 }
 
 export type {
@@ -110,9 +112,9 @@ export class YASD {
   private cache: KVCache;
   private hub: PubSubHub;
 
-  constructor(cacheOptions?: KVOptions) {
-    this.executor = new Executor();
-    const opts = cacheOptions as YasdOptions | undefined;
+  constructor(cacheOptions?: YasdOptions) {
+    this.executor = new Executor({ indexColumns: cacheOptions?.indexColumns });
+    const opts = cacheOptions;
     this.cache = new KVCache(cacheOptions);
     if (opts?.slowQueryMs !== undefined) {
       this.executor.setSlowQueryThreshold(opts.slowQueryMs);

@@ -353,6 +353,30 @@ async function runTests() {
     db.close()
   })
 
+  await test('index configuration plans writes around available indexes', async () => {
+    const db = new YASD({ sweepIntervalMs: 0, indexColumns: ['id'] })
+    db.query('CREATE TABLE indexed_writes (id int primary key, bucket number, label string)')
+    db.query("INSERT INTO indexed_writes VALUES (1, 10, 'a'), (2, 20, 'b'), (3, 30, 'c')")
+
+    assert.strictEqual(db.explain('SELECT * FROM indexed_writes WHERE id = 2').strategy, 'index-scan')
+    assert.strictEqual(db.explain('SELECT * FROM indexed_writes WHERE bucket = 20').strategy, 'full-scan')
+
+    db.query("UPDATE indexed_writes SET label = 'updated' WHERE id = 2")
+    assert.strictEqual(db.query("SELECT label FROM indexed_writes WHERE id = 2").rows[0].label, 'updated')
+    db.query('DELETE FROM indexed_writes WHERE id = 1')
+    assert.strictEqual(db.query('SELECT * FROM indexed_writes WHERE id = 1').rows.length, 0)
+    db.close()
+
+    const noIndexes = new YASD({ sweepIntervalMs: 0, indexColumns: [] })
+    noIndexes.query('CREATE TABLE unindexed (id int, label string)')
+    noIndexes.query("INSERT INTO unindexed VALUES (1, 'a')")
+    assert.strictEqual(noIndexes.explain('SELECT * FROM unindexed WHERE id = 1').strategy, 'full-scan')
+    noIndexes.close()
+
+    assert.throws(() => new YASD({ indexColumns: ['id', 'id'] }), /duplicate index column/)
+    assert.throws(() => new YASD({ indexColumns: ['bad-name'] }), /invalid index column/)
+  })
+
   // ---- PROFILE ----
 
   await test('profile: SELECT reports plan + timing + row counts', async () => {

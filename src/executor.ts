@@ -66,11 +66,36 @@ export interface QueryProfile extends QueryPlan {
   affectedRows?: number;
 }
 
+export interface ExecutorOptions {
+  /** Columns to index on every table. Omit to index all columns; [] disables automatic indexes. */
+  indexColumns?: string[];
+}
+
 export class Executor {
   private db: Database;
   private slow = new SlowLog();
+  private indexColumns?: Set<string>;
 
-  constructor() {
+  constructor(options: ExecutorOptions = {}) {
+    if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+      throw new Error('executor options must be an object');
+    }
+    if (options.indexColumns !== undefined) {
+      if (!Array.isArray(options.indexColumns)) {
+        throw new Error('indexColumns must be an array of column names');
+      }
+      const columns = new Set<string>();
+      for (const column of options.indexColumns) {
+        if (typeof column !== 'string' || !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(column)) {
+          throw new Error(`invalid index column '${String(column)}'`);
+        }
+        if (columns.has(column)) {
+          throw new Error(`duplicate index column '${column}'`);
+        }
+        columns.add(column);
+      }
+      this.indexColumns = columns;
+    }
     this.db = { tables: new Map() };
   }
 
@@ -127,7 +152,7 @@ export class Executor {
   }
 
   // ---- index helpers ----
-  // Tables maintain a per-column Map<Primitive, rowPositions[]> on write.
+  // Tables maintain a per-column Map<Primitive, Set<rowPosition>> on write.
   // These helpers let reads use them instead of always full-scanning.
 
   private isIndexableValue(v: unknown): v is Primitive {
@@ -138,11 +163,35 @@ export class Executor {
     return typeof name === 'string' && table.schema.columns.some(c => c.name === name);
   }
 
+  private shouldIndexColumn(column: string): boolean {
+    return this.indexColumns === undefined || this.indexColumns.has(column);
+  }
+
   private indexGet(table: TableData, column: string, value: Primitive): number[] | undefined {
     const index = table.indexes[column];
     if (!index) return undefined;
     const rows = index.get(value);
     return rows ? [...rows] : [];
+  }
+
+  private addIndexEntry(table: TableData, column: string, value: Value, rowIndex: number): void {
+    const index = table.indexes[column];
+    if (!index || !this.isIndexableValue(value)) return;
+    let positions = index.get(value);
+    if (!positions) {
+      positions = new Set<number>();
+      index.set(value, positions);
+    }
+    positions.add(rowIndex);
+  }
+
+  private removeIndexEntry(table: TableData, column: string, value: Value, rowIndex: number): void {
+    const index = table.indexes[column];
+    if (!index || !this.isIndexableValue(value)) return;
+    const positions = index.get(value);
+    if (!positions) return;
+    positions.delete(rowIndex);
+    if (positions.size === 0) index.delete(value);
   }
 
   /**
@@ -212,19 +261,21 @@ export class Executor {
 
   /** Rebuild every column index in a single O(rows x cols) pass. */
   private rebuildIndexes(table: TableData): void {
+    for (const index of Object.values(table.indexes)) {
+      index.clear();
+    }
     for (const colDef of table.schema.columns) {
       const index = table.indexes[colDef.name];
       if (!index) continue;
-      index.clear();
       for (let i = 0; i < table.rows.length; i++) {
         const value = table.rows[i][colDef.name];
         if (!this.isIndexableValue(value)) continue; // objects/arrays aren't indexed
-        let list = index.get(value);
-        if (!list) {
-          list = [];
-          index.set(value, list);
+        let positions = index.get(value);
+        if (!positions) {
+          positions = new Set<number>();
+          index.set(value, positions);
         }
-        list.push(i);
+        positions.add(i);
       }
     }
   }
@@ -388,14 +439,12 @@ export class Executor {
       indexes: {}
     };
 
-    // Create indexes for primary key
-    if (primaryKey) {
-      tableData.indexes[primaryKey] = new Map();
-    }
-
-    // Create indexes for all columns (for simple queries)
+    // Create only configured indexes. The default configuration indexes all
+    // columns; an explicit [] disables automatic indexes.
     for (const col of columns) {
-      tableData.indexes[col.name] = new Map();
+      if (this.shouldIndexColumn(col.name)) {
+        tableData.indexes[col.name] = new Map();
+      }
     }
 
     this.db.tables.set(tableName, tableData);
@@ -488,8 +537,13 @@ export class Executor {
       preparedRows.map(row => ({ row }))
     );
 
+    const firstRowIndex = table.rows.length;
     table.rows.push(...preparedRows);
-    this.rebuildIndexes(table);
+    for (let i = 0; i < preparedRows.length; i++) {
+      for (const colDef of colDefs) {
+        this.addIndexEntry(table, colDef.name, preparedRows[i][colDef.name], firstRowIndex + i);
+      }
+    }
 
     return {
       columns: [],
@@ -605,10 +659,15 @@ export class Executor {
       });
     }
 
+    const candidateIndices = where
+      ? this.planIndexLookup(table, where)
+      : undefined;
+    const rowIndices = candidateIndices ?? table.rows.map((_, index) => index);
     const updates: Array<{ index: number; row: Row }> = [];
 
-    for (let i = 0; i < table.rows.length; i++) {
+    for (const i of rowIndices) {
       const row = table.rows[i];
+      if (!row) continue;
 
       // Check WHERE condition
       if (where && this.evaluateWhere(row, where, table) !== true) {
@@ -625,9 +684,13 @@ export class Executor {
     this.assertPrimaryKeyUnique(table, updates);
 
     for (const update of updates) {
+      const current = table.rows[update.index];
+      for (const { column } of preparedSet) {
+        this.removeIndexEntry(table, column, current[column], update.index);
+        this.addIndexEntry(table, column, update.row[column], update.index);
+      }
       table.rows[update.index] = update.row;
     }
-    if (updates.length > 0) this.rebuildIndexes(table);
 
     return {
       columns: [],
@@ -654,17 +717,29 @@ export class Executor {
       return { columns: [], rows: [], affectedRows };
     }
 
-    const keep: Row[] = [];
-    let affectedRows = 0;
-    for (const row of table.rows) {
-      if (this.evaluateWhere(row, where, table) === true) {
-        affectedRows++;
-      } else {
-        keep.push(row);
+    const candidateIndices = this.planIndexLookup(table, where);
+    const deletedIndices = new Set<number>();
+    if (candidateIndices !== undefined) {
+      for (const index of candidateIndices) {
+        const row = table.rows[index];
+        if (row && this.evaluateWhere(row, where, table) === true) {
+          deletedIndices.add(index);
+        }
+      }
+    } else {
+      for (let index = 0; index < table.rows.length; index++) {
+        if (this.evaluateWhere(table.rows[index], where, table) === true) {
+          deletedIndices.add(index);
+        }
       }
     }
+
+    const affectedRows = deletedIndices.size;
+    if (affectedRows === 0) return { columns: [], rows: [], affectedRows: 0 };
+
+    const keep = table.rows.filter((_, index) => !deletedIndices.has(index));
     table.rows = keep;
-    // Single-pass rebuild replaces the old O(n^2) per-deleted-row fixup loop.
+    // Row positions shift after DELETE, so rebuild only the configured indexes.
     this.rebuildIndexes(table);
 
     return {
