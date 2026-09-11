@@ -121,7 +121,26 @@ export function encodeCommand(args: Array<string | number>): Buffer {
 function readLine(buf: Buffer, pos: number): [string, number] | null {
   const end = buf.indexOf('\r\n', pos);
   if (end === -1) return null;
-  return [buf.toString('utf8', pos, end), end + 2];
+  return [decodeUtf8(buf.subarray(pos, end)), end + 2];
+}
+
+function decodeUtf8(value: Buffer): string {
+  const text = value.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(value)) {
+    throw new Error('invalid RESP UTF-8');
+  }
+  return text;
+}
+
+function parseRespInteger(line: string, kind: string): number {
+  if (!/^-?\d+$/.test(line)) {
+    throw new Error(`malformed RESP ${kind}: ${line}`);
+  }
+  const value = Number(line);
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(`malformed RESP ${kind}: ${line}`);
+  }
+  return value;
 }
 
 /**
@@ -155,15 +174,14 @@ function parseValue(
     const line = readLine(buf, pos + 1);
     if (!line) return null;
     checkFrameBytes(frameStart, line[1], limits);
-    const n = parseInt(line[0], 10);
-    if (!Number.isFinite(n)) throw new Error(`malformed RESP integer: ${line[0]}`);
+    const n = parseRespInteger(line[0], 'integer');
     return [{ kind: 'int', value: n }, line[1]];
   }
   if (prefix === 0x24 /* $ */) {
     const line = readLine(buf, pos + 1);
     if (!line) return null;
     checkFrameBytes(frameStart, line[1], limits);
-    const len = parseInt(line[0], 10);
+    const len = parseRespInteger(line[0], 'bulk length');
     if (len === -1) return [{ kind: 'bulk', value: null }, line[1]];
     if (!Number.isInteger(len) || len < -1) throw new Error(`malformed RESP bulk length: ${line[0]}`);
     if (len > limits.maxBulkBytes) {
@@ -171,7 +189,7 @@ function parseValue(
     }
     checkFrameBytes(frameStart, line[1] + len + 2, limits);
     if (line[1] + len + 2 > buf.length) return null;
-    const value = buf.toString('utf8', line[1], line[1] + len);
+    const value = decodeUtf8(buf.subarray(line[1], line[1] + len));
     if (buf[line[1] + len] !== 0x0d || buf[line[1] + len + 1] !== 0x0a) {
       throw new Error('malformed RESP bulk terminator');
     }
@@ -184,7 +202,7 @@ function parseValue(
     if (depth >= limits.maxDepth) {
       throw new Error(`RESP nesting exceeds depth ${limits.maxDepth}`);
     }
-    const count = parseInt(line[0], 10);
+    const count = parseRespInteger(line[0], 'array length');
     if (count === -1) return [{ kind: 'nil' }, line[1]];
     if (!Number.isInteger(count) || count < -1) throw new Error(`malformed RESP array length: ${line[0]}`);
     if (count > limits.maxArguments) {

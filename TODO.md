@@ -168,7 +168,7 @@ source.
   CAS `PX 0`, TTL-preserving restart, snapshot/AOF crash windows, corrupted
   AOF lines, RESP limits, partial HTTP headers, PERSIST invalidation, expiry
   invalidation, client reconnects, and slow-consumer backpressure.
-- [ ] Add property/fuzz tests for the SQL tokenizer/parser and RESP decoder.
+- [x] Add property/fuzz tests for the SQL tokenizer/parser and RESP decoder.
   Include random chunk boundaries, malformed lengths, deep arrays, invalid
   UTF-8, quotes, numbers, and very large input.
 - [ ] Add concurrency and load benchmarks for LRU, expiry sweeping, indexed

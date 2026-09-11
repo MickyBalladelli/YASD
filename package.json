@@ -35,7 +35,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "npm run build && node test/basic.test.js && node test/kv.test.js && node test/p1.test.js && node test/transactions.test.js && node test/metrics.test.js && node test/profiling.test.js",
+    "test": "npm run build && node test/basic.test.js && node test/kv.test.js && node test/p1.test.js && node test/transactions.test.js && node test/metrics.test.js && node test/profiling.test.js && node test/fuzz.test.js",
     "benchmark:indexes": "npm run build && node --expose-gc benchmark/indexes.js",
     "serve": "node dist/cli.js",
     "dev": "node test/server.js",
