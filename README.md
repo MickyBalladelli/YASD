@@ -100,6 +100,9 @@ Pass `indexColumns` to control automatic SQL indexes. By default every column
 is indexed; `indexColumns: ['id', 'email']` limits indexes to those names on
 each table, and `indexColumns: []` disables automatic indexes.
 
+Use `createDatabase(options)` when a factory function fits better. Every
+instance is explicit and should be closed with `db.close()` when finished.
+
 #### `db.query(sql: string): QueryResult`
 Executes a SQL query and returns the result.
 

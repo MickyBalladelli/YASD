@@ -402,7 +402,3 @@ export class YASD {
 export function createDatabase(cacheOptions?: YasdOptions): YASD {
   return new YASD(cacheOptions);
 }
-
-// Export default
-const db = new YASD();
-export default db;

@@ -137,13 +137,13 @@ source.
 
 ## P2 — API, packaging, and maintainability
 
-- [ ] Fix the public constructor type. `YASD` accepts `KVOptions`, then casts to
+- [x] Fix the public constructor type. `YASD` accepts `KVOptions`, then casts to
   `YasdOptions` to read `slowQueryMs` (`src/index.ts:64-91`). Type it as
   `YasdOptions` so the documented `new YASD({ slowQueryMs: 5 })` compiles.
 - [ ] Export a stable typed database error and error-code list. The executor's
   `DatabaseError` is private (`src/executor.ts:28-33`) while consumers need to
   distinguish table, column, constraint, parse, and protocol failures.
-- [ ] Remove or justify the import-time singleton. `src/index.ts:377-379` creates
+- [x] Remove or justify the import-time singleton. `src/index.ts:377-379` creates
   a global database and sweeper for every import. Prefer an explicit factory or
   document the shared mutable default and its lifecycle.
 - [ ] Make JSON equality deterministic and safe. `JSON.stringify()` comparison
