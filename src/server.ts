@@ -664,11 +664,21 @@ export class YasdServer {
     if (options.tls && (!options.tls.key || !options.tls.cert)) {
       throw new Error('TLS requires both key and cert');
     }
-    this.tlsOptions = options.tls;
+    if (options.tls !== undefined) {
+      if (!options.tls || typeof options.tls !== 'object' || Array.isArray(options.tls)) throw new Error('TLS options must be an object');
+      for (const flag of ['requestCert', 'rejectUnauthorized'] as const) {
+        if (options.tls[flag] !== undefined && typeof options.tls[flag] !== 'boolean') throw new Error(`TLS ${flag} must be boolean`);
+      }
+      tls.createSecureContext(options.tls);
+    }
+    this.tlsOptions = options.tls === undefined ? undefined : { ...options.tls };
     this.tlsEnabled = options.tls !== undefined;
     if (options.slowCommandMs !== undefined) {
       this.slow.setThreshold(checkSlowThreshold(options.slowCommandMs, 'slowCommandMs'));
     }
+    this.kv = new KVCache(cacheOptions, key => this.onCacheExpiry(key));
+    this.aof = new AofLog(options.aofPath);
+    this.syncAofRecoveryStatus();
     this.cacheFacade = createYasdServerCacheFacade(this.kv, {
       set: (key, value, ttlMs) => this.cacheSet(key, value, ttlMs),
       del: key => this.cacheDel(key),

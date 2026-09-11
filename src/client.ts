@@ -1197,7 +1197,10 @@ export class YasdTransaction {
     this.assertWritable('WATCH');
     if (this.begun) throw new TransactionError('WATCH inside MULTI is not allowed');
     if (keys.length === 0) throw new TransactionError('WATCH requires at least one key');
-    return this.expectOk(['WATCH', ...keys]);
+    return this.serialize(async () => {
+      if (this.begun) throw new TransactionError('WATCH inside MULTI is not allowed');
+      return this.expectOk(['WATCH', ...keys]);
+    });
   }
 
   /** Forget watched versions (queued writes are kept). */

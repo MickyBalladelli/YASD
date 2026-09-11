@@ -14,7 +14,8 @@ export type DatabaseErrorCode = keyof typeof DATABASE_ERROR_CODES;
 export class DatabaseError extends Error {
   readonly code: DatabaseErrorCode;
   constructor(message: string, code: DatabaseErrorCode, options?: { cause?: unknown }) {
-    super(message, options);
+    super(message);
+    if (options && 'cause' in options) Object.defineProperty(this, 'cause', { value: options.cause, configurable: true });
     this.name = 'DatabaseError';
     this.code = code;
   }
