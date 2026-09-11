@@ -351,10 +351,23 @@ async function runTests() {
     await pub.connect();
 
     const received = [];
-    const unsub = await sub.subscribe('presence', (ch, msg) => received.push([ch, msg]));
+    const receivedSecond = []
+    const [unsub, unsubSecond] = await Promise.all([
+      sub.subscribe('presence', (ch, msg) => received.push([ch, msg])),
+      sub.subscribe('presence', (ch, msg) => receivedSecond.push([ch, msg])),
+    ])
     assert.strictEqual(await pub.publish('presence', '{"u":"bob"}'), 1);
     await sleep(100);
     assert.deepStrictEqual(received, [['presence', '{"u":"bob"}']]);
+    assert.deepStrictEqual(receivedSecond, [['presence', '{"u":"bob"}']]);
+
+    sub.subSocket.destroy()
+    await sleep(20)
+    await sub.reconnectSubscriptions()
+    assert.strictEqual(await pub.publish('presence', 'after-reconnect'), 1)
+    await sleep(100)
+    assert.deepStrictEqual(received[received.length - 1], ['presence', 'after-reconnect'])
+    assert.deepStrictEqual(receivedSecond[receivedSecond.length - 1], ['presence', 'after-reconnect'])
 
     // Server auto-publishes invalidations other replicas can consume.
     const invalid = [];
@@ -364,6 +377,7 @@ async function runTests() {
     assert.ok(invalid.some(e => e.event === 'set' && e.key === 'feeds:x'), `invalidate, got ${JSON.stringify(invalid)}`);
 
     await unsub();
+    await unsubSecond()
     await unsub2();
     assert.strictEqual(await pub.publish('presence', 'late'), 0);
     await sub.close();

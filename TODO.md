@@ -76,7 +76,7 @@ source.
   full-pool reset (`src/client.ts:514-527,623-635`), so repeated partial failures
   can grow stale entries. Remove dead connections and reconnect with bounded
   backoff.
-- [ ] Make subscription state machine robust. Subscribe/unsubscribe calls can
+- [x] Make subscription state machine robust. Subscribe/unsubscribe calls can
   overlap, ack timeout cleanup is incomplete, and reconnect is only attempted
   when another subscribe call happens (`src/client.ts:449-487,642-792`). Serialize
   channel commands, clean all waiter/timer state, and offer explicit reconnect

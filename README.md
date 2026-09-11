@@ -237,6 +237,7 @@ await client.expire('ratelimit:post:alice', 60_000);
 // Invalidation events: set, del, clear, expire, persist, and load.
 const stop = await client.subscribe('presence', (ch, msg) => console.log(ch, msg));
 await client.publish('presence', JSON.stringify({ user: 'bob' }));
+await client.reconnectSubscriptions() // restore registered channels after a drop
 
 await client.healthcheck(); // { status: 'ok', entries, ... }
 await client.save();        // snapshot now (also truncates the AOF)

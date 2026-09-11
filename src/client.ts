@@ -99,6 +99,15 @@ export function parseCacheUrl(url: string): ParsedCacheUrl {
 
 type Pending = { resolve: (v: RespReply) => void; reject: (e: Error) => void; timer?: ReturnType<typeof setTimeout> };
 
+type SubscriptionCommand = 'subscribe' | 'unsubscribe';
+
+interface SubAckWaiter {
+  command: SubscriptionCommand;
+  resolve: () => void;
+  reject: (e: Error) => void;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
 interface PooledConn {
   socket: net.Socket;
   decoder: RespDecoder;
@@ -141,6 +150,8 @@ export class YasdClient {
   private subDecoder = new RespDecoder();
   private subHandlers = new Map<string, Set<SubscribeHandler>>();
   private subConnecting?: Promise<void>;
+  private subDialSocket?: net.Socket;
+  private subCommandTail: Promise<void> = Promise.resolve();
 
   constructor(options: YasdClientOptions = {}) {
     const fromUrl = options.url === undefined ? undefined : parseCacheUrl(options.url);
@@ -191,14 +202,7 @@ export class YasdClient {
 
   async close(): Promise<void> {
     this.closed = true;
-    if (this.subSocket) {
-      try {
-        this.subSocket.destroy();
-      } catch {
-        // ignore
-      }
-      this.subSocket = undefined;
-    }
+    this.closeSubSocket(new Error('client is closed'));
     this.subHandlers.clear();
     this.subDecoder.reset();
     const connections = this.pool.splice(0);
@@ -460,42 +464,49 @@ export class YasdClient {
   async subscribe(channel: string, handler: SubscribeHandler): Promise<() => Promise<void>> {
     if (!channel) throw new Error('subscribe requires a channel');
     if (typeof handler !== 'function') throw new Error('subscribe requires a handler');
-    await this.ensureSubConn();
-    let set = this.subHandlers.get(channel);
-    if (!set) {
-      set = new Set();
-      this.subHandlers.set(channel, set);
-    }
-    const first = set.size === 0 && !this.subPendingAcks.has(channel);
-    set.add(handler);
-    if (first) {
-      await this.subRoundTrip(['SUBSCRIBE', channel]);
-    }
-    let unsubscribed = false;
-    return async () => {
-      if (unsubscribed) return;
-      unsubscribed = true;
-      set?.delete(handler);
-      if (set && set.size === 0) {
-        this.subHandlers.delete(channel);
-        if (this.subSocket) {
-          try {
-            await this.subRoundTrip(['UNSUBSCRIBE', channel]);
-          } catch {
-            // connection may already be gone; handlers are already dropped
-          }
-        }
+    return this.enqueueSubCommand(async () => {
+      await this.ensureSubConn();
+      let set = this.subHandlers.get(channel);
+      if (!set) {
+        set = new Set();
+        this.subHandlers.set(channel, set);
       }
-      if (this.subHandlers.size === 0 && this.subSocket) {
+      const first = set.size === 0;
+      set.add(handler);
+      if (first) {
         try {
-          this.subSocket.destroy();
-        } catch {
-          // ignore
+          await this.subRoundTrip('subscribe', channel);
+        } catch (err) {
+          set.delete(handler);
+          if (set.size === 0) this.subHandlers.delete(channel);
+          throw err;
         }
-        this.subSocket = undefined;
-        this.subDecoder.reset();
       }
-    };
+      let unsubscribed = false;
+      return async (): Promise<void> => {
+        if (unsubscribed) return;
+        unsubscribed = true;
+        await this.enqueueSubCommand(async () => {
+          const current = this.subHandlers.get(channel);
+          current?.delete(handler);
+          if (!current || current.size > 0) return;
+          this.subHandlers.delete(channel);
+          if (this.subSocket) {
+            await this.subRoundTrip('unsubscribe', channel).catch(() => undefined);
+          }
+          if (this.subHandlers.size === 0) this.closeSubSocket();
+        });
+      };
+    });
+  }
+
+  /** Reconnect the subscriber socket and restore all registered channels. */
+  async reconnectSubscriptions(): Promise<void> {
+    if (this.closed) throw new Error('client is closed');
+    await this.enqueueSubCommand(async () => {
+      this.closeSubSocket(new Error('subscriber reconnect requested'));
+      if (this.subHandlers.size > 0) await this.ensureSubConn();
+    });
   }
 
   // ---- internals ----
@@ -724,59 +735,19 @@ export class YasdClient {
 
   // -- subscriber connection --
 
-  private subPendingAcks = new Set<string>();
-  private subAckWaiters = new Map<string, Array<{ resolve: () => void; reject: (e: Error) => void }>>();
+  private subAckWaiters = new Map<string, SubAckWaiter[]>();
 
   private async ensureSubConn(): Promise<void> {
     if (this.closed) throw new Error('client is closed');
-    if (this.subSocket) return;
+    if (this.subSocket && !this.subSocket.destroyed) return;
+    if (this.subSocket?.destroyed) {
+      this.closeSubSocket(new Error('subscriber connection is closed'));
+    }
     if (this.subConnecting) {
       await this.subConnecting;
       return;
     }
-    this.subConnecting = (async () => {
-      // Re-register surviving handlers after a reconnect.
-      const channels = Array.from(this.subHandlers.keys());
-      const socket = await this.dialRaw();
-      if (this.password !== undefined) {
-        const decoder = new RespDecoder();
-        socket.write(encodeCommand(['AUTH', this.password]));
-        const authed = await new Promise<boolean>(resolve => {
-          const onData = (chunk: Buffer): void => {
-            const replies = decoder.push(chunk);
-            if (replies.length > 0) {
-              const first = replies[0] as RespReply;
-              socket.off('data', onData);
-              resolve(first.kind === 'simple' && first.value === 'OK');
-            }
-          };
-          socket.on('data', onData);
-          socket.once('error', () => resolve(false));
-          socket.once('close', () => resolve(false));
-        });
-        if (!authed) {
-          try {
-            socket.destroy();
-          } catch {
-            // ignore
-          }
-          throw new Error('authentication failed');
-        }
-      }
-      this.subSocket = socket;
-      this.subDecoder.reset();
-      socket.on('data', chunk => this.onSubData(Buffer.from(chunk)));
-      socket.on('error', () => this.onSubLost());
-      socket.on('close', () => this.onSubLost());
-      for (const channel of channels) {
-        this.subPendingAcks.add(channel);
-        this.subSocket?.write(encodeCommand(['SUBSCRIBE', channel]));
-      }
-      // New subscriptions resolve via their own acks; re-subscribes here are
-      // fire-and-retry on next publish-independent basis — wait briefly for
-      // acks so ordering holds, but don't hang close().
-      await this.waitSubAcks(channels, 3000).catch(() => undefined);
-    })();
+    this.subConnecting = this.openSubConnection();
     try {
       await this.subConnecting;
     } finally {
@@ -784,34 +755,147 @@ export class YasdClient {
     }
   }
 
-  private onSubLost(): void {
-    this.subSocket = undefined;
-    this.subDecoder.reset();
-    for (const waiters of this.subAckWaiters.values()) {
-      for (const w of waiters.splice(0)) w.reject(new Error('subscriber connection lost'));
+  private async openSubConnection(): Promise<void> {
+    const channels = Array.from(this.subHandlers.keys());
+    const socket = await this.dialRaw();
+    this.subDialSocket = socket;
+    try {
+      if (this.password !== undefined) await this.authenticateSubscriber(socket);
+      if (this.closed) throw new Error('client is closed');
+      this.subSocket = socket;
+      this.subDecoder.reset();
+      socket.on('data', chunk => this.onSubData(Buffer.from(chunk), socket));
+      socket.on('error', () => this.onSubLost(socket));
+      socket.on('close', () => this.onSubLost(socket));
+      for (const channel of channels) {
+        await this.subRoundTrip('subscribe', channel);
+      }
+    } catch (err) {
+      if (this.subSocket === socket) {
+        this.closeSubSocket(err as Error);
+      } else {
+        socket.destroy();
+      }
+      throw err;
+    } finally {
+      if (this.subDialSocket === socket) this.subDialSocket = undefined;
     }
-    this.subAckWaiters.clear();
-    this.subPendingAcks.clear();
   }
 
-  private onSubData(chunk: Buffer): void {
+  private authenticateSubscriber(socket: net.Socket): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const decoder = new RespDecoder();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = (): void => {
+        if (timer) clearTimeout(timer);
+        socket.off('data', onData);
+        socket.off('error', onError);
+        socket.off('close', onClose);
+      };
+      const fail = (err: Error): void => {
+        cleanup();
+        reject(err);
+      };
+      const onData = (chunk: Buffer): void => {
+        let replies: RespReply[];
+        try {
+          replies = decoder.push(chunk);
+        } catch (err) {
+          fail(err as Error);
+          return;
+        }
+        if (replies.length === 0) return;
+        const first = replies[0] as RespReply;
+        if (first.kind === 'simple' && first.value === 'OK') {
+          cleanup();
+          resolve();
+        } else {
+          fail(new Error('authentication failed'));
+        }
+      };
+      const onError = (): void => fail(new Error('subscriber connection error'));
+      const onClose = (): void => fail(new Error('subscriber connection closed'));
+      socket.on('data', onData);
+      socket.once('error', onError);
+      socket.once('close', onClose);
+      if (this.requestTimeoutMs > 0) {
+        timer = setTimeout(() => fail(new Error('subscriber authentication timed out')), this.requestTimeoutMs);
+        const t = timer as unknown as { unref?: () => void };
+        if (typeof t.unref === 'function') t.unref();
+      }
+      try {
+        socket.write(encodeCommand(['AUTH', this.password as string]));
+      } catch (err) {
+        fail(err as Error);
+      }
+    });
+  }
+
+  private onSubLost(socket: net.Socket): void {
+    if (this.subSocket !== socket) return;
+    this.closeSubSocket(new Error('subscriber connection lost'));
+  }
+
+  private closeSubSocket(err = new Error('subscriber connection closed')): void {
+    const socket = this.subSocket;
+    const dialingSocket = this.subDialSocket;
+    this.subSocket = undefined;
+    this.subDialSocket = undefined;
+    this.subDecoder.reset();
+    for (const waiters of this.subAckWaiters.values()) {
+      for (const waiter of waiters) {
+        if (waiter.timer) clearTimeout(waiter.timer);
+        waiter.reject(err);
+      }
+    }
+    this.subAckWaiters.clear();
+    if (socket) {
+      try {
+        socket.destroy();
+      } catch {
+        // ignore
+      }
+    }
+    if (dialingSocket && dialingSocket !== socket) {
+      try {
+        dialingSocket.destroy();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  private enqueueSubCommand<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.subCommandTail.then(operation, operation);
+    this.subCommandTail = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  private onSubData(chunk: Buffer, socket: net.Socket): void {
+    if (this.subSocket !== socket) return;
     let replies: RespReply[];
     try {
       replies = this.subDecoder.push(chunk);
     } catch {
-      this.onSubLost();
+      this.closeSubSocket(new Error('subscriber protocol error'));
       return;
     }
     for (const reply of replies) {
+      if (reply.kind === 'error') {
+        this.rejectNextSubAck(new Error(reply.message.replace(/^ERR\s*/, '')));
+        continue;
+      }
       if (reply.kind !== 'array') continue;
       const parts = reply.items.map(item => (item && item.kind === 'bulk' ? item.value : null));
       const [kind, channel, payload] = parts;
-      if (kind === 'subscribe' && typeof channel === 'string') {
-        this.subPendingAcks.delete(channel);
+      if ((kind === 'subscribe' || kind === 'unsubscribe') && typeof channel === 'string') {
         const waiters = this.subAckWaiters.get(channel);
-        if (waiters) {
-          this.subAckWaiters.delete(channel);
-          for (const w of waiters.splice(0)) w.resolve();
+        const index = waiters?.findIndex(waiter => waiter.command === kind) ?? -1;
+        if (waiters && index >= 0) {
+          const waiter = waiters.splice(index, 1)[0] as SubAckWaiter;
+          if (waiter.timer) clearTimeout(waiter.timer);
+          if (waiters.length === 0) this.subAckWaiters.delete(channel);
+          waiter.resolve();
         }
       } else if (kind === 'message' && typeof channel === 'string' && typeof payload === 'string') {
         const handlers = this.subHandlers.get(channel);
@@ -829,54 +913,57 @@ export class YasdClient {
     }
   }
 
-  private subRoundTrip(cmd: string[]): Promise<void> {
-    const channel = cmd[1] as string;
+  private rejectNextSubAck(err: Error): void {
+    for (const [channel, waiters] of this.subAckWaiters) {
+      const waiter = waiters.shift();
+      if (!waiter) continue;
+      if (waiter.timer) clearTimeout(waiter.timer);
+      if (waiters.length === 0) this.subAckWaiters.delete(channel);
+      waiter.reject(err);
+      this.closeSubSocket(err);
+      return;
+    }
+    this.closeSubSocket(err);
+  }
+
+  private subRoundTrip(command: SubscriptionCommand, channel: string): Promise<void> {
+    const socket = this.subSocket;
+    if (!socket || socket.destroyed) return Promise.reject(new Error('subscriber connection is closed'));
     return new Promise<void>((resolve, reject) => {
       let waiters = this.subAckWaiters.get(channel);
       if (!waiters) {
         waiters = [];
         this.subAckWaiters.set(channel, waiters);
       }
-      waiters.push({ resolve, reject });
-      this.subPendingAcks.add(channel);
+      const waiter: SubAckWaiter = { command, resolve, reject };
+      waiters.push(waiter);
+      const removeWaiter = (): boolean => {
+        const current = this.subAckWaiters.get(channel);
+        if (!current) return false;
+        const index = current.indexOf(waiter);
+        if (index === -1) return false;
+        current.splice(index, 1);
+        if (current.length === 0) this.subAckWaiters.delete(channel);
+        return true;
+      };
       try {
-        this.subSocket?.write(encodeCommand(cmd));
+        socket.write(encodeCommand([command === 'subscribe' ? 'SUBSCRIBE' : 'UNSUBSCRIBE', channel]));
       } catch (err) {
+        removeWaiter();
         reject(err as Error);
+        this.closeSubSocket(err as Error);
+        return;
       }
       if (this.requestTimeoutMs > 0) {
-        const timer = setTimeout(() => {
-          const ws = this.subAckWaiters.get(channel);
-          if (ws) {
-            const i = ws.findIndex(w => w.resolve === resolve);
-            if (i !== -1) {
-              ws.splice(i, 1);
-              reject(new Error(`subscribe timed out: ${channel}`));
-            }
-          }
+        waiter.timer = setTimeout(() => {
+          if (!removeWaiter()) return;
+          const timeout = new Error(`${command} timed out: ${channel}`);
+          reject(timeout);
+          this.closeSubSocket(timeout);
         }, this.requestTimeoutMs);
-        const t = timer as unknown as { unref?: () => void };
+        const t = waiter.timer as unknown as { unref?: () => void };
         if (typeof t.unref === 'function') t.unref();
       }
-    });
-  }
-
-  private waitSubAcks(channels: string[], timeoutMs: number): Promise<void> {
-    const pending = channels.filter(c => this.subPendingAcks.has(c));
-    if (pending.length === 0) return Promise.resolve();
-    return new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('resubscribe timed out')), timeoutMs);
-      const t = timer as unknown as { unref?: () => void };
-      if (typeof t.unref === 'function') t.unref();
-      const check = (): void => {
-        if (pending.every(c => !this.subPendingAcks.has(c))) {
-          clearTimeout(timer);
-          resolve();
-        } else {
-          setTimeout(check, 25).unref?.();
-        }
-      };
-      check();
     });
   }
 }
