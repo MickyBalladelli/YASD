@@ -4,7 +4,7 @@ export function isIncompleteJson(text: string): boolean {
   let at = 0;
   const incomplete = Symbol('incomplete');
   const invalid = Symbol('invalid');
-  const whitespace = (): void => { while (/\s/.test(text[at] ?? '') && at < text.length) at++; };
+  const whitespace = (): void => { while (/[ \t\r\n]/.test(text[at] ?? '') && at < text.length) at++; };
   const need = (char: string): void => {
     whitespace();
     if (at === text.length) throw incomplete;
@@ -63,7 +63,8 @@ export function isIncompleteJson(text: string): boolean {
       throw invalid;
     }
     at += match[0].length;
-    if (/^[.eE][+-]?\d*$/.test(text.slice(at))) throw incomplete;
+    const rest = text.slice(at);
+    if ((rest === '.' && !/[.eE]/.test(match[0])) || (/^[eE][+-]?$/.test(rest) && !/[eE]/.test(match[0]))) throw incomplete;
   };
   try {
     value(0);

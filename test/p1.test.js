@@ -203,7 +203,7 @@ async function runTests() {
     db.incr('counter');
     log.append({ op: 'incr', key: 'counter', by: 1 });
 
-    const recovered = new YASD({ sweepIntervalMs: 0 });
+    const recovered = new KVCache({ sweepIntervalMs: 0 });
     const metadata = {};
     await loadSnapshot(recovered, snap, { metadata });
     assert.strictEqual(metadata.aofSeq, snapshotSeq);
@@ -363,7 +363,7 @@ async function runTests() {
   await test('server: slow consumers are disconnected at the output limit', async () => {
     const net = require('net')
     const server = new YasdServer({
-      host: '127.0.0.1', port: 0, maxPendingOutputBytes: 8,
+      host: '127.0.0.1', port: 0, maxPendingOutputBytes: 64,
     })
     await server.start()
     const raw = net.createConnection({ host: '127.0.0.1', port: server.address().port })
@@ -388,7 +388,7 @@ async function runTests() {
         await waitFor(() => server.pubsub.channelNames().includes('slow'), 'subscription registered')
 
         const closed = new Promise(resolve => raw.once('close', resolve))
-        assert.strictEqual(server.pubsub.publish('slow', 'x'), 1)
+        assert.strictEqual(server.pubsub.publish('slow', 'x'.repeat(128)), 1)
         await Promise.race([
           closed,
           sleep(1000).then(() => { throw new Error('slow consumer stayed connected') }),
@@ -534,7 +534,7 @@ async function runTests() {
     const snap = path.join(dir, 's.json');
     const aof = path.join(dir, 'a.aof');
     const server = new YasdServer({
-      host: '127.0.0.1', port: 0, snapshotPath: snap, aofPath: aof, autoSaveMs: 20,
+      host: '127.0.0.1', port: 0, snapshotPath: snap, aofPath: aof, autoSaveMs: 0,
     });
     await server.start();
     const { port } = server.address();

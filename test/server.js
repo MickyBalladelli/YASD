@@ -11,21 +11,17 @@ try {
   // Try to use the compiled version first
   YASD = require('../dist/index.js').YASD;
 } catch (e) {
-  console.log('Using source version (run npm run build first for production)');
-  // For development, we might need to compile first
-  // For now, we'll create a simple version
+  console.error('YASD build missing: run npm run build');
+  process.exit(1);
 }
 
 // Create a new database instance
 let db;
 
 function initDatabase() {
-  if (YASD) {
-    db = new YASD();
-  } else {
-    // Fallback implementation for testing without compilation
-    db = createSimpleYASD();
-  }
+  if (!YASD) throw new Error('YASD build missing: run npm run build');
+  if (db) db.close();
+  db = new YASD();
 
   // Initialize with some test data
   try {
@@ -62,56 +58,6 @@ function initDatabase() {
   }
 }
 
-// Simple fallback implementation for testing without compilation
-function createSimpleYASD() {
-  const tables = new Map();
-
-  return {
-    query: function(sql) {
-      sql = sql.trim().toLowerCase();
-      
-      // Very simple query handling for testing
-      if (sql.startsWith('create table')) {
-        const match = sql.match(/create table (\w+)/);
-        if (match) {
-          tables.set(match[1], { rows: [] });
-          return { columns: [], rows: [], affectedRows: 0 };
-        }
-      } else if (sql.startsWith('insert into')) {
-        const match = sql.match(/insert into (\w+)/);
-        if (match && tables.has(match[1])) {
-          const table = tables.get(match[1]);
-          table.rows.push({});
-          return { columns: [], rows: [], affectedRows: 1 };
-        }
-      } else if (sql.startsWith('select')) {
-        const match = sql.match(/select \* from (\w+)/);
-        if (match && tables.has(match[1])) {
-          const table = tables.get(match[1]);
-          return { 
-            columns: ['data'],
-            rows: table.rows.map(r => ({...r}))
-          };
-        }
-      }
-      
-      return { columns: [], rows: [], affectedRows: 0 };
-    },
-    
-    getTableNames: function() {
-      return Array.from(tables.keys());
-    },
-    
-    getTableSchema: function() {
-      return undefined;
-    },
-    
-    reset: function() {
-      tables.clear();
-    }
-  };
-}
-
 // Initialize database
 initDatabase();
 
@@ -121,11 +67,17 @@ const server = http.createServer((req, res) => {
   const path = parsedUrl.pathname;
   const method = req.method.toUpperCase();
 
-  // Enable CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Request-Method', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'OPTIONS, GET, POST');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(req.headers.host || '')) {
+    res.writeHead(403);
+    res.end('Loopback Host required');
+    return;
+  }
+  // Same-origin, loopback-only development console. Reject cross-origin writes.
+  if (method === 'POST' && req.headers.origin && req.headers.origin !== `http://${req.headers.host}`) {
+    res.writeHead(403);
+    res.end('Cross-origin writes are not allowed');
+    return;
+  }
 
   if (method === 'OPTIONS') {
     res.writeHead(200);
@@ -332,7 +284,7 @@ function handleHome(res) {
                     data.rows.forEach(row => {
                         html += '<tr>';
                         data.columns.forEach(col => {
-                            html += '<td style="text-align: left;">' + escapeHtml(String(row[col] || 'NULL')) + '</td>';
+                            html += '<td style="text-align: left;">' + escapeHtml(String(row[col] ?? 'NULL')) + '</td>';
                         });
                         html += '</tr>';
                     });
@@ -412,13 +364,11 @@ function handleGetTables(req, res) {
     const tableNames = db.getTableNames();
     const tables = tableNames.map(name => {
       try {
-        const result = db.query(`SELECT COUNT(*) as count FROM ${name}`);
-        const rowCount = result.rows.length > 0 ? result.rows[0].count || result.rows.length : 0;
+        const result = db.query(`SELECT * FROM ${name}`);
+        const rowCount = result.rows.length;
         return { name, rowCount };
-      } catch (e) {
-        // Fallback to rows length
-        const table = db.getTableSchema(name);
-        return { name, rowCount: 0 };
+      } catch (error) {
+        throw new Error(`Cannot count table ${name}: ${error.message}`);
       }
     });
 
@@ -438,11 +388,20 @@ function handleQuery(req, res) {
   }
 
   let body = '';
+  let bytes = 0;
   req.on('data', chunk => {
+    bytes += chunk.length;
+    if (bytes > 1024 * 1024) {
+      res.writeHead(413);
+      res.end('Request too large');
+      req.destroy();
+      return;
+    }
     body += chunk.toString();
   });
 
   req.on('end', () => {
+    if (res.writableEnded) return;
     try {
       const { sql } = JSON.parse(body);
       
@@ -492,9 +451,11 @@ function handleNotFound(res) {
 
 // Start server
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
+server.listen(PORT, '127.0.0.1', () => {
+  console.warn('Development-only SQL console; do not expose through a public proxy.');
   console.log(`YASD Test Server running on http://localhost:${PORT}`);
   console.log('Press Ctrl+C to stop the server');
 });
 
+server.on('close', () => db.close());
 module.exports = server;

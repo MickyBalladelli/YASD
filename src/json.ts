@@ -28,6 +28,9 @@ export function cloneJsonValue(value: unknown, what = 'value'): Value {
     if (Object.getOwnPropertySymbols(object).some(key => Object.getOwnPropertyDescriptor(object, key)?.enumerable)) {
       fail('cannot contain enumerable symbol keys');
     }
+    const serializer = Object.getOwnPropertyDescriptor(object, 'toJSON');
+    if (serializer && (!('value' in serializer) || typeof serializer.value === 'function')) fail('cannot contain custom serialization hooks');
+    if (array && Object.keys(object).some(key => !/^(0|[1-9][0-9]*)$/.test(key))) fail('cannot contain extra array properties');
     ancestors.add(object);
     try {
       const out: Value[] | Record<string, Value> = array ? [] : {};

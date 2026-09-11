@@ -113,7 +113,7 @@ const AOF_COMMANDS = new Set([
 ]);
 
 /** Maximum queued output per connection after socket backpressure. */
-const DEFAULT_MAX_PENDING_OUTPUT_BYTES = 1024 * 1024;
+const DEFAULT_MAX_PENDING_OUTPUT_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_COMMAND_MS = 0;
 const DEFAULT_IDLE_CONNECTION_TIMEOUT_MS = 0;
 const DEFAULT_SHUTDOWN_DEADLINE_MS = 2000;
@@ -241,6 +241,8 @@ interface ConnState {
   watchVersions: Map<string, number> | null;
   /** Queued commands between MULTI and EXEC (null = not in MULTI). */
   txQueue: Array<{ cmd: string; args: string[] }> | null;
+  txBytes: number;
+  txFailed: boolean;
   /** User-space output waiting for the socket's drain event. */
   outputQueue: Buffer[];
   outputQueueBytes: number;
@@ -401,8 +403,16 @@ export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Yasd
     port: env.YASD_PORT === undefined ? DEFAULT_PORT : parsePort(env.YASD_PORT, 'YASD_PORT'),
     cache,
   };
-  if (env.YASD_SNAPSHOT) opts.snapshotPath = env.YASD_SNAPSHOT;
-  if (env.YASD_AOF) opts.aofPath = env.YASD_AOF;
+  const budgets = {
+    YASD_MAX_CONNECTIONS: 'maxConnections', YASD_MAX_QUEUED_REQUESTS: 'maxQueuedRequests',
+    YASD_MAX_TRANSACTION_COMMANDS: 'maxTransactionCommands', YASD_MAX_TRANSACTION_BYTES: 'maxTransactionBytes',
+    YASD_MAX_WATCHED_KEYS: 'maxWatchedKeys', YASD_MAX_SUBSCRIPTIONS: 'maxSubscriptions',
+  } as const;
+  for (const [name, key] of Object.entries(budgets)) {
+    if (env[name] !== undefined) opts[key] = parseStrictInteger(env[name] as string, name, 1);
+  }
+  if (env.YASD_SNAPSHOT !== undefined) opts.snapshotPath = env.YASD_SNAPSHOT;
+  if (env.YASD_AOF !== undefined) opts.aofPath = env.YASD_AOF;
   if (env.YASD_AUTO_SAVE_MS !== undefined) {
     opts.autoSaveMs = parseStrictNonNegativeNumber(env.YASD_AUTO_SAVE_MS, 'YASD_AUTO_SAVE_MS');
   }
@@ -440,7 +450,7 @@ export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Yasd
       'YASD_SHUTDOWN_DEADLINE_MS'
     );
   }
-  if (env.YASD_LOAD_ON_START !== undefined) opts.loadOnStart = env.YASD_LOAD_ON_START !== '0';
+  if (env.YASD_LOAD_ON_START !== undefined) opts.loadOnStart = parseBoolean(env.YASD_LOAD_ON_START, 'YASD_LOAD_ON_START');
   if (env.YASD_SAVE_ON_SHUTDOWN !== undefined) opts.saveOnShutdown = parseBoolean(env.YASD_SAVE_ON_SHUTDOWN, 'YASD_SAVE_ON_SHUTDOWN');
   const healthToken = env.YASD_HEALTH_TOKEN === undefined
     ? undefined
@@ -816,6 +826,7 @@ export class YasdServer {
     this.netServer = this.tlsOptions
       ? tls.createServer(this.tlsOptions, socket => this.onConnection(socket))
       : net.createServer(socket => this.onConnection(socket));
+    this.netServer.maxConnections = this.maxConnections;
     if (!isLoopbackHost(this.host) && !this.authRequired && !this.tlsEnabled) {
       console.warn(
         `yasd: WARNING: listening on ${this.host}:${this.port} without authentication or TLS. ` +
@@ -846,6 +857,7 @@ export class YasdServer {
 
   /** Snapshot now (and truncate the AOF, which the snapshot supersedes). */
   async save(snapshotPath?: string): Promise<number> {
+    if (this.closing) throw new DatabaseError('server is closing', 'CONNECTION_CLOSED');
     const target = snapshotPath ?? this.snapshotPath;
     if (!target) throw new Error('SAVE requires a snapshot path');
     return this.enqueuePersistence(() => this.saveUnlocked(target));
@@ -864,10 +876,10 @@ export class YasdServer {
       // An alternate target is an export, not the authoritative startup checkpoint.
       if (this.snapshotPath && path.resolve(target) === path.resolve(this.snapshotPath)) {
         this.aof.rotateAfter(snapshotSeq);
+        this.aofDegraded = false;
+        this.aofLastError = undefined;
+        this.forgetPersistenceError('aof', 'write');
       }
-      this.aofDegraded = false;
-      this.aofLastError = undefined;
-      this.forgetPersistenceError('aof', 'write');
       this.forgetPersistenceError('snapshot', 'save');
       this.syncAofRecoveryStatus();
     } catch (err) {
@@ -877,11 +889,18 @@ export class YasdServer {
   }
 
   async load(snapshotPath?: string): Promise<number> {
+    if (this.closing) throw new DatabaseError('server is closing', 'CONNECTION_CLOSED');
     const target = snapshotPath ?? this.snapshotPath;
     if (!target) throw new Error('LOAD requires a snapshot path');
     return this.enqueuePersistence(async () => {
       try {
-        const count = await loadSnapshot(this.kv, target, { clearFirst: true, missingOk: false })
+        const count = await loadSnapshot({
+          dump: () => this.kv.dump(), clear: () => this.kv.clear(),
+          restore: entries => this.kv.restore(entries),
+          replace: entries => this.kv.atomicChanges(() => this.kv.replace(entries), (changed, deleted) => {
+            if (changed.length || deleted.length) this.appendAof({ op: 'patch', entries: changed, deleted });
+          }),
+        }, target, { clearFirst: true, missingOk: false })
         this.forgetPersistenceError('snapshot', 'load');
         this.publishInvalidate({ event: 'load' })
         return count
@@ -893,10 +912,16 @@ export class YasdServer {
   }
 
   /** Graceful shutdown with a bounded socket drain and persistence deadline. */
-  async close(): Promise<void> {
-    if (this.closing) return;
+  close(): Promise<void> {
+    if (this.stopping) return this.stopping;
     this.closing = true;
+    this.stopping = this.closeUnlocked();
+    return this.stopping;
+  }
+
+  private async closeUnlocked(): Promise<void> {
     const deadline = Date.now() + this.shutdownDeadlineMs;
+    if (this.starting) await this.starting.catch(() => undefined);
     if (this.autoSaveTimer) {
       clearInterval(this.autoSaveTimer);
       this.autoSaveTimer = undefined;
@@ -934,14 +959,17 @@ export class YasdServer {
         // ignore
       }
     }
-    await this.waitForDeadline(serverClosed, deadline);
-    if (this.saveOnShutdown && this.snapshotPath) {
-      await this.waitForDeadline(this.save().catch(() => undefined), deadline);
-    } else {
-      await this.waitForDeadline(this.persistenceQueue, deadline);
+    await this.waitForDeadline(serverClosed, deadline).catch(() => undefined);
+    try {
+      if (this.saveOnShutdown && this.snapshotPath) {
+        await this.waitForDeadline(this.enqueuePersistence(() => this.saveUnlocked(this.snapshotPath as string)), deadline);
+      } else {
+        await this.waitForDeadline(this.persistenceQueue, deadline);
+      }
+    } finally {
+      this.hub.unsubscribeAll();
+      this.kv.close();
     }
-    this.hub.unsubscribeAll();
-    this.kv.close();
   }
 
   // ---- internals ----
@@ -988,7 +1016,7 @@ export class YasdServer {
   }
 
   private safePersistenceError(prefix: string, error: unknown): Error {
-    return new Error(`${prefix} failed (${persistenceErrorCode(error)}); inspect persistenceStatus()`);
+    return new DatabaseError(`${prefix} failed (${persistenceErrorCode(error)}); inspect persistenceStatus()`, 'PERSISTENCE_ERROR', { cause: error });
   }
 
   private async waitForDeadline(promise: Promise<unknown>, deadline: number): Promise<void> {
@@ -1008,7 +1036,9 @@ export class YasdServer {
   }
 
   private enqueuePersistence<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.persistenceQueue.then(operation, operation);
+    if (this.persistenceDepth >= 64) return Promise.reject(new DatabaseError('persistence queue limit exceeded', 'LIMIT_EXCEEDED'));
+    this.persistenceDepth++;
+    const result = this.persistenceQueue.then(operation, operation).finally(() => { this.persistenceDepth--; });
     this.persistenceQueue = result.then(
       () => undefined,
       () => undefined
@@ -1017,6 +1047,7 @@ export class YasdServer {
   }
 
   private onConnection(socket: net.Socket): void {
+    if (this.closing || this.sockets.size >= this.maxConnections) { socket.destroy(); return; }
     this.sockets.add(socket);
     const state: ConnState = {
       socket,
@@ -1039,7 +1070,7 @@ export class YasdServer {
       try {
         this.onData(state, Buffer.from(chunk));
       } catch {
-        this.writeReply(state, { kind: 'error', message: 'ERR protocol error' });
+        this.writeReply(state, { kind: 'error', message: wireError(new DatabaseError('protocol error', 'PROTOCOL_ERROR')) });
         this.endSocket(state);
       }
     });
@@ -1056,6 +1087,8 @@ export class YasdServer {
         this.hub.unsubscribe(channel, listener);
       }
       state.subs.clear();
+      state.requestQueue.length = 0; state.requestQueueBytes = 0;
+      state.txQueue = null; state.txBytes = 0; state.watchVersions = null;
     };
     socket.on('close', cleanup);
     socket.on('error', () => undefined);
@@ -1088,6 +1121,16 @@ export class YasdServer {
 
   private writeReply(state: ConnState, reply: RespReply | null): boolean {
     if (state.outputClosed || state.closeWhenDrained || state.socket.destroyed) return false;
+    let bytes: number;
+    try { bytes = replyByteLength(reply); }
+    catch {
+      reply = { kind: 'error', message: wireError(new DatabaseError('response exceeds RESP limits', 'LIMIT_EXCEEDED')) };
+      bytes = replyByteLength(reply);
+    }
+    if (state.outputQueueBytes + state.socket.writableLength + bytes > this.maxPendingOutputBytes) {
+      this.disconnectSlowConsumer(state);
+      return false;
+    }
     return this.writeSocket(state, encodeReply(reply));
   }
 
@@ -1186,6 +1229,10 @@ export class YasdServer {
   }
 
   private onHttpData(state: ConnState, chunk: Buffer): void {
+    if ((state.httpBuf?.length ?? 0) + chunk.length > MAX_HTTP_HEADER_BYTES) {
+      this.writeHttpResponse(state, 431, 'Request Header Fields Too Large', { error: 'header too large' });
+      return;
+    }
     state.httpBuf = Buffer.concat([state.httpBuf ?? Buffer.alloc(0), chunk]);
     const end = state.httpBuf.indexOf('\r\n\r\n');
     if (end === -1) {
@@ -1335,7 +1382,7 @@ export class YasdServer {
     this.aofDegraded = true;
     this.aofLastError = 'AOF_WRITE_FAILED';
     this.rememberPersistenceError('aof', 'write', err);
-    return new Error('AOF write failed; inspect persistenceStatus()');
+    return new DatabaseError('AOF write failed; inspect persistenceStatus()', 'PERSISTENCE_ERROR', { cause: err });
   }
 
   private logAof(op: AofMutation, effects?: TransactionEffects): void {
@@ -1363,6 +1410,7 @@ export class YasdServer {
   }
 
   private runCacheMutation<T>(operation: (effects: TransactionEffects) => T): T {
+    if (this.closing) throw new DatabaseError('server is closing', 'CONNECTION_CLOSED');
     const effects: TransactionEffects = { aof: [], invalidations: [] };
     const commit = (): T => {
       const result = operation(effects);
@@ -1527,7 +1575,12 @@ export class YasdServer {
         if (state.txQueue !== null) throw new Error('WATCH inside MULTI is not allowed');
         this.requireArgs(cmd, args, 1, Infinity);
         if (state.watchVersions === null) state.watchVersions = new Map();
-        for (const key of args) state.watchVersions.set(key, this.kv.getVersion(key));
+        if (new Set([...state.watchVersions.keys(), ...args]).size > this.maxWatchedKeys) {
+          throw new DatabaseError('WATCH key limit exceeded', 'LIMIT_EXCEEDED');
+        }
+        for (const key of args) {
+          if (!state.watchVersions.has(key)) state.watchVersions.set(key, this.kv.getVersion(key));
+        }
         return { kind: 'simple', value: 'OK' };
       }
       case 'UNWATCH': {
@@ -1539,7 +1592,7 @@ export class YasdServer {
         if (args.length > 0) throw new Error('MULTI takes no arguments');
         if (state.subMode) throw new Error('MULTI not allowed in subscriber mode');
         if (state.txQueue !== null) throw new Error('MULTI calls cannot nest');
-        state.txQueue = [];
+        state.txQueue = []; state.txBytes = 0; state.txFailed = false;
         return { kind: 'simple', value: 'OK' };
       }
       case 'DISCARD': {
@@ -1588,8 +1641,10 @@ export class YasdServer {
   private execTransaction(state: ConnState): RespReply {
     const queue = state.txQueue ?? [];
     const watched = state.watchVersions;
-    state.txQueue = null;
+    const failed = state.txFailed;
+    state.txQueue = null; state.txBytes = 0; state.txFailed = false;
     state.watchVersions = null;
+    if (failed) throw new DatabaseError('transaction aborted after queue limit', 'TRANSACTION_ERROR');
     if (watched !== null) {
       for (const [key, version] of watched) {
         if (this.kv.getVersion(key) !== version) {
@@ -1603,6 +1658,7 @@ export class YasdServer {
     try {
       this.kv.atomicChanges(() => {
         let failed = false;
+        let responseBytes = String(queue.length).length + 3;
         for (const op of queue) {
           try {
             const reply = this.executeCommand(state, op.cmd, op.args, effects);
@@ -1610,6 +1666,8 @@ export class YasdServer {
               failed = true;
               items.push({ kind: 'error', message: `${op.cmd} cannot run inside MULTI` });
             } else {
+              responseBytes += replyByteLength(reply);
+              if (responseBytes > 8 * 1024 * 1024) throw new DatabaseError('EXEC response exceeds RESP limit', 'LIMIT_EXCEEDED');
               items.push(reply);
             }
           } catch (err) {
@@ -1797,6 +1855,9 @@ export class YasdServer {
 
       case 'SUBSCRIBE': {
         this.requireArgs(cmd, args, 1, Infinity);
+        if (new Set([...state.subs.keys(), ...args]).size > this.maxSubscriptions) {
+          throw new DatabaseError('subscription limit exceeded', 'LIMIT_EXCEEDED');
+        }
         state.subMode = true;
         const acks: Array<RespReply | null> = [];
         for (const channel of args) {

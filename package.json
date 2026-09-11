@@ -11,11 +11,13 @@
       "require": "./dist/index.js",
       "default": "./dist/index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./examples/production-integration": "./examples/production-integration.js"
   },
   "files": [
     "dist",
     "README.md",
+    "examples/production-integration.js",
     "LICENSE",
     "package.json"
   ],
@@ -36,7 +38,8 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node test/basic.test.js && node test/kv.test.js && node test/p1.test.js && node test/transactions.test.js && node test/metrics.test.js && node test/profiling.test.js && node test/fuzz.test.js",
+    "test": "npm run build && node test/run-all.js",
+    "test:package": "node test/package-consumer.js",
     "benchmark:indexes": "npm run build && node --expose-gc benchmark/indexes.js",
     "benchmark:load": "npm run build && node --expose-gc benchmark/load.js",
     "package:check": "npm pack --dry-run",

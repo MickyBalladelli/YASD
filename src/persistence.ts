@@ -61,6 +61,21 @@ export type AofBatchEntry = KVBatchEntry & {
 /** Replayable mutation ops for the append-only log. */
 export type AofOp = AofMutation | { op: 'transaction'; ops: AofMutation[] };
 
+const MAX_PERSISTENCE_FILE_BYTES = 256 * 1024 * 1024;
+function decodeFile(bytes: Buffer): string {
+  const raw = bytes.toString('utf8');
+  if (!Buffer.from(raw, 'utf8').equals(bytes)) throw new DatabaseError('invalid persistence UTF-8', 'PERSISTENCE_ERROR');
+  return raw;
+}
+function readFileBounded(filePath: string): string {
+  if (fs.statSync(filePath).size > MAX_PERSISTENCE_FILE_BYTES) throw new DatabaseError('persistence file exceeds 256 MiB', 'LIMIT_EXCEEDED');
+  return decodeFile(fs.readFileSync(filePath));
+}
+async function readFileBoundedAsync(filePath: string): Promise<string> {
+  if ((await fs.promises.stat(filePath)).size > MAX_PERSISTENCE_FILE_BYTES) throw new DatabaseError('persistence file exceeds 256 MiB', 'LIMIT_EXCEEDED');
+  return decodeFile(await fs.promises.readFile(filePath));
+}
+
 function ensureDir(filePath: string): void {
   const dir = path.dirname(filePath);
   if (dir && dir !== '.' && !fs.existsSync(dir)) {
@@ -70,6 +85,21 @@ function ensureDir(filePath: string): void {
 
 /** Per-call counter so concurrent saves never share a tmp path. */
 let saveSnapshotCounter = 0;
+const snapshotQueues = new Map<string, { tail: Promise<unknown>; depth: number }>();
+function queueSnapshot<T>(filePath: string, operation: () => Promise<T>): Promise<T> {
+  const key = path.resolve(filePath);
+  let queue = snapshotQueues.get(key);
+  if (!queue) { queue = { tail: Promise.resolve(), depth: 0 }; snapshotQueues.set(key, queue); }
+  if (queue.depth >= 64) return Promise.reject(new DatabaseError('snapshot queue limit exceeded', 'LIMIT_EXCEEDED'));
+  queue.depth++;
+  const current = queue;
+  const result = current.tail.then(operation, operation).finally(() => {
+    current.depth--;
+    if (current.depth === 0) snapshotQueues.delete(key);
+  });
+  current.tail = result.then(() => undefined, () => undefined);
+  return result;
+}
 
 function checkAofSeq(value: number, what: string): number {
   if (!Number.isSafeInteger(value) || value < 0) {
@@ -185,15 +215,20 @@ export async function saveSnapshot(
     entries,
     ...(aofSeq === undefined ? {} : { aofSeq }),
   };
-  ensureDir(filePath);
-  // Unique tmp path per call: concurrent saves (periodic autosave, explicit
-  // SAVE, shutdown SAVE) must not share one tmp file — the loser of a
-  // write/rename overlap would hit ENOENT on rename.
-  const tmp = `${filePath}.tmp.${process.pid}.${saveSnapshotCounter++}`;
-  await writeDurableFile(tmp, JSON.stringify(file));
-  await fs.promises.rename(tmp, filePath);
-  await syncDirectory(filePath);
-  return entries.length;
+  const encoded = JSON.stringify(file);
+  if (Buffer.byteLength(encoded) > MAX_PERSISTENCE_FILE_BYTES) throw new DatabaseError('snapshot exceeds 256 MiB', 'LIMIT_EXCEEDED');
+  return queueSnapshot(filePath, async () => {
+    ensureDir(filePath);
+    const tmp = `${filePath}.tmp.${process.pid}.${saveSnapshotCounter++}`;
+    try {
+      await writeDurableFile(tmp, encoded);
+      await fs.promises.rename(tmp, filePath);
+      await syncDirectory(filePath);
+      return entries.length;
+    } finally {
+      await fs.promises.unlink(tmp).catch(() => undefined);
+    }
+  });
 }
 
 /**
@@ -201,15 +236,19 @@ export async function saveSnapshot(
  * Returns the number of entries restored (0 when the file is absent and
  * `missingOk` is set).
  */
-export async function loadSnapshot(
+export function loadSnapshot(store: SnapshotStore, filePath: string, options: SnapshotLoadOptions = {}): Promise<number> {
+  return queueSnapshot(filePath, () => loadSnapshotUnlocked(store, filePath, options));
+}
+
+async function loadSnapshotUnlocked(
   store: SnapshotStore,
   filePath: string,
-  options: SnapshotLoadOptions = {}
+  options: SnapshotLoadOptions
 ): Promise<number> {
   const { clearFirst = true, missingOk = true, metadata } = options;
   let raw: string;
   try {
-    raw = await fs.promises.readFile(filePath, 'utf8');
+    raw = await readFileBoundedAsync(filePath);
   } catch (err) {
     if (missingOk && (err as NodeJS.ErrnoException).code === 'ENOENT') return 0;
     throw err;
@@ -355,6 +394,7 @@ export class AofLog {
     if (this.lastSeq >= Number.MAX_SAFE_INTEGER) throw new Error('AOF sequence exhausted');
     const record: AofRecord = { version: 1, seq: this.lastSeq + 1, op };
     const encoded = JSON.stringify(record) + '\n';
+    if (Buffer.byteLength(encoded) > 128 * 1024 * 1024) throw new DatabaseError('AOF record exceeds 128 MiB', 'LIMIT_EXCEEDED');
     try {
       fs.appendFileSync(this.filePath, encoded, 'utf8');
     } catch (error) {
@@ -364,13 +404,15 @@ export class AofLog {
       throw error;
     }
     this.lastSeq = record.seq;
+    this.recoveryStatus = 'clean';
+    this.recoveryDetail = undefined;
   }
 
   private readLastSequence(): number {
     if (!this.filePath) return 0;
     let raw: string;
     try {
-      raw = fs.readFileSync(this.filePath, 'utf8');
+      raw = readFileBounded(this.filePath);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 0;
       throw err;
@@ -439,7 +481,7 @@ export class AofLog {
     }
     let raw: string;
     try {
-      raw = await fs.promises.readFile(this.filePath, 'utf8');
+      raw = await readFileBoundedAsync(this.filePath);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 0;
       throw err;
@@ -491,7 +533,7 @@ export class AofLog {
     checkAofSeq(snapshotSeq, 'snapshotSeq');
     let raw: string;
     try {
-      raw = fs.readFileSync(this.filePath, 'utf8');
+      raw = readFileBounded(this.filePath);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') raw = '';
       else throw err;

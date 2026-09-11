@@ -10,6 +10,7 @@
 //   await client.close();
 
 import * as net from 'net';
+import { dialSocket } from './transport';
 import * as tls from 'tls';
 import * as http from 'http';
 import * as https from 'https';
@@ -17,7 +18,7 @@ import { Value, JsonValue } from './types';
 import { stringifyJsonValue } from './json';
 import { DatabaseError, errorFromWire } from './errors';
 import { KVStats, TransactionError } from './cache';
-import { RespDecoder, RespReply, encodeCommand } from './protocol';
+import { RespDecoder, RespReply, encodeCommand, commandByteLength } from './protocol';
 import { DEFAULT_PORT, HealthResponse, ServerInfo } from './server';
 import {
   parsePort,
@@ -45,6 +46,10 @@ export interface YasdClientOptions {
   poolSize?: number;
   /** Per-request timeout in ms. Default 5000; 0 disables. */
   requestTimeoutMs?: number;
+  /** TCP/TLS handshake deadline; defaults to 5000 ms, must be positive. */
+  connectTimeoutMs?: number;
+  /** Abort connection establishment and outstanding work. */
+  signal?: AbortSignal;
   /** Server password (AUTH). Also read from CACHE_URL userinfo/query. */
   password?: string;
   /** Bearer token for protected HTTP health details. */
@@ -234,12 +239,16 @@ export class YasdClient {
   private port: number;
   private poolSize: number;
   private requestTimeoutMs: number;
+  private connectTimeoutMs = 5000;
+  private abortController = new AbortController();
   private password: string | undefined;
   private healthToken: string | undefined;
   private tlsOptions: tls.ConnectionOptions | undefined;
   private pool: PooledConn[] = [];
   private roundRobin = 0;
   private closed = false;
+  private queuedCommands = 0;
+  private queuedBytes = 0;
   private connecting?: Promise<void>;
   // Shared subscriber connection (multiplexed channels).
   private subSocket?: net.Socket;
@@ -248,6 +257,19 @@ export class YasdClient {
   private subConnecting?: Promise<void>;
   private subDialSocket?: net.Socket;
   private subCommandTail: Promise<void> = Promise.resolve();
+  private subCommandDepth = 0;
+  private subscriptionStateListeners = new Set<(state: 'connected' | 'disconnected') => void>();
+
+  /** Disconnects are observable; reconnect remains explicit and never replays gaps. */
+  onSubscriptionState(listener: (state: 'connected' | 'disconnected') => void): () => void {
+    if (this.subscriptionStateListeners.size >= 64) throw new DatabaseError('subscription listener limit exceeded', 'LIMIT_EXCEEDED');
+    this.subscriptionStateListeners.add(listener);
+    return () => { this.subscriptionStateListeners.delete(listener); };
+  }
+
+  private emitSubscriptionState(state: 'connected' | 'disconnected'): void {
+    for (const listener of this.subscriptionStateListeners) { try { listener(state); } catch { /* Observer isolation. */ } }
+  }
 
   constructor(options: YasdClientOptions = {}) {
     const rawOptions = options as unknown;
@@ -262,6 +284,12 @@ export class YasdClient {
     this.password = resolved.password;
     this.healthToken = resolved.healthToken;
     this.tlsOptions = resolved.tlsOptions;
+    this.connectTimeoutMs = validateTimeout(options.connectTimeoutMs ?? 5000, 'connectTimeoutMs');
+    if (this.connectTimeoutMs <= 0) throw new DatabaseError('connectTimeoutMs must be positive', 'INVALID_CONFIG');
+    if (options.signal) {
+      if (options.signal.aborted) this.abortController.abort();
+      else options.signal.addEventListener('abort', () => { void this.close(); }, { once: true, signal: this.abortController.signal });
+    }
   }
 
   /** Build from `CACHE_URL` (falls back to localhost default when unset). */
@@ -289,8 +317,10 @@ export class YasdClient {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.abortController.abort();
     this.closeSubSocket(new Error('client is closed'));
     this.subHandlers.clear();
+    this.subscriptionStateListeners.clear();
     this.subDecoder.reset();
     const connections = this.pool.splice(0);
     this.roundRobin = 0;
@@ -484,6 +514,8 @@ export class YasdClient {
       password: this.password,
       tlsOptions: this.tlsOptions,
       requestTimeoutMs: this.requestTimeoutMs,
+      connectTimeoutMs: this.connectTimeoutMs,
+      signal: this.abortController.signal,
     });
   }
 
@@ -618,12 +650,22 @@ export class YasdClient {
   }
 
   private async exec(cmd: string[]): Promise<RespReply> {
-    if (this.closed) throw new Error('client is closed');
-    const conn = await this.liveConn();
-    return this.sendOn(conn, cmd);
+    if (this.closed) throw new DatabaseError('client is closed', 'CONNECTION_CLOSED');
+    const bytes = commandByteLength(cmd);
+    if (this.queuedCommands >= 1024 || this.queuedBytes + bytes > 8 * 1024 * 1024) {
+      throw new DatabaseError('client pending work limit exceeded', 'LIMIT_EXCEEDED');
+    }
+    this.queuedCommands++; this.queuedBytes += bytes;
+    try {
+      const conn = await this.liveConn();
+      return await this.sendOn(conn, cmd);
+    } finally {
+      this.queuedCommands--; this.queuedBytes -= bytes;
+    }
   }
 
   private async liveConn(): Promise<PooledConn> {
+    if (this.closed) throw new DatabaseError('client is closed', 'CONNECTION_CLOSED');
     const existing = this.nextLiveConn();
     if (existing) {
       if (this.pool.length < this.poolSize) {
@@ -640,12 +682,13 @@ export class YasdClient {
   private nextLiveConn(): PooledConn | undefined {
     this.pruneDeadConnections();
     if (this.pool.length === 0) return undefined;
+    this.roundRobin = (this.roundRobin + 1) % this.pool.length;
+    let best: PooledConn | undefined;
     for (let i = 0; i < this.pool.length; i++) {
-      this.roundRobin = (this.roundRobin + 1) % this.pool.length;
-      const conn = this.pool[this.roundRobin] as PooledConn;
-      if (!conn.dead && !conn.socket.destroyed) return conn;
+      const conn = this.pool[(this.roundRobin + i) % this.pool.length] as PooledConn;
+      if (!conn.dead && !conn.socket.destroyed && (!best || conn.pending.length < best.pending.length)) best = conn;
     }
-    return undefined;
+    return best;
   }
 
   private async replenishPool(): Promise<void> {
@@ -680,7 +723,7 @@ export class YasdClient {
       this.pruneDeadConnections();
       if (this.pool.length >= this.poolSize) return;
       if (attempt + 1 < RECONNECT_MAX_ATTEMPTS) {
-        const delayMs = Math.min(RECONNECT_MAX_DELAY_MS, RECONNECT_BASE_DELAY_MS * 2 ** attempt);
+        const delayMs = Math.min(RECONNECT_MAX_DELAY_MS, RECONNECT_BASE_DELAY_MS * 2 ** attempt) * (0.5 + Math.random() * 0.5);
         await new Promise(resolve => setTimeout(resolve, delayMs));
       }
     }
@@ -707,30 +750,10 @@ export class YasdClient {
   }
 
   /** Open one transport socket (TLS when configured), resolved when ready. */
-  private dialRaw(): Promise<net.Socket> {
-    return new Promise<net.Socket>((resolve, reject) => {
-      const readyEvent = this.tlsOptions !== undefined ? 'secureConnect' : 'connect';
-      let socket: net.Socket;
-      try {
-        socket = this.tlsOptions !== undefined
-          ? tls.connect({ ...this.tlsOptions, host: this.host, port: this.port })
-          : net.createConnection({ host: this.host, port: this.port });
-      } catch (err) {
-        reject(err as Error);
-        return;
-      }
-      const onError = (err: Error): void => {
-        socket.off(readyEvent, onReady);
-        socket.destroy();
-        reject(err);
-      };
-      const onReady = (): void => {
-        socket.off('error', onError);
-        resolve(socket);
-      };
-      socket.once('error', onError);
-      socket.once(readyEvent, onReady);
-    });
+  private async dialRaw(): Promise<net.Socket> {
+    const socket = await dialSocket(this.host, this.port, this.tlsOptions, this.connectTimeoutMs, this.abortController.signal);
+    if (this.closed) { socket.destroy(); throw new DatabaseError('client is closed', 'CONNECTION_CLOSED'); }
+    return socket;
   }
 
   private attachCommandHandlers(conn: PooledConn): void {
@@ -762,15 +785,19 @@ export class YasdClient {
   private sendOn(conn: PooledConn, cmd: string[]): Promise<RespReply> {
     return new Promise<RespReply>((resolve, reject) => {
       if (conn.dead || conn.socket.destroyed) {
-        reject(new Error('connection is closed'));
+        reject(new DatabaseError('connection is closed', 'CONNECTION_CLOSED'));
+        return;
+      }
+      if (conn.pending.length >= 1024 || conn.socket.writableLength + commandByteLength(cmd) > 8 * 1024 * 1024) {
+        reject(new DatabaseError('connection pending work limit exceeded', 'LIMIT_EXCEEDED'));
         return;
       }
       const pending: Pending = { resolve, reject };
       if (this.requestTimeoutMs > 0) {
         pending.timer = setTimeout(() => {
           const i = conn.pending.indexOf(pending);
-          if (i !== -1) this.failConn(conn, new Error(`request timed out: ${cmd[0]}`));
-          reject(new Error(`request timed out: ${cmd[0]}`));
+          if (i !== -1) this.failConn(conn, new DatabaseError(`request timed out: ${cmd[0]}; outcome may be unknown`, 'TIMEOUT'));
+          reject(new DatabaseError(`request timed out: ${cmd[0]}; outcome may be unknown`, 'TIMEOUT'));
         }, this.requestTimeoutMs);
         const t = pending.timer as unknown as { unref?: () => void };
         if (typeof t.unref === 'function') t.unref();
@@ -860,6 +887,7 @@ export class YasdClient {
       for (const channel of channels) {
         await this.subRoundTrip('subscribe', channel);
       }
+      this.emitSubscriptionState('connected');
     } catch (err) {
       if (this.subSocket === socket) {
         this.closeSubSocket(err as Error);
@@ -932,6 +960,7 @@ export class YasdClient {
     this.subSocket = undefined;
     this.subDialSocket = undefined;
     this.subDecoder.reset();
+    if (socket || dialingSocket) this.emitSubscriptionState('disconnected');
     for (const waiters of this.subAckWaiters.values()) {
       for (const waiter of waiters) {
         if (waiter.timer) clearTimeout(waiter.timer);
@@ -956,7 +985,9 @@ export class YasdClient {
   }
 
   private enqueueSubCommand<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.subCommandTail.then(operation, operation);
+    if (this.subCommandDepth >= 1024) return Promise.reject(new DatabaseError('subscription queue limit exceeded', 'LIMIT_EXCEEDED'));
+    this.subCommandDepth++;
+    const result = this.subCommandTail.then(operation, operation).finally(() => { this.subCommandDepth--; });
     this.subCommandTail = result.then(() => undefined, () => undefined);
     return result;
   }
@@ -1090,6 +1121,10 @@ export interface YasdTransactionOptions {
   password?: string;
   tlsOptions?: tls.ConnectionOptions;
   requestTimeoutMs?: number;
+  /** TCP/TLS handshake deadline; defaults to 5000 ms, must be positive. */
+  connectTimeoutMs?: number;
+  /** Abort connection establishment and outstanding work. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -1105,6 +1140,8 @@ export class YasdTransaction {
   private password: string | undefined;
   private tlsOptions: tls.ConnectionOptions | undefined;
   private requestTimeoutMs: number;
+  private connectTimeoutMs = 5000;
+  private abortController = new AbortController();
   private socket?: net.Socket;
   private decoder = new RespDecoder();
   private pending: Pending[] = [];
@@ -1114,14 +1151,28 @@ export class YasdTransaction {
   private finishing = false;
   private done = false;
 
-  private serialize<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.operationTail.then(operation);
+  private queuedOperations = 0;
+  private queuedOperationBytes = 0;
+  private serialize<T>(operation: () => Promise<T>, bytes = 0, terminal = false): Promise<T> {
+    if (!terminal && (this.queuedOperations >= 1024 || this.queuedOperationBytes + bytes > 8 * 1024 * 1024)) {
+      return Promise.reject(new DatabaseError('transaction pending work limit exceeded', 'LIMIT_EXCEEDED'));
+    }
+    this.queuedOperations++; this.queuedOperationBytes += bytes;
+    const result = this.operationTail.then(operation).finally(() => {
+      this.queuedOperations--; this.queuedOperationBytes -= bytes;
+    });
     this.operationTail = result.then(() => undefined, () => undefined);
     return result;
   }
   private dead = false;
 
   constructor(options: YasdTransactionOptions) {
+    this.connectTimeoutMs = validateTimeout(options.connectTimeoutMs ?? 5000, 'connectTimeoutMs');
+    if (this.connectTimeoutMs <= 0) throw new DatabaseError('connectTimeoutMs must be positive', 'INVALID_CONFIG');
+    if (options.signal) {
+      if (options.signal.aborted) this.abortController.abort();
+      else options.signal.addEventListener('abort', () => { void this.close(); }, { once: true, signal: this.abortController.signal });
+    }
     this.host = validateHost(options.host, 'host');
     this.port = validatePort(options.port, 'port');
     this.password = validatePassword(options.password, 'password');
@@ -1142,35 +1193,15 @@ export class YasdTransaction {
   }
 
   async connect(): Promise<void> {
-    if (this.done) throw new TransactionError('transaction is finished');
+    if (this.done || this.dead) throw new TransactionError('transaction is finished');
     if (this.socket) return;
     if (this.connecting) {
       await this.connecting;
       return;
     }
     this.connecting = (async () => {
-      const socket: net.Socket = await new Promise<net.Socket>((resolve, reject) => {
-        const readyEvent = this.tlsOptions !== undefined ? 'secureConnect' : 'connect';
-        let s: net.Socket;
-        try {
-          s = this.tlsOptions !== undefined
-            ? tls.connect({ ...this.tlsOptions, host: this.host, port: this.port })
-            : net.createConnection({ host: this.host, port: this.port });
-        } catch (err) {
-          reject(err as Error);
-          return;
-        }
-        const onError = (err: Error): void => {
-          s.off(readyEvent, onReady);
-          reject(err);
-        };
-        const onReady = (): void => {
-          s.off('error', onError);
-          resolve(s);
-        };
-        s.once('error', onError);
-        s.once(readyEvent, onReady);
-      });
+      const socket = await dialSocket(this.host, this.port, this.tlsOptions, this.connectTimeoutMs, this.abortController.signal);
+      if (this.done || this.dead) { socket.destroy(); throw new TransactionError('transaction is finished'); }
       socket.on('data', chunk => this.onData(Buffer.from(chunk)));
       socket.on('error', () => this.fail(new Error('transaction connection error')));
       socket.on('close', () => this.fail(new Error('transaction connection closed')));
@@ -1350,7 +1381,7 @@ export class YasdTransaction {
         this.done = true;
         await this.closeSocket();
       }
-    });
+    }, 0, true);
   }
 
   /** Drop the queue (and watches) without committing. */
@@ -1364,7 +1395,7 @@ export class YasdTransaction {
         this.done = true;
         await this.closeSocket();
       }
-    });
+    }, 0, true);
   }
 
   /** Abandon the transaction (watches die with the connection). */
@@ -1396,7 +1427,7 @@ export class YasdTransaction {
       if (reply.kind !== 'simple' || reply.value !== 'QUEUED') {
         throw new Error(`unexpected ${cmd[0]} reply inside MULTI: ${JSON.stringify(reply)}`);
       }
-    });
+    }, commandByteLength(cmd));
   }
 
   private async expectOk(cmd: string[]): Promise<'OK'> {
@@ -1413,8 +1444,8 @@ export class YasdTransaction {
       const pending: Pending = { resolve, reject };
       if (this.requestTimeoutMs > 0) {
         pending.timer = setTimeout(() => {
-          this.fail(new Error(`request timed out: ${cmd[0]}`));
-          reject(new Error(`request timed out: ${cmd[0]}`));
+          this.fail(new DatabaseError(`request timed out: ${cmd[0]}; outcome may be unknown`, 'TIMEOUT'));
+          reject(new DatabaseError(`request timed out: ${cmd[0]}; outcome may be unknown`, 'TIMEOUT'));
         }, this.requestTimeoutMs);
         const t = pending.timer as unknown as { unref?: () => void };
         if (typeof t.unref === 'function') t.unref();
@@ -1467,6 +1498,7 @@ export class YasdTransaction {
   }
 
   private async closeSocket(): Promise<void> {
+    this.abortController.abort();
     this.dead = true;
     for (const p of this.pending.splice(0)) {
       if (p.timer) clearTimeout(p.timer);

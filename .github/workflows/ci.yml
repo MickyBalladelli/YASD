@@ -44,6 +44,9 @@ jobs:
       - name: Verify package contents
         run: npm run package:check
 
+      - name: Verify installed package consumer
+        run: npm run test:package
+
       - name: Run server smoke test
         run: |
           node <<'NODE'

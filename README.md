@@ -260,7 +260,8 @@ operational health data, set `YASD_HEALTH_DETAILS=true`. Add
 `YASD_HEALTH_TOKEN` to require `Authorization: Bearer <token>` for those
 details. Use `yasds://` on clients when TLS is enabled:
 
-Each connection has a bounded pending-output queue of 1 MiB by default. If a
+Each connection has an 8 MiB output budget by default, including the first
+reply, queued output and Node's writable buffer. If a
 slow subscriber fills its queue, YASD disconnects it. Configure the limit with
 `maxPendingOutputBytes`, `--max-pending-output-bytes`, or
 `YASD_MAX_PENDING_OUTPUT_BYTES`.
@@ -270,8 +271,9 @@ and `maxValueBytes` defaults to 4 MiB. Set them under `cache`, or with
 `--max-key-bytes` / `--max-value-bytes` and `CACHE_MAX_KEY_BYTES` /
 `CACHE_MAX_VALUE_BYTES`. The aggregate `maxBytes` limit still applies.
 
-Operational limits are opt-in: `maxCommandMs` returns an error and closes a
-connection after an over-budget synchronous command, `idleConnectionTimeoutMs`
+Operational limits are opt-in: `maxCommandMs` returns the command's real result
+and then closes the connection if execution exceeded the budget. It never
+reports an already-committed write as rolled back. `idleConnectionTimeoutMs`
 closes inactive connections, and `shutdownDeadlineMs` bounds socket draining
 and the final persistence wait. Their CLI/env forms are
 `--max-command-ms` / `YASD_MAX_COMMAND_MS`,
@@ -368,7 +370,14 @@ The default resource limits are:
 | RESP array items | 1,024 | Applies to command arguments and nested arrays |
 | RESP nesting depth | 32 | Deeper arrays are rejected |
 | Buffered RESP input | 8 MiB | Excess incomplete input is rejected |
-| Pending socket output | 1 MiB | Slow consumers are disconnected |
+| Pending socket output | 8 MiB | Includes queued output and Node writable buffer; slow consumers disconnect |
+| Commands queued per connection | 1,024 / 8 MiB | Excess work closes that connection |
+| Commands per transaction | 1,024 / 8 MiB | Excess work aborts the transaction |
+| Watched keys / subscribed channels | 1,024 each per connection | Additional entries are rejected |
+| Connections | 1,024 | Additional connections are refused |
+| Queued persistence operations | 64 | Additional operations are rejected; autosaves coalesce |
+| JSON depth / nodes | 128 / 1,000,000 | Deeper or wider values are rejected |
+| Persistence input file | 256 MiB | Larger files are rejected before reading |
 | HTTP request headers | 16 KiB | Larger or malformed headers are rejected |
 
 Cache limits are configurable through `YasdServer({ cache: ... })` and the
@@ -381,8 +390,11 @@ size limit: it counts only each key and its JSON representation.
 additional operational controls. The first two are disabled by default;
 `shutdownDeadlineMs` defaults to 2 seconds. Client requests time out after 5
 seconds by default, and the command pool defaults to four connections (maximum
-1,024). There is no separate SQL statement-size limit today; process memory
-remains the boundary for embedded SQL parsing.
+1,024). TCP/TLS handshakes have a separate positive `connectTimeoutMs` deadline
+(default 5 seconds), and `signal` or `close()` cancels outstanding dials. Requests
+waiting for connections count toward the client's 1,024-command / 8 MiB budget.
+Transactions created by a client are closed when that client closes. SQL
+statements are limited to 4 MiB; SQL table storage is separate from KV limits.
 
 Durability is optional and cache data is not a source of truth:
 
@@ -401,10 +413,18 @@ Durability is optional and cache data is not a source of truth:
   This makes snapshot/AOF crash windows recoverable without replaying covered
   mutations twice. `saveOnShutdown` only runs when a snapshot path is
   configured, and its final wait is bounded by `shutdownDeadlineMs`.
-- `loadOnStart` defaults to true. `LOAD` is a runtime replacement: it loads
-  only the selected snapshot, does not replay or rotate the AOF, and is not a
-  restart checkpoint by itself. Run `SAVE` after `LOAD` when the loaded state
-  must become the restart baseline.
+- `loadOnStart` defaults to true. `LOAD` validates the complete snapshot before
+  replacing state. With AOF enabled the replacement is recorded atomically,
+  so it survives restart; it does not replay or rotate the log. Without AOF,
+  `SAVE` is required to make an alternate loaded file the startup checkpoint.
+- Embedded `server.save(otherPath)` exports a snapshot without rotating the
+  configured AOF. Remote SAVE/LOAD may only use the configured snapshot path.
+  Commands and replies remain FIFO across asynchronous persistence operations.
+- New server AOF records contain final values, absolute deadlines and deletion
+  tombstones, including eviction victims. Old command-based records remain
+  readable but cannot retroactively recover missing historical TTL information.
+  Recovery assumes compatible cache capacity; smaller configured limits may evict
+  additional entries. Snapshots and AOF do not preserve an identical LRU order.
 
 AOF recovery is deliberately conservative. Startup replays valid records in
 order and stops at the first middle corruption, invalid record, or sequence
@@ -440,38 +460,78 @@ are lost. Resubscription restores the channel, not the missed history.
 
 [`examples/production-integration.js`](examples/production-integration.js) is
 the recommended cache-aside shape for a durable application. It uses keys such
-as `app:v2:post:123`, so a schema or serialization change gets a new namespace
+as `app:v3:post:123`, so a schema or serialization change gets a new namespace
 instead of reusing old values. The `durableStore` adapter is the source of
 truth and must be backed by the application's database; YASD is never the only
 copy.
 
 ```javascript
 const { YasdClient } = require('yasd')
-const { ProductionPostCache } = require('./examples/production-integration')
+const { ProductionPostCache } = require('yasd/examples/production-integration')
 
 const durableStore = {
-  getPost: id => postgres.query('SELECT ... WHERE id = $1', [id]),
-  savePost: (id, post) => postgres.query('UPDATE ... WHERE id = $1', [id]),
-  deletePost: id => postgres.query('DELETE ... WHERE id = $1', [id]),
+  // Example schema: posts(id text PRIMARY KEY, body jsonb NOT NULL).
+  getPost: async id => (await postgres.query(
+    'SELECT body FROM posts WHERE id = $1', [id])).rows[0]?.body,
+  savePost: async (id, post) => (await postgres.query(
+    'INSERT INTO posts (id, body) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET body = EXCLUDED.body RETURNING body',
+    [id, post])).rows[0].body,
+  deletePost: async id => (await postgres.query(
+    'DELETE FROM posts WHERE id = $1', [id])).rowCount > 0,
 }
 const client = new YasdClient({ url: process.env.CACHE_URL })
 const posts = new ProductionPostCache({ client, durableStore })
 await posts.start()
 
 const post = await posts.getPost('123') // cache, then durable read-through
-await posts.savePost('123', changedPost) // durable commit, then cache delete
+await posts.savePost('123', { id: '123', title: 'Updated' }) // commit, then invalidate
 await posts.reconnect() // clear L1 and explicitly restore subscriptions
 ```
 
-The example keeps L1 values fresh for 5 seconds, gives YASD entries a
-30-second TTL, and permits stale data for at most 60 seconds only when
-`allowStale` is true. A cache miss or expired value reads the durable source;
-stale data is used only if that source is temporarily unavailable. Writes
-commit the durable source first, then delete the cache key. Failed invalidation
-is logged and tolerated because invalidations are hints; the bounded TTL/stale
-policy limits the resulting exposure. Bump `CACHE_KEY_VERSION` deliberately
-when the cached shape changes, and clear old namespaces during a controlled
-migration if old application versions must stop serving them immediately.
+The example measures age from the source read, never from a later remote-cache
+hit. Freshness lasts 5 seconds; remote entries live at most 30 seconds from that
+read; `allowStale` permits data up to 60 seconds old while refreshing or during
+source failures. Cross-host clocks must be synchronized for these age bounds.
+L1 is limited to 5,000 entries / 8 MiB and refresh concurrency to 128 by default.
+
+Writes commit the durable source and publish a tombstone SET even when the
+cache key was absent. WATCH plus a process epoch prevents stale in-flight
+reads from reinstalling invalidated data. An overlapping read can still return
+its earlier source result. Subscription disconnects clear L1; reconnect is
+explicit and does not recover missed messages. Invalidation failure is logged:
+the durable database and cache are not one distributed transaction, so this is
+bounded-staleness cache-aside, not linearizable replication. All writers must
+use this invalidation path. Bump `CACHE_KEY_VERSION` when the cached shape changes.
+
+### API correctness notes
+
+JSON values are owned on write and returned as owned ordinary objects on read.
+Own keys such as `__proto__` are preserved safely. NaN, infinities, undefined,
+sparse arrays, accessors, custom serialization hooks and non-plain objects are
+rejected before client serialization. Schema getters return independent copies.
+Numbers use JavaScript IEEE-754 precision, not arbitrary-precision arithmetic;
+use safe integers for exact integer counters. Unsafe-integer/decimal counter
+results use JSON bulk replies; TTL replies round remaining milliseconds up.
+CAS without a TTL preserves both persistent and expiring existing keys.
+
+SQL supports one optional trailing semicolon, parenthesized predicates and
+comma-separated UPDATE assignments. Assignment RHS identifiers retain the
+existing literal-string behavior; column-to-column assignments are not supported.
+`BETWEEN` combines both comparisons using SQL three-valued logic.
+
+`DatabaseError`, `DATABASE_ERROR_CODES` and `DatabaseErrorCode` are public.
+Parser/schema/constraint errors and coded server errors can be distinguished
+without parsing English messages. Network timeouts do not prove rollback; a
+connection lost after a write may leave its outcome unknown. `close()` calls on
+a server share one completion promise; persistence failures and deadline expiry
+reject it. Timed-out filesystem work may still finish. A closed server cannot be
+restarted; create another instance. `onSubscriptionState()` reports observed
+subscriber connection changes without promising reliable invalidation delivery.
+
+AOF-backed writes still capture O(cache-entry-count) rollback metadata, although
+resident JSON payloads are no longer deep-cloned for rollback. SQL PK checks and
+selective DELETE still have full-table costs. Benchmarks are smoke evidence, not
+production throughput or a capacity guarantee. See `TODO2.md` for remaining work.
 
 Protocol commands: `AUTH PING GET SET[M PX] CAS MGET MSET DEL CLEAR TTL EXPIRE
 PERSIST INCR[BY] DECR[BY] WATCH UNWATCH MULTI EXEC DISCARD

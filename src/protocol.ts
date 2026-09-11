@@ -145,7 +145,12 @@ export function encodeReply(reply: RespReply | null): Buffer {
 }
 
 /** Encode a command as an array of bulk strings. */
+export function commandByteLength(args: Array<string | number>): number {
+  return replyByteLength({ kind: 'array', items: args.map(value => ({ kind: 'bulk', value: String(value) })) });
+}
+
 export function encodeCommand(args: Array<string | number>): Buffer {
+  commandByteLength(args);
   const parts: Buffer[] = [Buffer.from(`*${args.length}${CRLF}`, 'utf8')];
   for (const a of args) parts.push(encodeBulk(String(a)));
   return Buffer.concat(parts);

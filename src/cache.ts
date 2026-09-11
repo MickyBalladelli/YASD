@@ -97,6 +97,7 @@ interface CacheState {
   evictions: number;
   expiries: number;
   keyVersions: Map<string, number>;
+  absentEpoch: number;
 }
 
 /** Return the UTF-8 byte length used by the cache's byte accounting model. */
@@ -292,6 +293,7 @@ export class KVCache {
       evictions: this.evictions,
       expiries: this.expiries,
       keyVersions: new Map(this.keyVersions),
+      absentEpoch: this.absentEpoch,
     };
   }
 
@@ -303,6 +305,7 @@ export class KVCache {
     this.evictions = state.evictions;
     this.expiries = state.expiries;
     this.keyVersions = new Map(state.keyVersions);
+    this.absentEpoch = state.absentEpoch;
   }
 
   /** Run synchronous work atomically, restoring all cache state on failure. */
@@ -369,9 +372,8 @@ export class KVCache {
     if (this.generation >= Number.MAX_SAFE_INTEGER) throw new DatabaseError('cache generation exhausted', 'LIMIT_EXCEEDED');
     this.keyVersions.set(key, ++this.generation);
     for (const frame of this.changeFrames) frame.add(key);
-    // Bound the tombstone map: dropping versions for non-live keys can only
-    // cause a false transaction abort (version reads as 0, mismatching any
-    // earlier snapshot), never a missed conflict.
+    // Bound tombstones. A monotonic absent-key epoch makes pruning conservative:
+    // an unrelated prune can abort a watcher, but cannot hide an ABA cycle.
     if (this.keyVersions.size > this.maxEntries * 2 + 1024) {
       for (const k of this.keyVersions.keys()) {
         if (!this.map.has(k)) {
@@ -564,13 +566,15 @@ export class KVCache {
       if (!e || typeof e.key !== 'string') {
         throw new Error('mset entries must be { key: string, value, ttlMs? }');
       }
+      const key = e.key;
       const value = cloneJsonValue(e.value, 'mset value');
-      if (e.ttlMs !== undefined) validateTTL(e.ttlMs, 'ttlMs');
-      this.assertValueFits(e.key, value);
-      return { key: e.key, value, ttlMs: e.ttlMs };
+      const ttl = this.resolveTTLMs(key, e.ttlMs);
+      const expiresAt = ttl === undefined ? undefined : Date.now() + ttl;
+      this.assertValueFits(key, value);
+      return { key, value, expiresAt };
     });
     for (const e of validated) {
-      this.set(e.key, e.value, e.ttlMs);
+      this.setOwned(e.key, e.value, e.expiresAt, e.value);
     }
     return entries.length;
   }

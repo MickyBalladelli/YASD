@@ -1,154 +1,106 @@
-// Production integration pattern.
-//
-// YASD is a cache, not the durable source of truth. Inject a repository backed
-// by Postgres, MySQL, MongoDB, or another durable application database.
-// The repository shape is:
-//   { getPost(id), savePost(id, post), deletePost(id) }
-//
-// This example uses a versioned cache key, a short fresh window, bounded stale
-// reads, and the YASD invalidation channel for a process-local L1 cache.
+// Cache-aside example, not replication. The durable adapter returns plain JSON
+// posts (not a SQL driver's result envelope), or null/undefined for a missing post.
+// All writers must use the invalidation path below. Cross-host clocks must be
+// synchronized for the source-age bound; future timestamps are rejected.
+// A durable commit and a cache invalidation are not a distributed transaction:
+// invalidation failure can leave stale data until its absolute age bound expires.
+const { INVALIDATE_CHANNEL, KVCache } = require('../dist/index.js')
 
-const { INVALIDATE_CHANNEL } = require('../dist/index.js')
-
-const CACHE_KEY_VERSION = 'v2'
+const CACHE_KEY_VERSION = 'v3'
 const CACHE_PREFIX = `app:${CACHE_KEY_VERSION}:post:`
 const CACHE_TTL_MS = 30_000
 const LOCAL_FRESH_MS = 5_000
 const LOCAL_STALE_MAX_MS = 60_000
+const cacheKey = id => `${CACHE_PREFIX}${encodeURIComponent(String(id))}`
+const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+const copy = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value))
 
-function cacheKey(id) {
-  return `${CACHE_PREFIX}${encodeURIComponent(String(id))}`
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
-function decodeEntry(value) {
-  if (
-    !isRecord(value) ||
-    value.cacheKeyVersion !== CACHE_KEY_VERSION ||
-    typeof value.cachedAt !== 'number' ||
-    !Number.isFinite(value.cachedAt) ||
-    !Object.prototype.hasOwnProperty.call(value, 'value')
-  ) return undefined
-  // Age is measured when this process observes the entry. The YASD TTL
-  // bounds remote-cache age; this avoids trusting another host's wall clock.
-  return { value: value.value, cachedAt: Date.now() }
-}
-
-function ageMs(entry, now = Date.now()) {
-  return Math.max(0, now - entry.cachedAt)
+function decodeEntry(value, now = Date.now()) {
+  if (!isRecord(value) || value.cacheKeyVersion !== CACHE_KEY_VERSION || value.deleted ||
+      !Number.isFinite(value.cachedAt) || value.cachedAt > now ||
+      now - value.cachedAt > LOCAL_STALE_MAX_MS || !Object.hasOwn(value, 'value')) return undefined
+  return copy(value)
 }
 
 class ProductionPostCache {
-  constructor({ client, durableStore, logger = console }) {
+  constructor({ client, durableStore, logger = console, maxLocalEntries = 5000,
+    maxLocalBytes = 8 * 1024 * 1024, maxRefreshes = 128 }) {
     if (!client) throw new Error('client is required')
-    if (!durableStore || typeof durableStore.getPost !== 'function') {
-      throw new Error('durableStore.getPost is required')
+    for (const name of ['getPost', 'savePost', 'deletePost']) {
+      if (!durableStore || typeof durableStore[name] !== 'function') throw new Error(`durableStore.${name} is required`)
     }
-    if (typeof durableStore.savePost !== 'function') {
-      throw new Error('durableStore.savePost is required')
-    }
-    if (typeof durableStore.deletePost !== 'function') {
-      throw new Error('durableStore.deletePost is required')
-    }
+    if (!Number.isSafeInteger(maxRefreshes) || maxRefreshes < 1) throw new Error('maxRefreshes must be positive')
     this.client = client
     this.durableStore = durableStore
     this.logger = logger
-    this.local = new Map()
+    this.local = new KVCache({ maxEntries: maxLocalEntries, maxBytes: maxLocalBytes, sweepIntervalMs: 0 })
     this.refreshes = new Map()
-    this.stopInvalidations = undefined
+    this.activeRefreshes = 0
+    this.maxRefreshes = maxRefreshes
+    // One conservative process epoch bounds metadata and fences every in-flight fill.
+    this.epoch = 0
   }
+
+  invalidateAll() { this.epoch++; this.local.clear() }
 
   async start() {
     await this.client.connect()
-    this.stopInvalidations = await this.client.subscribe(
-      INVALIDATE_CHANNEL,
-      (_channel, message) => this.handleInvalidation(message)
-    )
+    if (this.client.onSubscriptionState) {
+      this.stopStatus = this.client.onSubscriptionState(() => this.invalidateAll())
+    }
+    this.stopInvalidations = await this.client.subscribe(INVALIDATE_CHANNEL,
+      (_channel, message) => this.handleInvalidation(message))
   }
 
   async stop() {
-    if (this.stopInvalidations) {
-      await this.stopInvalidations()
-      this.stopInvalidations = undefined
-    }
+    this.invalidateAll()
+    this.stopStatus?.()
+    if (this.stopInvalidations) await this.stopInvalidations()
+    this.stopInvalidations = undefined
+    this.local.close()
   }
 
-  // Subscription reconnects do not replay the gap. Drop local state first;
-  // the next read will refill from YASD or the durable source.
   async reconnect() {
-    this.local.clear()
+    this.invalidateAll()
     await this.client.reconnectSubscriptions()
   }
 
   handleInvalidation(message) {
     let event
-    try {
-      event = JSON.parse(message)
-    } catch {
-      this.logger.warn('ignored malformed YASD invalidation')
-      return
-    }
+    try { event = JSON.parse(message) } catch { this.logger.warn('ignored malformed invalidation'); return }
     if (!isRecord(event)) return
+    if (event.event === 'load' || (typeof event.key === 'string' && event.key.startsWith(CACHE_PREFIX)) ||
+        (event.event === 'clear' && typeof event.prefix === 'string' &&
+          (CACHE_PREFIX.startsWith(event.prefix) || event.prefix.startsWith(CACHE_PREFIX)))) this.invalidateAll()
+  }
 
-    if (event.event === 'load') {
-      this.local.clear()
-      return
-    }
-    if (typeof event.key === 'string' && event.key.startsWith(CACHE_PREFIX)) {
-      this.local.delete(event.key)
-    }
-    if (event.event === 'clear' && typeof event.prefix === 'string') {
-      const prefix = event.prefix
-      if (
-        CACHE_PREFIX === prefix ||
-        CACHE_PREFIX.startsWith(`${prefix}:`) ||
-        prefix.startsWith(CACHE_PREFIX)
-      ) this.local.clear()
-    }
+  remember(key, entry) {
+    const remaining = LOCAL_STALE_MAX_MS - (Date.now() - entry.cachedAt)
+    if (remaining <= 0) return
+    try { this.local.set(key, entry, remaining) }
+    catch { /* Oversized entries still return to the caller without entering L1. */ }
   }
 
   async getPost(id, { allowStale = true } = {}) {
     const key = cacheKey(id)
-    const localEntry = this.local.get(key)
-    if (localEntry && ageMs(localEntry) <= LOCAL_FRESH_MS) {
-      return localEntry.value
-    }
-
-    let cached
+    const epoch = this.epoch
+    let stale = decodeEntry(this.local.get(key))
+    if (stale && Date.now() - stale.cachedAt <= LOCAL_FRESH_MS) return copy(stale.value)
     try {
-      cached = decodeEntry(await this.client.get(key))
-    } catch (error) {
-      return this.readDurableOrStale(id, localEntry, allowStale, error)
-    }
-
-    if (cached) {
-      this.local.set(key, cached)
-      const age = ageMs(cached)
-      if (age <= LOCAL_FRESH_MS) return cached.value
-      if (allowStale && age <= LOCAL_STALE_MAX_MS) {
-        void this.refreshPost(id).catch(error => {
-          this.logger.warn(`background refresh failed for post ${id}: ${error.message}`)
-        })
-        return cached.value
+      const remote = decodeEntry(await this.client.get(key))
+      if (remote && epoch === this.epoch) {
+        stale = remote
+        this.remember(key, remote)
+        if (Date.now() - remote.cachedAt <= LOCAL_FRESH_MS) return copy(remote.value)
+        if (allowStale) {
+          void this.refreshPost(id).catch(() => this.logger.warn('background cache refresh failed'))
+          return copy(remote.value)
+        }
       }
-    }
-
-    return this.readDurableOrStale(id, cached || localEntry, allowStale)
-  }
-
-  async readDurableOrStale(id, staleEntry, allowStale, cacheError) {
-    try {
-      return await this.refreshPost(id)
-    } catch (error) {
-      if (allowStale && staleEntry && ageMs(staleEntry) <= LOCAL_STALE_MAX_MS) {
-        this.logger.warn(
-          `serving bounded stale post ${id}: ${(cacheError || error).message}`
-        )
-        return staleEntry.value
-      }
+    } catch { /* Read the source of truth, not an invented fallback result. */ }
+    try { return await this.refreshPost(id) }
+    catch (error) {
+      if (allowStale && epoch === this.epoch && decodeEntry(stale)) return copy(stale.value)
       throw error
     }
   }
@@ -156,67 +108,63 @@ class ProductionPostCache {
   async refreshPost(id) {
     const key = cacheKey(id)
     const running = this.refreshes.get(key)
-    if (running) return running
-
-    const refresh = this.refreshPostOnce(id).finally(() => {
-      this.refreshes.delete(key)
+    if (running && running.epoch === this.epoch) return copy(await running.promise)
+    if (this.activeRefreshes >= this.maxRefreshes) throw new Error('cache refresh concurrency limit reached')
+    this.activeRefreshes++
+    const operation = { epoch: this.epoch }
+    operation.promise = this.refreshPostOnce(id, operation.epoch).finally(() => {
+      this.activeRefreshes--
+      if (this.refreshes.get(key) === operation) this.refreshes.delete(key)
     })
-    this.refreshes.set(key, refresh)
-    return refresh
+    this.refreshes.set(key, operation)
+    return copy(await operation.promise)
   }
 
-  async refreshPostOnce(id) {
+  async refreshPostOnce(id, epoch) {
     const key = cacheKey(id)
-    const post = await this.durableStore.getPost(id)
-    if (post === undefined || post === null) {
-      this.local.delete(key)
-      await this.client.del(key).catch(error => {
-        this.logger.warn(`cache delete failed for missing post ${id}: ${error.message}`)
-      })
-      return undefined
-    }
+    const tx = this.client.multi()
+    let watching = false
+    try {
+      try { await tx.watch(key); watching = true } catch { /* Durable read remains available. */ }
+      // Count source-read duration as age too: a slow read cannot extend freshness.
+      const cachedAt = Date.now()
+      const post = await this.durableStore.getPost(id)
+      const entry = post == null
+        ? { cacheKeyVersion: CACHE_KEY_VERSION, cachedAt, deleted: true }
+        : { cacheKeyVersion: CACHE_KEY_VERSION, cachedAt, value: copy(post) }
+      const remaining = CACHE_TTL_MS - (Date.now() - cachedAt)
+      if (watching && epoch === this.epoch && remaining > 0) {
+        try {
+          await tx.set(key, entry, remaining)
+          const committed = await tx.exec()
+          if (committed !== null && epoch === this.epoch && !entry.deleted) this.remember(key, entry)
+        } catch { this.logger.warn('cache fill failed; durable read succeeded') }
+      }
+      return post == null ? undefined : copy(post)
+    } finally { await tx.close() }
+  }
 
-    const entry = {
-      cacheKeyVersion: CACHE_KEY_VERSION,
-      cachedAt: Date.now(),
-      value: post,
-    }
-    this.local.set(key, entry)
-    await this.client.set(key, entry, CACHE_TTL_MS).catch(error => {
-      // The durable read still succeeds. The bounded local entry protects
-      // this request; later requests retry YASD and then the durable source.
-      this.logger.warn(`cache fill failed for post ${id}: ${error.message}`)
-    })
-    return post
+  async invalidatePost(id) {
+    this.invalidateAll()
+    // A tombstone SET changes WATCH even when the cache key was already absent.
+    // DEL on a missing key would leave a race in a concurrent initial fill.
+    try {
+      await this.client.set(cacheKey(id), { cacheKeyVersion: CACHE_KEY_VERSION, cachedAt: Date.now(), deleted: true }, CACHE_TTL_MS)
+    } catch { this.logger.error('durable commit succeeded but cache invalidation failed') }
   }
 
   async savePost(id, post) {
-    // Commit durable data first. Cache invalidation is only a hint.
-    const saved = await this.durableStore.savePost(id, post)
-    const key = cacheKey(id)
-    this.local.delete(key)
-    await this.client.del(key).catch(error => {
-      this.logger.error(`cache invalidation failed for post ${id}: ${error.message}`)
-    })
-    return saved
+    this.invalidateAll()
+    try { return await this.durableStore.savePost(id, post) }
+    finally { await this.invalidatePost(id) }
   }
 
   async deletePost(id) {
-    const deleted = await this.durableStore.deletePost(id)
-    const key = cacheKey(id)
-    this.local.delete(key)
-    await this.client.del(key).catch(error => {
-      this.logger.error(`cache invalidation failed for deleted post ${id}: ${error.message}`)
-    })
-    return deleted
+    this.invalidateAll()
+    try { return await this.durableStore.deletePost(id) }
+    finally { await this.invalidatePost(id) }
   }
 }
 
-module.exports = {
-  ProductionPostCache,
-  CACHE_KEY_VERSION,
-  CACHE_PREFIX,
-  CACHE_TTL_MS,
-  LOCAL_FRESH_MS,
-  LOCAL_STALE_MAX_MS,
-}
+module.exports = { ProductionPostCache, CACHE_KEY_VERSION, CACHE_PREFIX, CACHE_TTL_MS,
+  LOCAL_FRESH_MS, LOCAL_STALE_MAX_MS, decodeEntry }

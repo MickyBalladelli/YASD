@@ -4,6 +4,14 @@ Review focus: SQL correctness, KV cache behavior, server safety, persistence,
 client reliability, tests, and docs. Line references point to the current
 source.
 
+Implementation verification update (2026-09-11): the original 103 tests plus
+30 new regression cases pass locally on Node 22 (133 total). Build, strict
+typecheck, installed-package CJS/ESM/declaration/CLI checks, real TLS/mTLS,
+and package-only `npm ci` also pass. See `TODO2.md` for the item-by-item
+implementation evidence and remaining performance/resource work. Checked
+items are not a claim that the Docker image or every CI runtime was executed;
+Docker is unavailable on this device and the hosted matrix remains unverified.
+
 ## P0 — Fix correctness and safety first
 
 - [x] Make cached JSON values safe to own. `KVCache.set()` stores object
@@ -140,7 +148,7 @@ source.
 - [x] Fix the public constructor type. `YASD` accepts `KVOptions`, then casts to
   `YasdOptions` to read `slowQueryMs` (`src/index.ts:64-91`). Type it as
   `YasdOptions` so the documented `new YASD({ slowQueryMs: 5 })` compiles.
-- [ ] Export a stable typed database error and error-code list. The executor's
+- [x] Export a stable typed database error and error-code list. The executor's
   `DatabaseError` is private (`src/executor.ts:28-33`) while consumers need to
   distinguish table, column, constraint, parse, and protocol failures.
 - [x] Remove or justify the import-time singleton. `src/index.ts:377-379` creates

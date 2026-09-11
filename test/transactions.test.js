@@ -412,7 +412,9 @@ async function runTests() {
     assert.ok(invalid.some(e => e.event === 'set' && e.key === 'tx:n'), `invalidate, got ${JSON.stringify(invalid)}`);
     const aofRaw = fs.readFileSync(aof, 'utf8');
     assert.ok(aofRaw.includes('"key":"tx:k"'), `AOF logs tx set, got ${aofRaw}`);
-    assert.ok(aofRaw.includes('"op":"incr"'), `AOF logs tx incr, got ${aofRaw}`);
+    const record = JSON.parse(aofRaw.trim());
+    assert.strictEqual(record.op.op, 'patch');
+    assert.deepStrictEqual(record.op.entries.find(entry => entry.key === 'tx:n'), { key: 'tx:n', value: 1 });
 
     await unsub();
     await sub.close();

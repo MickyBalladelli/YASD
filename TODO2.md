@@ -1,5 +1,93 @@
 # YASD review and improvement backlog
 
+## Implementation update — 2026-09-11
+
+The review below is retained as the historical diagnosis. This section is the
+current implementation status; the original review-time checkboxes below are
+not a fresh completion claim. The request to fix the implementation has been
+carried out across persistence, SQL/value handling, protocol ordering,
+transactions, configuration, packaging, examples and regression tests. **The
+entire expanded performance/scalability backlog is not complete.**
+
+### Verified locally
+
+Node 22.23.1: `npm test` passes all **133 top-level cases across 11 suites**:
+103 original cases plus 30 new cases. Build and strict typecheck pass, including
+`strictPropertyInitialization` and `noEmitOnError`. The runner executes every
+suite even after a failure. Original failing assertions were repaired according
+to their cause: real value/grammar bugs, incorrect AOF fixture store types,
+obsolete log-shape assertions, a wording mismatch, and autosave fixture races.
+
+`npm run test:package` passes a clean tarball consumer test covering CommonJS,
+ESM named imports, exported TypeScript declarations/errors, version agreement,
+and CLI help. Package-only offline `npm ci`, without source or tsconfig, passes:
+the former Docker dependency-stage lifecycle failure is fixed. The example
+`examples/basic.js` executes. Index and load benchmark smoke runs complete;
+their numbers are not capacity or performance-regression certification.
+
+Real TLS/mTLS tests pass with a generated test certificate: authenticated
+commands, verified HTTPS health, wrong trust, wrong hostname and missing client
+certificate cases. Full container/image/volume/healthcheck validation remains
+blocked because Docker is not installed. Node 18/20/24 and hosted CI results
+have not been executed locally; the workflow now includes installed-package
+verification and the new suites.
+
+### Current status of all 39 follow-up tasks
+
+“Implemented” below means the reported defect is fixed and locally tested, not
+that every possible crash schedule, workload, OS or runtime was verified.
+
+| ID | Current status and evidence |
+| --- | --- |
+| R01 | Implemented: server AOF records final-state patches with absolute expiry; regression covers expired INCR, PERSIST and extension. Legacy command logs retain their documented weaker historical semantics. |
+| R02 | Implemented: alternate SAVE does not rotate the configured AOF; restart regression passes. |
+| R03 | Implemented: snapshot sequence seeds missing-file recovery before the early return; two-restart regression passes. |
+| R04 | Implemented: snapshot shape/deadline/duplicate/value validation and atomic replacement preserve old values, counters, versions and TTL on failure. |
+| R05 | Implemented core recovery fixes: runtime-independent JSON-prefix classification, record-atomic replay, poisoned partial appends, repair-and-append regression, strict UTF-8 and file-size checks. Full disk/rename fault matrix and alternate runtimes remain verification work. |
+| R06 | Implemented: per-connection asynchronous FIFO; SAVE/SET/LOAD/GET/PING/QUIT regression passes. Runtime LOAD now logs its replacement atomically too. |
+| R07 | Implemented: protocol selection is sticky; every split of a representative alphabetic RESP payload passes. |
+| R08 | Implemented: monotonic generations, conservative absent-key epoch and expiry detection at WATCH/EXEC; expiry and tombstone ABA regressions pass. |
+| R09 | Implemented: normalized negative flags, schema-based options, unknown/missing flag rejection and merge-before-validation; TLS flag test passes. |
+| R10 | Lifecycle fix implemented and package-only dependency stage verified. Full Docker acceptance remains blocked by missing Docker. |
+| Q01 | Implemented: commas, parentheses, one terminator, nonnegative pagination, sized-type validation, BETWEEN 3VL; assignment RHS literal behavior is documented. |
+| Q02 | Implemented: owned schema copies, safe own-property results and null-prototype internal maps; special-key and schema-mutation tests pass. |
+| Q03 | Implemented: shared JSON ownership/validation before network serialization; normal public objects and mutation-isolation regressions pass. |
+| Q04 | Implemented: CAS retains existing persistent TTL mode; namespace regression passes. |
+| Q05 | Core corrections implemented: false booleans, timer caps, path/password/TLS validation, URL redaction and endpoint precedence. Broader exhaustive configuration/fault matrices remain validation work. |
+| Q06 | Implemented: serialized transaction operations, fresh reads, empty EXEC, parallel first writes and parent-close cancellation; regression passes. |
+| Q07 | Local suite is green with 30 new cases and all-suite reporting. Hosted/alternate-runtime coverage and expanded fault/fuzz schedules remain unverified. |
+| Q08 | Public runtime error class/code union/constants and wire decoding implemented; installed declarations and coded-error tests pass. Some legacy validation branches still use generic Error/COMMAND_ERROR; a complete error taxonomy migration remains. |
+| Q09 | Implemented: remote persistence paths constrained, Compose host publishing loopback-only, dev server loopback/same-origin/Host/body limits. Full deployment validation remains unverified. |
+| Q10 | Core fixes implemented: real committed result before over-budget close, joined start/close, persistence rejection and one-shot lifecycle. Startup-hang/deadline and every bind/shutdown race are not exhaustively verified. |
+| Q11 | Implemented: absolute age, bounded L1, bounded active refreshes, tombstone invalidation and WATCH/epoch fill fencing; tests cover stale age and in-flight write race. Cache/durable-store commit is explicitly not a distributed transaction. |
+| Q12 | Implemented: real dev database only, supported row counting, accurate false/0 rendering, lifecycle cleanup and updated API/example guarantees. Complete automated extraction of every README snippet remains open. |
+| Q13 | Installed-package and strict compiler checks implemented and verified; example included in tarball. Dedicated lint/formatter policy and payload-size optimization remain open. |
+| S01 | Partial: connection, request, transaction, WATCH, subscription and persistence-depth caps; coalesced autosave. No unified process-wide in-flight byte reservation or representative saturation proof. |
+| S02 | Implemented core limits: first write plus writable buffer, pre-encoding sizing, incremental MGET/EXEC result budget, 4 MiB readable value regression and complete HTTP-header cap. Full slow-reader RSS proof remains open. |
+| S03 | Partial: cancellable TCP/TLS deadlines, bounded request/transaction/subscription queues, least-pending pool selection and jittered backoff. Dedicated transaction allocation cap and one end-to-end deadline across dial/retry/auth/request still remain. |
+| S04 | Open: cursor/time-budget expiry and namespace scanning, plus expiry-lag measurements. |
+| S05 | Core fixes implemented: bounded L1 and active refreshes, observable subscription loss and reset on reconnect. No reliable event sequence/gap replay protocol is claimed. |
+| S06 | Open: SQL row/result/storage budgets, expanded process metrics, capacity SLOs and partitioning design. |
+| P01 | Partial: rollback snapshots share immutable owned values instead of cloning resident payloads; MSET avoids a second value clone. Full ordered-map/version metadata capture remains O(resident entries); no touched-key undo journal yet. |
+| P02 | Open: segmented/resumable RESP parsing and deque queues. Existing decoder remains bounded but can reparse/copy fragmented input. |
+| P03 | Open: dedicated PK uniqueness index and 1k/10k/100k scaling evidence. |
+| P04 | Open: stable row IDs/incremental selective DELETE indexes. |
+| P05 | Open: shared richer planner, residual AND candidates, early/top-k LIMIT and bounded LIKE/prepared predicates. |
+| P06 | Open: realistic multiprocess benchmark baselines, transient-memory measurement and noise-tolerant performance gates. Existing smoke benchmarks pass. |
+| Z01 | Core shared bounded-depth/node JSON validation and safe final-state logging implemented. Serialized-value caching and earlier byte-budget traversal optimization remain open. |
+| Z02 | Wire symmetry fixed: safe RESP integers, finite large/decimal results as JSON bulk, and rounded TTL replies. IEEE-754 precision is documented; arbitrary-precision counters are not implemented. |
+| Z03 | Partial: input file/append size limits, same-path helper serialization, temp-file cleanup and explicit no-per-append-fsync policy. Streaming, checksums/commit framing, automatic size rotation and durability modes remain open. |
+| Z04 | Implemented: eviction tombstones preserve recovered membership with intervening reads; changed-capacity and non-identical LRU-order limitations are documented. |
+
+New automated evidence lives in `test/review.test.js`,
+`test/persistence-safety.test.js`, `test/production.test.js`, `test/tls.test.js`
+and `test/package-consumer.js`. Original suites remain enabled. No original
+user changes were reverted, and no repository commit was made by the assistant.
+
+---
+
+## Original review (historical)
+
 Review date: 2026-09-11. Baseline: working tree at commit `9c06354`, including the existing edits to `README.md` and `TODO.md` and the untracked `examples/production-integration.js`.
 
 ## Conclusion
