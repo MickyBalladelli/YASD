@@ -164,6 +164,18 @@ async function runTests() {
 
     const semicolon = db.explain("SELECT * FROM users WHERE name = 'Ann';");
     assert.strictEqual(semicolon.strategy, 'index-scan', 'trailing semicolon tolerated');
+    assert.throws(
+      () => YASD.parse("SELECT * FROM users; SELECT * FROM users"),
+      /trailing token/
+    );
+    assert.throws(
+      () => db.query("SELECT * FROM users;;"),
+      /trailing token/
+    );
+    assert.throws(
+      () => db.query("SELECT * FROM users garbage"),
+      /trailing token/
+    );
     db.close();
   });
 

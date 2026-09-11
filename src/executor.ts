@@ -92,11 +92,7 @@ export class Executor {
     // Single parser path: src/parser.ts is the only SQL frontend.
     // (The old parseSimple duplicate lived here; it was removed so behavior
     // is consistent no matter the entry point.)
-    let text = sql.trim();
-    // Remove single trailing semicolon (parser also tolerates it).
-    if (text.endsWith(';')) {
-      text = text.slice(0, -1).trim();
-    }
+    const text = sql.trim();
 
     const started = performance.now();
     try {
@@ -690,8 +686,7 @@ export class Executor {
    * Non-SELECT statements report strategy 'n/a'.
    */
   explain(sql: string): QueryPlan {
-    let text = sql.trim();
-    if (text.endsWith(';')) text = text.slice(0, -1).trim();
+    const text = sql.trim();
     const statement = parse(text);
     if (statement.type !== 'select') {
       return { statement: statement.type, strategy: 'n/a', hasOrderBy: false };

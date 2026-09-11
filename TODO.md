@@ -100,7 +100,7 @@ source.
   a same-named column exists (`src/parser.ts:188-229`,
   `src/executor.ts:572-589`). For example, `name = 'age'` can compare against
   the `age` column. Add explicit literal and column-reference AST nodes.
-- [ ] Reject trailing SQL instead of silently ignoring it. Parser entry points
+- [x] Reject trailing SQL instead of silently ignoring it. Parser entry points
   consume an optional semicolon but never require end-of-input
   (`src/parser.ts:232-251,585-588`). Reject extra tokens and support only one
   statement unless a deliberate script API is added.

@@ -245,23 +245,34 @@ class Parser {
 
   parse(): SqlStatement {
     const keyword = this.peek()?.toLowerCase();
-    
+    let statement: SqlStatement;
     switch (keyword) {
       case 'create':
-        return this.parseCreateTable();
+        statement = this.parseCreateTable();
+        break;
       case 'insert':
-        return this.parseInsert();
+        statement = this.parseInsert();
+        break;
       case 'select':
-        return this.parseSelect();
+        statement = this.parseSelect();
+        break;
       case 'update':
-        return this.parseUpdate();
+        statement = this.parseUpdate();
+        break;
       case 'delete':
-        return this.parseDelete();
+        statement = this.parseDelete();
+        break;
       case 'drop':
-        return this.parseDropTable();
+        statement = this.parseDropTable();
+        break;
       default:
         throw new Error(`Unexpected keyword: ${keyword}`);
     }
+    if (this.peek() === ';') this.consume();
+    if (this.peek() !== null) {
+      throw new Error(`Unexpected trailing token '${this.peek()}'`);
+    }
+    return statement;
   }
 
   private parseCreateTable(): CreateTableStatement {
