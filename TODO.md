@@ -146,7 +146,7 @@ source.
 - [x] Remove or justify the import-time singleton. `src/index.ts:377-379` creates
   a global database and sweeper for every import. Prefer an explicit factory or
   document the shared mutable default and its lifecycle.
-- [ ] Make JSON equality deterministic and safe. `JSON.stringify()` comparison
+- [x] Make JSON equality deterministic and safe. `JSON.stringify()` comparison
   depends on object insertion order (`src/cache.ts:378-389`,
   `src/executor.ts:559-569`). Use structural equality or canonical JSON, and
   test nested values, key order, and large objects.

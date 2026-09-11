@@ -27,6 +27,7 @@ import {
 import { parse } from './parser';
 import { performance } from 'perf_hooks';
 import { SlowLog, checkSlowThreshold } from './metrics';
+import { structuralEqual } from './value';
 
 type TruthValue = boolean | null;
 
@@ -800,16 +801,7 @@ export class Executor {
   }
 
   private valuesEqual(a: Value, b: Value): boolean {
-    if (a === b) return true;
-    // Structured values (objects/arrays) compare by content.
-    if (typeof a === 'object' && a !== null && typeof b === 'object' && b !== null) {
-      try {
-        return JSON.stringify(a) === JSON.stringify(b);
-      } catch {
-        return false;
-      }
-    }
-    return false;
+    return structuralEqual(a, b);
   }
 
   private evaluateExpression(row: Row, expression: Expression): Value {

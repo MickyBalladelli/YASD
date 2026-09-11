@@ -46,6 +46,32 @@ async function runTests() {
     db.close();
   });
 
+  await test('CAS compares nested JSON independent of key order', () => {
+    const db = new YASD({ sweepIntervalMs: 0 })
+    const original = {
+      outer: [{ right: { b: 2, a: 1 }, left: ['x', { n: true }] }],
+      empty: {},
+      value: null,
+    }
+    const reordered = {
+      value: null,
+      empty: {},
+      outer: [{ left: ['x', { n: true }], right: { a: 1, b: 2 } }],
+    }
+    db.set('json:nested', original)
+    assert.strictEqual(db.cas('json:nested', reordered, { ok: true }), true)
+
+    const large = {}
+    for (let i = 0; i < 1000; i++) large[`key-${i}`] = { value: i, nested: [i, i % 2 === 0] }
+    const largeReordered = {}
+    for (let i = 999; i >= 0; i--) {
+      largeReordered[`key-${i}`] = { nested: [i, i % 2 === 0], value: i }
+    }
+    db.set('json:large', large)
+    assert.strictEqual(db.cas('json:large', largeReordered, null), true)
+    db.close()
+  })
+
   // 2. del semantics.
   await test('del returns true once, then false', () => {
     const db = new YASD({ sweepIntervalMs: 0 });

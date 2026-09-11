@@ -21,6 +21,7 @@ import {
   validateNonNegativeNumber,
   validatePositiveSafeInteger,
 } from './validation';
+import { structuralEqual } from './value';
 
 /** Per-namespace TTL defaults (ms). `feed`/`feeds` 15s, channel lists 30s, popular 60s. */
 export const DEFAULT_NAMESPACE_TTLS: Record<string, number> = {
@@ -598,16 +599,7 @@ export class KVCache {
   }
 
   private static valuesEqual(a: Value | undefined, b: Value | undefined): boolean {
-    if (a === b) return true;
-    if (a === undefined || b === undefined) return false;
-    if (typeof a === 'object' && a !== null && typeof b === 'object' && b !== null) {
-      try {
-        return JSON.stringify(a) === JSON.stringify(b);
-      } catch {
-        return false;
-      }
-    }
-    return false;
+    return structuralEqual(a, b);
   }
 
   /**
