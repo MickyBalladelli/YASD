@@ -21,6 +21,9 @@ A lightweight, SQL-like in-memory database for Node.js. Perfect for testing, pro
 npm install yasd
 ```
 
+YASD supports Node.js 18 and newer. `package.json` is the version source of
+truth; server `INFO.version` reports that same package version.
+
 ## Usage
 
 ### Basic Example

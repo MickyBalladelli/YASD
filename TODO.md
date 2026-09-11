@@ -150,7 +150,7 @@ source.
   depends on object insertion order (`src/cache.ts:378-389`,
   `src/executor.ts:559-569`). Use structural equality or canonical JSON, and
   test nested values, key order, and large objects.
-- [ ] Add package metadata and an explicit package surface: supported Node
+- [x] Add package metadata and an explicit package surface: supported Node
   versions, repository/homepage, exports for CommonJS/types, included files,
   and a version source shared by `package.json`, server INFO, and docs.
 - [ ] Add graceful operational controls: max key/value size, max command time,

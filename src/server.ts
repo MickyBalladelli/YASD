@@ -67,6 +67,7 @@ import {
   validatePositiveSafeInteger,
   validateToken,
 } from './validation';
+import { YASD_VERSION } from './version';
 
 export const DEFAULT_HOST = '127.0.0.1'
 export const DEFAULT_PORT = 7379;
@@ -568,7 +569,7 @@ export class YasdServer {
     const s = this.kv.stats();
     return {
       status: 'ok',
-      version: '1.0.0',
+      version: YASD_VERSION,
       uptimeMs: Date.now() - this.startedAt,
       connections: this.sockets.size,
     tls: this.tlsEnabled,
