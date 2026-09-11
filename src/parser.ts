@@ -16,8 +16,13 @@ import {
   AndClause,
   OrClause,
   NotClause,
-  OrderByClause
+  OrderByClause,
+  Value,
 } from './types';
+
+const NUMERIC_LITERAL = /^-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+const NUMERIC_TOKEN_CHAR = /[0-9.eE+-]/;
+const IDENTIFIER_CHAR = /[a-zA-Z0-9_]/;
 
 interface ParserState {
   sql: string;
@@ -48,45 +53,79 @@ class Parser {
       return null;
     }
 
-    // Check for quoted strings (keep the quotes in the token so parseValue
-    // can tell string literals apart from identifiers/numbers)
+    // Check for quoted strings. Backslash escapes and doubled quote
+    // delimiters are decoded here; parseValue only unwraps the token.
     if (this.state.sql[this.state.pos] === "'" || this.state.sql[this.state.pos] === '"') {
       const quote = this.state.sql[this.state.pos];
       this.state.pos++;
       let str = '';
-      while (this.state.pos < this.state.sql.length && this.state.sql[this.state.pos] !== quote) {
-        if (this.state.sql[this.state.pos] === '\\') {
+      let closed = false;
+      while (this.state.pos < this.state.sql.length) {
+        const c = this.state.sql[this.state.pos];
+        if (c === quote) {
+          if (this.state.sql[this.state.pos + 1] === quote) {
+            str += quote;
+            this.state.pos += 2;
+            continue;
+          }
           this.state.pos++;
-          str += this.state.sql[this.state.pos];
-        } else {
-          str += this.state.sql[this.state.pos];
+          closed = true;
+          break;
         }
+        if (c === '\\') {
+          this.state.pos++;
+          if (this.state.pos >= this.state.sql.length) {
+            throw new Error('Unterminated quoted string');
+          }
+          const escaped = this.state.sql[this.state.pos++];
+          switch (escaped) {
+            case '0': str += '\0'; break;
+            case 'b': str += '\b'; break;
+            case 'f': str += '\f'; break;
+            case 'n': str += '\n'; break;
+            case 'r': str += '\r'; break;
+            case 't': str += '\t'; break;
+            case 'v': str += '\v'; break;
+            case '\\': str += '\\'; break;
+            case "'": str += "'"; break;
+            case '"': str += '"'; break;
+            default:
+              throw new Error(`Unsupported escape sequence \\${escaped}`);
+          }
+          continue;
+        }
+        str += c;
         this.state.pos++;
       }
-      this.state.pos++; // skip closing quote
+      if (!closed) throw new Error('Unterminated quoted string');
       this.state.currentToken = quote + str + quote;
       return this.state.currentToken;
     }
 
-    // Check for numbers
-    if (/[\d.-]/.test(this.state.sql[this.state.pos])) {
-      let numStr = '';
-      let hasDot = false;
-      while (this.state.pos < this.state.sql.length) {
-        const c = this.state.sql[this.state.pos];
-        if (/\d/.test(c)) {
-          numStr += c;
-          this.state.pos++;
-        } else if (c === '.' && !hasDot) {
-          numStr += c;
-          hasDot = true;
-          this.state.pos++;
-        } else if (c === '-') {
-          numStr += c;
-          this.state.pos++;
-        } else {
-          break;
-        }
+    // Scan the entire numeric-looking run so malformed values such as
+    // `10oops`, `1.2.3`, and `1e+` cannot be split into valid tokens.
+    const first = this.state.sql[this.state.pos];
+    const next = this.state.sql[this.state.pos + 1];
+    const afterNext = this.state.sql[this.state.pos + 2];
+    const numericStart =
+      /\d/.test(first) ||
+      (first === '.' && /\d/.test(next)) ||
+      (first === '-' && (/\d/.test(next) || (next === '.' && /\d/.test(afterNext))));
+    if (numericStart) {
+      const start = this.state.pos;
+      while (
+        this.state.pos < this.state.sql.length &&
+        NUMERIC_TOKEN_CHAR.test(this.state.sql[this.state.pos])
+      ) {
+        this.state.pos++;
+      }
+      const numStr = this.state.sql.slice(start, this.state.pos);
+      if (
+        (this.state.pos < this.state.sql.length &&
+          IDENTIFIER_CHAR.test(this.state.sql[this.state.pos])) ||
+        !NUMERIC_LITERAL.test(numStr)
+      ) {
+        throw new Error(`Malformed numeric literal '${numStr}'`);
       }
       this.state.currentToken = numStr;
       return numStr;
@@ -121,10 +160,9 @@ class Parser {
     // Check for keywords and identifiers (first char only — the old
     // unanchored test against the whole remainder swallowed spaces,
     // commas and the rest of the query into one "identifier")
-    const first = this.state.sql[this.state.pos];
     if (/[a-zA-Z_]/.test(first)) {
       let ident = '';
-      while (this.state.pos < this.state.sql.length && /[a-zA-Z0-9_]/.test(this.state.sql[this.state.pos])) {
+      while (this.state.pos < this.state.sql.length && IDENTIFIER_CHAR.test(this.state.sql[this.state.pos])) {
         ident += this.state.sql[this.state.pos];
         this.state.pos++;
       }
@@ -135,8 +173,7 @@ class Parser {
       }
     }
 
-    this.state.currentToken = null;
-    return null;
+    throw new Error(`Unexpected character '${first}' at position ${this.state.pos}`);
   }
 
   private consume(expected: string | null = null): string {
@@ -186,32 +223,34 @@ class Parser {
     }
   }
 
-  private parseValue(): any {
+  private parseValue(): Value {
     const token = this.peek();
     
     if (token === null) {
       throw new Error('Unexpected end of input');
     }
 
-    if (token === 'null') {
+    const normalized = token.toLowerCase();
+    if (normalized === 'null') {
       this.consume();
       return null;
     }
 
-    if (token === 'true') {
+    if (normalized === 'true') {
       this.consume();
       return true;
     }
 
-    if (token === 'false') {
+    if (normalized === 'false') {
       this.consume();
       return false;
     }
 
-    if (/^-?(\d+(\.\d+)?|\.\d+)$/.test(token)) {
-      const num = parseFloat(token);
+    if (NUMERIC_LITERAL.test(token)) {
+      const num = Number(token);
       this.consume();
-      return isNaN(num) ? token : num;
+      if (!Number.isFinite(num)) throw new Error(`Numeric literal out of range '${token}'`);
+      return num;
     }
 
     if ((token.startsWith("'") && token.endsWith("'") && token.length >= 2) ||
@@ -241,6 +280,19 @@ class Parser {
       return { type: 'column_ref', name: token };
     }
     return { type: 'literal', value: this.parseValue() };
+  }
+
+  private parseInteger(name: string): number {
+    const token = this.peek();
+    if (token === null || !/^-?\d+$/.test(token)) {
+      throw new Error(`${name} must be an integer, got '${token}'`);
+    }
+    const value = Number(token);
+    if (!Number.isSafeInteger(value)) {
+      throw new Error(`${name} must be a safe integer, got '${token}'`);
+    }
+    this.consume();
+    return value;
   }
 
   parse(): SqlStatement {
@@ -313,7 +365,7 @@ class Parser {
       }
       
       let nullable = true;
-      let defaultValue: any = undefined;
+      let defaultValue: Value | undefined = undefined;
       
       // Parse column modifiers
       while (true) {
@@ -363,7 +415,7 @@ class Parser {
     const tableName = this.expectIdentifier();
     
     let columns: string[] = [];
-    let values: any[][] = [];
+    let values: Value[][] = [];
     
     if (this.peek() === '(') {
       this.consume('(');
@@ -380,7 +432,7 @@ class Parser {
     this.consume('values');
     this.consume('(');
     
-    const rowValues: any[] = [];
+    const rowValues: Value[] = [];
     while (this.peek() !== ')') {
       rowValues.push(this.parseValue());
       if (this.peek() === ',') {
@@ -395,7 +447,7 @@ class Parser {
     while (this.peek() === ',') {
       this.consume();
       this.consume('(');
-      const nextRow: any[] = [];
+      const nextRow: Value[] = [];
       while (this.peek() !== ')') {
         nextRow.push(this.parseValue());
         if (this.peek() === ',') {
@@ -454,13 +506,13 @@ class Parser {
     let limit: number | undefined;
     if (this.peek()?.toLowerCase() === 'limit') {
       this.consume();
-      limit = parseInt(this.consume(), 10);
+      limit = this.parseInteger('LIMIT');
     }
     
     let offset: number | undefined;
     if (this.peek()?.toLowerCase() === 'offset') {
       this.consume();
-      offset = parseInt(this.consume(), 10);
+      offset = this.parseInteger('OFFSET');
     }
     
     if (this.peek() === ';') {
@@ -476,7 +528,7 @@ class Parser {
     
     this.consume('set');
     
-    const setClauses: { column: string; value: any }[] = [];
+    const setClauses: { column: string; value: Value }[] = [];
     
     do {
       const column = this.expectIdentifier();
@@ -601,7 +653,7 @@ class Parser {
     return {
       type: 'comparison',
       left,
-      operator: op as any,
+      operator: op as ComparisonClause['operator'],
       right
     };
   }

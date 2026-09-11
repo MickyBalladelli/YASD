@@ -170,6 +170,11 @@ DROP TABLE table_name
 - OR: `age > 25 OR name = 'John'`
 - NOT: `NOT (age > 25)`
 
+String literals use single or double quotes. Escape characters with backslash:
+`\\`, `\'`, `\"`, `\n`, `\r`, `\t`, `\0`, `\b`, `\f`, and `\v`; SQL-style
+doubled delimiters (`''` and `""`) are also supported. `NULL`, `TRUE`, and
+`FALSE` are case-insensitive.
+
 ## Cache server, counters, batch, pub/sub, persistence (P1)
 
 For multi-instance Echo (Socket.IO scaling), run YASD standalone and share

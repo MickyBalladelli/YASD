@@ -179,6 +179,20 @@ async function runTests() {
     db.close();
   });
 
+  await test('parser hardens quotes, booleans, and numeric literals', async () => {
+    const values = YASD.parse("INSERT INTO t VALUES (nUlL, TrUe, FaLsE, 'it''s')").values[0];
+    assert.deepStrictEqual(values, [null, true, false, "it's"]);
+    const escaped = YASD.parse(String.raw`INSERT INTO t VALUES ('it\'s', 'line\n\t\\')`).values[0];
+    assert.deepStrictEqual(escaped, ["it's", 'line\n\t\\']);
+
+    assert.throws(() => YASD.parse("INSERT INTO t VALUES ('unterminated)"), /Unterminated quoted string/);
+    assert.throws(() => YASD.parse(String.raw`INSERT INTO t VALUES ('bad\q')`), /Unsupported escape/);
+    assert.throws(() => YASD.parse('INSERT INTO t VALUES (10oops)'), /Malformed numeric/);
+    assert.throws(() => YASD.parse('INSERT INTO t VALUES (1.2.3)'), /Malformed numeric/);
+    assert.throws(() => YASD.parse('INSERT INTO t VALUES (1e+)'), /Malformed numeric/);
+    assert.throws(() => YASD.parse('SELECT * FROM t LIMIT 1.5'), /LIMIT must be an integer/);
+  });
+
   // ---- PROFILE ----
 
   await test('profile: SELECT reports plan + timing + row counts', async () => {

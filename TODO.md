@@ -104,7 +104,7 @@ source.
   consume an optional semicolon but never require end-of-input
   (`src/parser.ts:232-251,585-588`). Reject extra tokens and support only one
   statement unless a deliberate script API is added.
-- [ ] Harden tokenization. Detect unterminated quotes, support documented SQL
+- [x] Harden tokenization. Detect unterminated quotes, support documented SQL
   escaping, make `NULL/TRUE/FALSE` case-insensitive, and reject malformed
   numeric tokens. Replace parser `any` values with typed AST values.
 - [ ] Reject unknown types and invalid schemas. `parseType()` silently maps an
