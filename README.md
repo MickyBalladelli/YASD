@@ -436,6 +436,43 @@ registered channels. Messages published while a subscriber is disconnected,
 while its subscription is being restored, or after a slow-consumer disconnect
 are lost. Resubscription restores the channel, not the missed history.
 
+### Production integration example
+
+[`examples/production-integration.js`](examples/production-integration.js) is
+the recommended cache-aside shape for a durable application. It uses keys such
+as `app:v2:post:123`, so a schema or serialization change gets a new namespace
+instead of reusing old values. The `durableStore` adapter is the source of
+truth and must be backed by the application's database; YASD is never the only
+copy.
+
+```javascript
+const { YasdClient } = require('yasd')
+const { ProductionPostCache } = require('./examples/production-integration')
+
+const durableStore = {
+  getPost: id => postgres.query('SELECT ... WHERE id = $1', [id]),
+  savePost: (id, post) => postgres.query('UPDATE ... WHERE id = $1', [id]),
+  deletePost: id => postgres.query('DELETE ... WHERE id = $1', [id]),
+}
+const client = new YasdClient({ url: process.env.CACHE_URL })
+const posts = new ProductionPostCache({ client, durableStore })
+await posts.start()
+
+const post = await posts.getPost('123') // cache, then durable read-through
+await posts.savePost('123', changedPost) // durable commit, then cache delete
+await posts.reconnect() // clear L1 and explicitly restore subscriptions
+```
+
+The example keeps L1 values fresh for 5 seconds, gives YASD entries a
+30-second TTL, and permits stale data for at most 60 seconds only when
+`allowStale` is true. A cache miss or expired value reads the durable source;
+stale data is used only if that source is temporarily unavailable. Writes
+commit the durable source first, then delete the cache key. Failed invalidation
+is logged and tolerated because invalidations are hints; the bounded TTL/stale
+policy limits the resulting exposure. Bump `CACHE_KEY_VERSION` deliberately
+when the cached shape changes, and clear old namespaces during a controlled
+migration if old application versions must stop serving them immediately.
+
 Protocol commands: `AUTH PING GET SET[M PX] CAS MGET MSET DEL CLEAR TTL EXPIRE
 PERSIST INCR[BY] DECR[BY] WATCH UNWATCH MULTI EXEC DISCARD
 PUBLISH SUBSCRIBE UNSUBSCRIBE INFO SAVE LOAD QUIT`.

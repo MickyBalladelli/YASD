@@ -188,6 +188,6 @@ source.
 - [x] Harden the Docker image: use a multi-stage build, run as a non-root user,
   avoid the network-dependent `npm install` fallback, add resource/ulimit
   guidance, and make TLS healthchecks verify certificates when configured.
-- [ ] Provide a production integration example with explicit cache-key
+- [x] Provide a production integration example with explicit cache-key
   versioning, invalidation handling, stale-read policy, and a clear source of
   truth for durable application data.
