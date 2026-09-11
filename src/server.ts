@@ -1260,7 +1260,7 @@ export class YasdServer {
     try {
       argv = requestArgv(request);
     } catch (err) {
-      this.writeReply(state, { kind: 'error', message: `ERR ${(err as Error).message}` });
+      this.writeReply(state, { kind: 'error', message: wireError(err) });
       return 'ok';
     }
     const cmd = (argv[0] ?? '').toUpperCase();
@@ -1304,7 +1304,7 @@ export class YasdServer {
         return 'close';
       }
     } catch (err) {
-      this.writeReply(state, { kind: 'error', message: `ERR ${(err as Error).message}` });
+      this.writeReply(state, { kind: 'error', message: wireError(err) });
     } finally {
       // SAVE/LOAD finish asynchronously; the synchronous dispatch portion is timed.
       this.slow.record(cmd, durationMs ?? performance.now() - started, argv.length - 1);
@@ -1602,7 +1602,7 @@ export class YasdServer {
             }
           } catch (err) {
             failed = true;
-            items.push({ kind: 'error', message: `ERR ${(err as Error).message}` });
+            items.push({ kind: 'error', message: wireError(err) });
           }
         }
         if (failed) throw abort;

@@ -211,7 +211,7 @@ async function runTests() {
     assert.strictEqual(recovered.get('counter'), 4, 'old AOF record was not replayed twice');
 
     log.rotateAfter(snapshotSeq);
-    const rotated = new YASD({ sweepIntervalMs: 0 });
+    const rotated = new KVCache({ sweepIntervalMs: 0 });
     const rotatedMetadata = {};
     await loadSnapshot(rotated, snap, { metadata: rotatedMetadata });
     assert.strictEqual(await log.replay(rotated, rotatedMetadata.aofSeq), 1);
