@@ -61,7 +61,7 @@ source.
   or negative (`src/server.ts:135-180`, `src/cache.ts:126-134`). Add shared
   strict parsers and reject invalid `maxEntries`, `maxBytes`, TTLs, ports,
   timeouts, and autosave intervals.
-- [ ] Enforce cache limits exactly. With `maxEntries <= 0` or `maxBytes <= 0`,
+- [x] Enforce cache limits exactly. With `maxEntries <= 0` or `maxBytes <= 0`,
   eviction deliberately keeps one entry (`src/cache.ts:242-267`). Validate
   positive limits and define whether an oversized single value is rejected or
   allowed.

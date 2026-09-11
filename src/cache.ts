@@ -39,7 +39,7 @@ export const DEFAULT_NAMESPACE_TTLS: Record<string, number> = {
 export interface KVOptions {
   /** Max live entries; oldest (LRU) evicted first. Default 10_000. */
   maxEntries?: number;
-  /** Max total bytes (key + JSON value estimate). Default 64 MiB. */
+  /** Max total bytes (key + JSON value estimate). Oversized entries reject. Default 64 MiB. */
   maxBytes?: number;
   /** Fallback TTL (ms) when no namespace default matches. Default: persist. */
   defaultTTLMs?: number;
@@ -406,7 +406,7 @@ export class KVCache {
   /**
    * O(1) insert (amortized). Size-aware LRU eviction: after insert, evict
    * least-recently-used entries while over `maxEntries`/`maxBytes`.
-   * A single oversized entry is kept (it evicts everything else).
+   * A single entry larger than `maxBytes` is rejected.
    */
   set(key: string, value: Value, ttlMs?: number): Value {
     const ownedValue = cloneJsonValue(value, 'cache value');
@@ -425,6 +425,8 @@ export class KVCache {
   }
 
   private setOwned(key: string, ownedValue: Value, expiresAt: number | undefined, returned: Value): Value {
+    const size = estimateSize(key, ownedValue);
+    this.assertEntryFits(key, size);
     // Immediate expiry (ttl 0): behave like a write-through miss.
     if (expiresAt !== undefined && expiresAt <= Date.now()) {
       const old = this.map.get(key);
@@ -437,7 +439,6 @@ export class KVCache {
       this.misses++;
       return returned;
     }
-    const size = estimateSize(key, ownedValue);
     const old = this.map.get(key);
     if (old) {
       this.bytes -= old.size;
@@ -446,24 +447,21 @@ export class KVCache {
     this.map.set(key, { value: ownedValue, expiresAt, size });
     this.bytes += size;
     this.bumpVersion(key);
-    this.evictIfNeeded(key);
+    this.evictIfNeeded();
     return returned;
   }
 
-  private evictIfNeeded(newestKey: string): void {
-    while (
-      (this.map.size > this.maxEntries && this.map.size > 1) ||
-      (this.bytes > this.maxBytes && this.map.size > 1)
-    ) {
+  private assertEntryFits(key: string, size: number): void {
+    if (size > this.maxBytes) {
+      throw new Error(`cache entry '${key}' exceeds maxBytes (${size} > ${this.maxBytes})`);
+    }
+  }
+
+  private evictIfNeeded(): void {
+    while ((this.map.size > this.maxEntries || this.bytes > this.maxBytes) && this.map.size > 0) {
       const oldest = this.map.keys().next();
       if (oldest.done) break;
       const oldestKey = oldest.value as string;
-      if (oldestKey === newestKey) {
-        // Newest is the only evictable left besides itself; if the map
-        // holds >1 entry the oldest can't be newest here. Guard anyway:
-        // rotate it to the back and stop to avoid evicting the just-write.
-        break;
-      }
       const entry = this.map.get(oldestKey);
       if (!entry) break;
       // Skip expired entries via accounting as expiries, not evictions.
@@ -538,6 +536,7 @@ export class KVCache {
       }
       const value = cloneJsonValue(e.value, 'mset value');
       if (e.ttlMs !== undefined) validateTTL(e.ttlMs, 'ttlMs');
+      this.assertEntryFits(e.key, estimateSize(e.key, value));
       return { key: e.key, value, ttlMs: e.ttlMs };
     });
     for (const e of validated) {
@@ -574,16 +573,17 @@ export class KVCache {
     if (!Number.isFinite(next)) {
       throw new Error(`INCR overflow at '${key}'`);
     }
+    const size = estimateSize(key, next);
+    this.assertEntryFits(key, size);
     const live = this.map.get(key);
     if (live && !this.isExpired(live, Date.now())) {
       this.bytes -= live.size;
       this.map.delete(key);
     }
-    const size = estimateSize(key, next);
     this.map.set(key, { value: next, expiresAt, size });
     this.bytes += size;
     this.bumpVersion(key);
-    this.evictIfNeeded(key);
+    this.evictIfNeeded();
     return next;
   }
 
@@ -619,6 +619,8 @@ export class KVCache {
   cas(key: string, expected: Value | undefined, value: Value, ttlMs?: number): boolean {
     const ownedExpected = expected === undefined ? undefined : cloneJsonValue(expected, 'cas expected');
     const ownedValue = cloneJsonValue(value, 'cas value');
+    const size = estimateSize(key, ownedValue);
+    this.assertEntryFits(key, size);
     const now = Date.now();
     const entry = this.map.get(key);
     let current: Value | undefined;
@@ -656,11 +658,10 @@ export class KVCache {
       this.bytes -= live.size;
       this.map.delete(key);
     }
-    const size = estimateSize(key, ownedValue);
     this.map.set(key, { value: ownedValue, expiresAt, size });
     this.bytes += size;
     this.bumpVersion(key);
-    this.evictIfNeeded(key);
+    this.evictIfNeeded();
     return true;
   }
 
@@ -693,7 +694,9 @@ export class KVCache {
     for (const e of entries) {
       if (!e || typeof e.key !== 'string' || e.value === undefined) continue;
       if (e.expiresAt !== undefined && e.expiresAt <= now) continue;
-      pending.push({ entry: e, value: cloneJsonValue(e.value, 'snapshot value') });
+      const value = cloneJsonValue(e.value, 'snapshot value');
+      this.assertEntryFits(e.key, estimateSize(e.key, value));
+      pending.push({ entry: e, value });
     }
     let count = 0;
     for (const { entry: e, value } of pending) {
