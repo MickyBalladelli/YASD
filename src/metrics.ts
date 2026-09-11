@@ -3,6 +3,8 @@
 // server slow-command log (`YasdServer`), so "slow" means the same thing
 // everywhere: entries slower than `thresholdMs`, newest-first, capped.
 
+import { validateNonNegativeNumber, validatePositiveSafeInteger } from './validation';
+
 /** One slow operation: SQL text or `CMD argc`, duration, wall-clock time. */
 export interface SlowEntry {
   /** SQL text (executor) or upper-case command name (server). */
@@ -18,10 +20,7 @@ export interface SlowEntry {
 export const SLOW_LOG_CAP = 100;
 
 export function checkSlowThreshold(ms: number, what: string): number {
-  if (typeof ms !== 'number' || !(ms >= 0)) {
-    throw new Error(`${what} must be a number >= 0`);
-  }
-  return ms;
+  return validateNonNegativeNumber(ms, what);
 }
 
 /**
@@ -37,10 +36,7 @@ export class SlowLog {
 
   constructor(thresholdMs = 0, cap: number = SLOW_LOG_CAP) {
     this.thresholdMs = checkSlowThreshold(thresholdMs, 'slow threshold');
-    if (!Number.isInteger(cap) || cap < 1) {
-      throw new Error('slow log cap must be an integer >= 1');
-    }
-    this.cap = cap;
+    this.cap = validatePositiveSafeInteger(cap, 'slow log cap');
   }
 
   get threshold(): number {

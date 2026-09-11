@@ -20,6 +20,11 @@
 
 import * as fs from 'fs';
 import { YasdServer, serverOptionsFromEnv } from './server';
+import {
+  parsePort,
+  parseStrictInteger,
+  parseStrictNonNegativeNumber,
+} from './validation';
 
 function parseArgv(argv: string[]): Record<string, string | boolean> {
   const out: Record<string, string | boolean> = {};
@@ -47,6 +52,13 @@ function parseArgv(argv: string[]): Record<string, string | boolean> {
   return out;
 }
 
+function stringArg(args: Record<string, string | boolean>, name: string): string | undefined {
+  const value = args[name];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') throw new Error(`--${name} requires a value`);
+  return value;
+}
+
 async function main(): Promise<void> {
   const args = parseArgv(process.argv.slice(2));
   if (args.help === true || args.h === true) {
@@ -63,26 +75,41 @@ async function main(): Promise<void> {
   }
 
   const base = serverOptionsFromEnv(process.env);
-  if (typeof args.port === 'string') base.port = parseInt(args.port, 10);
-  if (typeof args.host === 'string') base.host = args.host;
-  if (typeof args.snapshot === 'string') base.snapshotPath = args.snapshot;
-  if (typeof args.aof === 'string') base.aofPath = args.aof;
-  if (typeof args['auto-save-ms'] === 'string') base.autoSaveMs = parseInt(args['auto-save-ms'], 10);
+  const port = stringArg(args, 'port');
+  if (port !== undefined) base.port = parsePort(port, '--port');
+  const host = stringArg(args, 'host');
+  if (host !== undefined) base.host = host;
+  const snapshot = stringArg(args, 'snapshot');
+  if (snapshot !== undefined) base.snapshotPath = snapshot;
+  const aof = stringArg(args, 'aof');
+  if (aof !== undefined) base.aofPath = aof;
+  const autoSaveMs = stringArg(args, 'auto-save-ms');
+  if (autoSaveMs !== undefined) {
+    base.autoSaveMs = parseStrictNonNegativeNumber(autoSaveMs, '--auto-save-ms');
+  }
   if (args.load === false) base.loadOnStart = false;
   if (args['save-on-shutdown'] === false) base.saveOnShutdown = false;
   base.cache = base.cache ?? {};
-  if (typeof args['max-entries'] === 'string') base.cache.maxEntries = parseInt(args['max-entries'], 10);
-  if (typeof args['max-bytes'] === 'string') base.cache.maxBytes = parseInt(args['max-bytes'], 10);
-  if (typeof args['default-ttl-ms'] === 'string') {
-    base.cache.defaultTTLMs = parseInt(args['default-ttl-ms'], 10);
+  const maxEntries = stringArg(args, 'max-entries');
+  if (maxEntries !== undefined) {
+    base.cache.maxEntries = parseStrictInteger(maxEntries, '--max-entries', 1);
   }
-  if (typeof args['slow-command-ms'] === 'string') {
-    const n = parseFloat(args['slow-command-ms']);
-    if (!(n >= 0)) throw new Error('--slow-command-ms must be a number >= 0');
-    base.slowCommandMs = n;
+  const maxBytes = stringArg(args, 'max-bytes');
+  if (maxBytes !== undefined) {
+    base.cache.maxBytes = parseStrictInteger(maxBytes, '--max-bytes', 1);
   }
-  if (typeof args.password === 'string') base.password = args.password;
-  if (typeof args.requirepass === 'string') base.password = args.requirepass;
+  const defaultTtlMs = stringArg(args, 'default-ttl-ms');
+  if (defaultTtlMs !== undefined) {
+    base.cache.defaultTTLMs = parseStrictNonNegativeNumber(defaultTtlMs, '--default-ttl-ms');
+  }
+  const slowCommandMs = stringArg(args, 'slow-command-ms');
+  if (slowCommandMs !== undefined) {
+    base.slowCommandMs = parseStrictNonNegativeNumber(slowCommandMs, '--slow-command-ms');
+  }
+  const password = stringArg(args, 'password');
+  if (password !== undefined) base.password = password;
+  const requirepass = stringArg(args, 'requirepass');
+  if (requirepass !== undefined) base.password = requirepass;
   const tlsKey = args['tls-key'];
   const tlsCert = args['tls-cert'];
   if (tlsKey !== undefined || tlsCert !== undefined) {

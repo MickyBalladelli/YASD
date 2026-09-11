@@ -17,6 +17,15 @@ import { Value, JsonValue } from './types';
 import { KVStats, TransactionError } from './cache';
 import { RespDecoder, RespReply, encodeCommand } from './protocol';
 import { DEFAULT_PORT, ServerInfo } from './server';
+import {
+  parsePort,
+  parseStrictInteger,
+  validateHost,
+  validateNonNegativeSafeInteger,
+  validateNonNegativeNumber,
+  validatePort,
+  validatePositiveSafeInteger,
+} from './validation';
 
 export interface YasdClientOptions {
   /** e.g. `yasd://127.0.0.1:7379?poolSize=4` (`yasds://` enables TLS). Host/port/poolSize fields win. */
@@ -42,6 +51,9 @@ export interface ParsedCacheUrl {
 }
 
 export function parseCacheUrl(url: string): ParsedCacheUrl {
+  if (typeof url !== 'string') {
+    throw new Error(`invalid CACHE_URL (want yasd://host:port): ${String(url)}`);
+  }
   const trimmed = url.trim();
   // yasd://[[user]:password@]host[:port][?poolSize=&password=] — yasds:// enables TLS.
   const match = /^(yasds?):\/\/(?:([^@/?#]*)@)?(\[[^\]]+\]|[^/:?#]+)(?::(\d+))?(?:\?(.*))?$/.exec(trimmed);
@@ -50,24 +62,28 @@ export function parseCacheUrl(url: string): ParsedCacheUrl {
   const userinfo = match[2];
   const rawHost = match[3] as string;
   const host = rawHost.startsWith('[') && rawHost.endsWith(']') ? rawHost.slice(1, -1) : rawHost;
-  const port = match[4] === undefined ? DEFAULT_PORT : parseInt(match[4], 10);
-  if (!Number.isInteger(port) || port < 0 || port > 65535) {
-    throw new Error(`invalid CACHE_URL port: ${url}`);
-  }
+  validateHost(host, 'invalid CACHE_URL host');
+  const port = match[4] === undefined ? DEFAULT_PORT : parsePort(match[4], 'invalid CACHE_URL port');
   let poolSize: number | undefined;
   let password: string | undefined;
   if (userinfo !== undefined && userinfo.length > 0) {
     const colon = userinfo.indexOf(':');
-    password = decodeURIComponent(colon === -1 ? userinfo : userinfo.slice(colon + 1));
+    try {
+      password = decodeURIComponent(colon === -1 ? userinfo : userinfo.slice(colon + 1));
+    } catch {
+      throw new Error(`invalid CACHE_URL encoding: ${url}`);
+    }
     if (password.length === 0) password = undefined;
   }
   if (match[5]) {
-    for (const [key, value] of new URLSearchParams(match[5])) {
-      if (key === 'poolSize') poolSize = parseInt(value, 10);
-      if (key === 'password') password = value;
+    try {
+      decodeURIComponent(match[5]);
+    } catch {
+      throw new Error(`invalid CACHE_URL encoding: ${url}`);
     }
-    if (poolSize !== undefined && (!Number.isInteger(poolSize) || poolSize < 1)) {
-      throw new Error(`invalid CACHE_URL poolSize: ${url}`);
+    for (const [key, value] of new URLSearchParams(match[5])) {
+      if (key === 'poolSize') poolSize = parseStrictInteger(value, 'invalid CACHE_URL poolSize', 1);
+      if (key === 'password') password = value;
     }
   }
   const out: ParsedCacheUrl = { host, port };
@@ -123,14 +139,20 @@ export class YasdClient {
   private subConnecting?: Promise<void>;
 
   constructor(options: YasdClientOptions = {}) {
-    const fromUrl = options.url ? parseCacheUrl(options.url) : undefined;
-    this.host = options.host ?? fromUrl?.host ?? '127.0.0.1';
-    this.port = options.port ?? fromUrl?.port ?? DEFAULT_PORT;
-    this.poolSize = options.poolSize ?? fromUrl?.poolSize ?? 4;
-    if (!Number.isInteger(this.poolSize) || this.poolSize < 1) {
-      throw new Error('poolSize must be an integer >= 1');
-    }
-    this.requestTimeoutMs = options.requestTimeoutMs ?? 5000;
+    const fromUrl = options.url === undefined ? undefined : parseCacheUrl(options.url);
+    this.host = validateHost(
+      options.host === undefined ? fromUrl?.host ?? '127.0.0.1' : options.host,
+      'host'
+    );
+    this.port = options.port === undefined
+      ? fromUrl?.port ?? DEFAULT_PORT
+      : validatePort(options.port, 'port');
+    this.poolSize = options.poolSize === undefined
+      ? fromUrl?.poolSize ?? 4
+      : validatePositiveSafeInteger(options.poolSize, 'poolSize');
+    this.requestTimeoutMs = options.requestTimeoutMs === undefined
+      ? 5000
+      : validateNonNegativeNumber(options.requestTimeoutMs, 'requestTimeoutMs');
     const password = options.password ?? fromUrl?.password;
     this.password = password && password.length > 0 ? password : undefined;
     if (options.tls !== undefined) {
@@ -142,7 +164,7 @@ export class YasdClient {
 
   /** Build from `CACHE_URL` (falls back to localhost default when unset). */
   static fromEnv(env: NodeJS.ProcessEnv = process.env): YasdClient {
-    return new YasdClient(env.CACHE_URL ? { url: env.CACHE_URL } : {});
+    return new YasdClient(env.CACHE_URL === undefined ? {} : { url: env.CACHE_URL });
   }
 
   get endpoint(): { host: string; port: number } {
@@ -219,12 +241,13 @@ export class YasdClient {
 
   /** HTTP(S) `/healthz` against the server port. Throws when unhealthy. */
   async healthcheck(timeoutMs = 3000): Promise<ServerInfo> {
+    const timeout = validateNonNegativeNumber(timeoutMs, 'healthcheck timeoutMs');
     return new Promise<ServerInfo>((resolve, reject) => {
       const requestOptions: http.RequestOptions = {
         host: this.host,
         port: this.port,
         path: '/healthz',
-        timeout: timeoutMs,
+        timeout,
       };
       const onResponse = (res: http.IncomingMessage): void => {
         let body = '';
@@ -269,7 +292,8 @@ export class YasdClient {
     if (value === undefined) throw new Error('cannot cache undefined (use null)');
     const json = JSON.stringify(value);
     if (json === undefined) throw new Error('value is not JSON-serializable');
-    const args = ttlMs === undefined ? ['SET', key, json] : ['SET', key, json, 'PX', String(ttlMs)];
+    const ttl = ttlMs === undefined ? undefined : validateNonNegativeNumber(ttlMs, 'ttlMs');
+    const args = ttl === undefined ? ['SET', key, json] : ['SET', key, json, 'PX', String(ttl)];
     const reply = await this.exec(args);
     if (reply.kind === 'simple' && reply.value === 'OK') return 'OK';
     throw new Error(`unexpected SET reply: ${JSON.stringify(reply)}`);
@@ -315,7 +339,8 @@ export class YasdClient {
 
   /** Returns false when missing/expired. */
   async expire(key: string, ttlMs: number): Promise<boolean> {
-    return (await this.expectInt(['EXPIRE', key, String(ttlMs)])) === 1;
+    const ttl = validateNonNegativeNumber(ttlMs, 'ttlMs');
+    return (await this.expectInt(['EXPIRE', key, String(ttl)])) === 1;
   }
 
   /** Returns false when missing/expired. */
@@ -342,10 +367,11 @@ export class YasdClient {
     if (valueJson === undefined) throw new Error('value is not JSON-serializable');
     const expectedArg = expected === undefined ? '' : JSON.stringify(expected);
     if (expectedArg === undefined) throw new Error('expected is not JSON-serializable');
+    const ttl = ttlMs === undefined ? undefined : validateNonNegativeNumber(ttlMs, 'ttlMs');
     const args =
-      ttlMs === undefined
+      ttl === undefined
         ? ['CAS', key, expectedArg, valueJson]
-        : ['CAS', key, expectedArg, valueJson, 'PX', String(ttlMs)];
+        : ['CAS', key, expectedArg, valueJson, 'PX', String(ttl)];
     const reply = await this.exec(args);
     if (reply.kind === 'int') return reply.value === 1;
     throw new Error(`unexpected CAS reply: ${JSON.stringify(reply)}`);
@@ -392,9 +418,7 @@ export class YasdClient {
     fn: (tx: YasdTransaction) => T | Promise<T>,
     maxRetries = 3
   ): Promise<{ committed: boolean; attempts: number; results: TxExecResult[] | null; value: T | undefined }> {
-    if (!Number.isInteger(maxRetries) || maxRetries < 0) {
-      throw new Error('maxRetries must be an integer >= 0');
-    }
+    validateNonNegativeSafeInteger(maxRetries, 'maxRetries');
     let attempts = 0;
     let value: T | undefined;
     for (;;) {
@@ -849,11 +873,13 @@ export class YasdTransaction {
   private dead = false;
 
   constructor(options: YasdTransactionOptions) {
-    this.host = options.host;
-    this.port = options.port;
+    this.host = validateHost(options.host, 'host');
+    this.port = validatePort(options.port, 'port');
     this.password = options.password;
     this.tlsOptions = options.tlsOptions;
-    this.requestTimeoutMs = options.requestTimeoutMs ?? 5000;
+    this.requestTimeoutMs = options.requestTimeoutMs === undefined
+      ? 5000
+      : validateNonNegativeNumber(options.requestTimeoutMs, 'requestTimeoutMs');
   }
 
   /** True once `exec()`, `discard()`, or `close()` has run. */
@@ -968,8 +994,9 @@ export class YasdTransaction {
     if (value === undefined) throw new TransactionError('cannot cache undefined (use null)');
     const json = JSON.stringify(value);
     if (json === undefined) throw new TransactionError('value is not JSON-serializable');
+    const ttl = ttlMs === undefined ? undefined : validateNonNegativeNumber(ttlMs, 'ttlMs');
     await this.queue(
-      ttlMs === undefined ? ['SET', key, json] : ['SET', key, json, 'PX', String(ttlMs)]
+      ttl === undefined ? ['SET', key, json] : ['SET', key, json, 'PX', String(ttl)]
     );
   }
 
@@ -997,7 +1024,8 @@ export class YasdTransaction {
 
   /** Queue an EXPIRE. */
   async expire(key: string, ttlMs: number): Promise<void> {
-    await this.queue(['EXPIRE', key, String(ttlMs)]);
+    const ttl = validateNonNegativeNumber(ttlMs, 'ttlMs');
+    await this.queue(['EXPIRE', key, String(ttl)]);
   }
 
   /** Queue a PERSIST. */
@@ -1022,10 +1050,11 @@ export class YasdTransaction {
     if (valueJson === undefined) throw new TransactionError('value is not JSON-serializable');
     const expectedArg = expected === undefined ? '' : JSON.stringify(expected);
     if (expectedArg === undefined) throw new TransactionError('expected is not JSON-serializable');
+    const ttl = ttlMs === undefined ? undefined : validateNonNegativeNumber(ttlMs, 'ttlMs');
     await this.queue(
-      ttlMs === undefined
+      ttl === undefined
         ? ['CAS', key, expectedArg, valueJson]
-        : ['CAS', key, expectedArg, valueJson, 'PX', String(ttlMs)]
+        : ['CAS', key, expectedArg, valueJson, 'PX', String(ttl)]
     );
   }
 

@@ -36,6 +36,7 @@ import {
   KVBatchEntry,
   KVStats,
   SnapshotEntry,
+  validateKVOptions,
 } from './cache';
 import { PubSubHub, PubSubListener, INVALIDATE_CHANNEL, invalidateMessage, InvalidationEvent } from './pubsub';
 import {
@@ -55,6 +56,15 @@ import {
   encodeCommand,
   requestArgv,
 } from './protocol';
+import {
+  parsePort,
+  parseStrictInteger,
+  parseStrictNonNegativeNumber,
+  parseStrictNumber,
+  validateHost,
+  validateNonNegativeNumber,
+  validatePort,
+} from './validation';
 
 export const DEFAULT_HOST = '127.0.0.1'
 export const DEFAULT_PORT = 7379;
@@ -166,13 +176,6 @@ interface TransactionEffects {
   invalidations: InvalidationEvent[];
 }
 
-function parsePort(value: string | undefined, fallback: number): number {
-  if (value === undefined) return fallback;
-  const n = parseInt(value, 10);
-  if (!Number.isInteger(n) || n < 0 || n > 65535) throw new Error(`invalid port: ${value}`);
-  return n;
-}
-
 function isLoopbackHost(host: string): boolean {
   const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, '')
   if (normalized === 'localhost' || normalized === '::1') return true
@@ -195,9 +198,15 @@ function parseTlsVersion(value: string): tls.SecureVersion {
 
 export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): YasdServerOptions {
   const cache: KVOptions = {};
-  if (env.CACHE_MAX_ENTRIES !== undefined) cache.maxEntries = parseInt(env.CACHE_MAX_ENTRIES, 10);
-  if (env.CACHE_MAX_BYTES !== undefined) cache.maxBytes = parseInt(env.CACHE_MAX_BYTES, 10);
-  if (env.CACHE_DEFAULT_TTL_MS !== undefined) cache.defaultTTLMs = parseInt(env.CACHE_DEFAULT_TTL_MS, 10);
+  if (env.CACHE_MAX_ENTRIES !== undefined) {
+    cache.maxEntries = parseStrictInteger(env.CACHE_MAX_ENTRIES, 'CACHE_MAX_ENTRIES', 1);
+  }
+  if (env.CACHE_MAX_BYTES !== undefined) {
+    cache.maxBytes = parseStrictInteger(env.CACHE_MAX_BYTES, 'CACHE_MAX_BYTES', 1);
+  }
+  if (env.CACHE_DEFAULT_TTL_MS !== undefined) {
+    cache.defaultTTLMs = parseStrictNonNegativeNumber(env.CACHE_DEFAULT_TTL_MS, 'CACHE_DEFAULT_TTL_MS');
+  }
   if (env.CACHE_NAMESPACE_TTLS !== undefined) {
     try {
       cache.namespaceTTLMs = JSON.parse(env.CACHE_NAMESPACE_TTLS) as Record<string, number>;
@@ -205,18 +214,19 @@ export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Yasd
       throw new Error('CACHE_NAMESPACE_TTLS must be JSON, e.g. {"feeds":15000}');
     }
   }
+  validateKVOptions(cache);
   const opts: YasdServerOptions = {
-    host: env.YASD_HOST ?? DEFAULT_HOST,
-    port: parsePort(env.YASD_PORT, DEFAULT_PORT),
+    host: env.YASD_HOST === undefined ? DEFAULT_HOST : validateHost(env.YASD_HOST, 'YASD_HOST'),
+    port: env.YASD_PORT === undefined ? DEFAULT_PORT : parsePort(env.YASD_PORT, 'YASD_PORT'),
     cache,
   };
   if (env.YASD_SNAPSHOT) opts.snapshotPath = env.YASD_SNAPSHOT;
   if (env.YASD_AOF) opts.aofPath = env.YASD_AOF;
-  if (env.YASD_AUTO_SAVE_MS !== undefined) opts.autoSaveMs = parseInt(env.YASD_AUTO_SAVE_MS, 10);
+  if (env.YASD_AUTO_SAVE_MS !== undefined) {
+    opts.autoSaveMs = parseStrictNonNegativeNumber(env.YASD_AUTO_SAVE_MS, 'YASD_AUTO_SAVE_MS');
+  }
   if (env.YASD_SLOW_COMMAND_MS !== undefined) {
-    const n = parseFloat(env.YASD_SLOW_COMMAND_MS);
-    if (!(n >= 0)) throw new Error('YASD_SLOW_COMMAND_MS must be a number >= 0');
-    opts.slowCommandMs = n;
+    opts.slowCommandMs = parseStrictNonNegativeNumber(env.YASD_SLOW_COMMAND_MS, 'YASD_SLOW_COMMAND_MS');
   }
   if (env.YASD_LOAD_ON_START !== undefined) opts.loadOnStart = env.YASD_LOAD_ON_START !== '0';
   if (env.YASD_SAVE_ON_SHUTDOWN !== undefined) opts.saveOnShutdown = env.YASD_SAVE_ON_SHUTDOWN !== '0';
@@ -366,15 +376,17 @@ export class YasdServer {
   private slow = new SlowLog();
 
   constructor(options: YasdServerOptions = {}) {
-    this.host = options.host ?? DEFAULT_HOST;
-    this.port = options.port ?? DEFAULT_PORT;
+    this.host = options.host === undefined ? DEFAULT_HOST : validateHost(options.host, 'host');
+    this.port = options.port === undefined ? DEFAULT_PORT : validatePort(options.port, 'port');
     this.kv = new KVCache(options.cache, key => this.onCacheExpiry(key))
     this.aof = new AofLog(options.aofPath);
     this.snapshotPath = options.snapshotPath;
     this.aofPath = options.aofPath;
     this.loadOnStart = options.loadOnStart ?? true;
     this.saveOnShutdown = options.saveOnShutdown ?? options.snapshotPath !== undefined;
-    this.autoSaveMs = options.autoSaveMs ?? 0;
+    this.autoSaveMs = options.autoSaveMs === undefined
+      ? 0
+      : validateNonNegativeNumber(options.autoSaveMs, 'autoSaveMs');
     this.password = options.password && options.password.length > 0 ? options.password : undefined;
     this.authRequired = this.password !== undefined;
     if (options.tls && (!options.tls.key || !options.tls.cert)) {
@@ -1166,8 +1178,7 @@ export class YasdServer {
       case 'INCR':
       case 'DECR': {
         if (args.length < 1 || args.length > 2) throw new Error(`${cmd} requires a key and optional delta`);
-        const rawBy = args[1] === undefined ? 1 : Number(args[1]);
-        if (!Number.isFinite(rawBy)) throw new Error('delta must be a finite number');
+        const rawBy = args[1] === undefined ? 1 : parseStrictNumber(args[1], 'delta');
         const next = cmd === 'INCR' ? this.kv.incr(args[0] as string, rawBy) : this.kv.decr(args[0] as string, rawBy);
         this.logAof({ op: 'incr', key: args[0] as string, by: cmd === 'INCR' ? rawBy : -rawBy }, effects);
         this.publishInvalidate({ event: 'set', key: args[0] as string }, effects);
@@ -1294,9 +1305,7 @@ export class YasdServer {
   }
 
   private parseMs(raw: string): number {
-    const n = Number(raw);
-    if (!Number.isFinite(n) || n < 0) throw new Error(`TTL must be a finite number >= 0, got ${raw}`);
-    return n;
+    return parseStrictNonNegativeNumber(raw, 'TTL');
   }
 }
 

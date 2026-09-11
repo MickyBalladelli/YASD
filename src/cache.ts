@@ -16,6 +16,11 @@
 // Expiry is lazy on `get`/`ttl`/`expire` plus an active background sweeper.
 
 import { Value } from './types';
+import {
+  validateNonNegativeSafeInteger,
+  validateNonNegativeNumber,
+  validatePositiveSafeInteger,
+} from './validation';
 
 /** Per-namespace TTL defaults (ms). `feed`/`feeds` 15s, channel lists 30s, popular 60s. */
 export const DEFAULT_NAMESPACE_TTLS: Record<string, number> = {
@@ -40,7 +45,7 @@ export interface KVOptions {
   defaultTTLMs?: number;
   /** Per-namespace TTL defaults (ms). Merged over DEFAULT_NAMESPACE_TTLS. */
   namespaceTTLMs?: Record<string, number>;
-  /** Background sweep interval (ms). <=0 disables. Default 1000. */
+  /** Background sweep interval (ms). 0 disables. Default 1000. */
   sweepIntervalMs?: number;
 }
 
@@ -163,13 +168,48 @@ function cloneJsonValue(value: unknown, what: string): Value {
 }
 
 function validateTTL(ttlMs: number, what: string): number {
-  if (typeof ttlMs !== 'number' || !Number.isFinite(ttlMs)) {
-    throw new Error(`${what} must be a finite number of ms, got ${String(ttlMs)}`);
+  return validateNonNegativeNumber(ttlMs, what);
+}
+
+export function validateKVOptions(options: KVOptions = {}): KVOptions {
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    throw new Error('cache options must be an object');
   }
-  if (ttlMs < 0) {
-    throw new Error(`${what} must be >= 0, got ${ttlMs}`);
+  const maxEntries = options.maxEntries === undefined
+    ? 10_000
+    : validatePositiveSafeInteger(options.maxEntries, 'maxEntries');
+  const maxBytes = options.maxBytes === undefined
+    ? 64 * 1024 * 1024
+    : validatePositiveSafeInteger(options.maxBytes, 'maxBytes');
+  const defaultTTLMs = options.defaultTTLMs === undefined
+    ? undefined
+    : validateTTL(options.defaultTTLMs, 'defaultTTLMs');
+  const sweepIntervalMs = options.sweepIntervalMs === undefined
+    ? 1000
+    : validateNonNegativeNumber(options.sweepIntervalMs, 'sweepIntervalMs');
+  const namespaceTTLMs: Record<string, number> = {
+    ...DEFAULT_NAMESPACE_TTLS,
+  };
+  if (options.namespaceTTLMs !== undefined) {
+    if (
+      options.namespaceTTLMs === null ||
+      typeof options.namespaceTTLMs !== 'object' ||
+      Array.isArray(options.namespaceTTLMs)
+    ) {
+      throw new Error('namespaceTTLMs must be an object of finite TTL values');
+    }
+    Object.assign(namespaceTTLMs, options.namespaceTTLMs);
   }
-  return ttlMs;
+  for (const [namespace, ttlMs] of Object.entries(namespaceTTLMs)) {
+    namespaceTTLMs[namespace] = validateTTL(ttlMs, `namespaceTTLMs[${namespace}]`);
+  }
+  return {
+    maxEntries,
+    maxBytes,
+    ...(defaultTTLMs === undefined ? {} : { defaultTTLMs }),
+    namespaceTTLMs,
+    sweepIntervalMs,
+  };
 }
 
 export type KVExpiryListener = (key: string) => void
@@ -200,11 +240,12 @@ export class KVCache {
   readonly sweepIntervalMs: number;
 
   constructor(options: KVOptions = {}, expiryListener?: KVExpiryListener) {
-    this.maxEntries = options.maxEntries ?? 10_000;
-    this.maxBytes = options.maxBytes ?? 64 * 1024 * 1024;
-    this.defaultTTLMs = options.defaultTTLMs;
-    this.namespaceTTLMs = { ...DEFAULT_NAMESPACE_TTLS, ...(options.namespaceTTLMs ?? {}) };
-    this.sweepIntervalMs = options.sweepIntervalMs ?? 1000;
+    const validated = validateKVOptions(options);
+    this.maxEntries = validated.maxEntries as number;
+    this.maxBytes = validated.maxBytes as number;
+    this.defaultTTLMs = validated.defaultTTLMs;
+    this.namespaceTTLMs = validated.namespaceTTLMs as Record<string, number>;
+    this.sweepIntervalMs = validated.sweepIntervalMs as number;
     this.expiryListener = expiryListener
     if (this.sweepIntervalMs > 0) {
       this.startSweeper(this.sweepIntervalMs);
@@ -780,7 +821,9 @@ export class KVCache {
   }
 
   startSweeper(intervalMs?: number): void {
-    const ms = intervalMs ?? this.sweepIntervalMs;
+    const ms = intervalMs === undefined
+      ? this.sweepIntervalMs
+      : validateNonNegativeNumber(intervalMs, 'sweepIntervalMs');
     if (!(ms > 0)) return;
     this.stopSweeper();
     this.timer = setInterval(() => {
@@ -826,9 +869,7 @@ export class KVCache {
     fn: (tx: KVTransaction) => T | Promise<T>,
     maxRetries = 3
   ): Promise<{ committed: boolean; attempts: number; results: TxResult[] | null; value: T | undefined }> {
-    if (!Number.isInteger(maxRetries) || maxRetries < 0) {
-      throw new Error('maxRetries must be an integer >= 0');
-    }
+    validateNonNegativeSafeInteger(maxRetries, 'maxRetries');
     let attempts = 0;
     let value: T | undefined;
     for (;;) {
@@ -1099,10 +1140,11 @@ export class KVTransaction {
       if (required) throw new TransactionError('ttlMs is required');
       return;
     }
-    if (typeof ttlMs !== 'number' || !Number.isFinite(ttlMs)) {
-      throw new TransactionError(`ttlMs must be a finite number of ms, got ${String(ttlMs)}`);
+    try {
+      validateNonNegativeNumber(ttlMs, 'ttlMs');
+    } catch (err) {
+      throw new TransactionError((err as Error).message);
     }
-    if (ttlMs < 0) throw new TransactionError(`ttlMs must be >= 0, got ${ttlMs}`);
   }
 
   private static checkDelta(by: number): void {

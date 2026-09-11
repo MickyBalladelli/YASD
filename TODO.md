@@ -56,7 +56,7 @@ source.
   raw `KVCache` (`src/server.ts:259-262`), so callers can mutate data without
   AOF logging or invalidation. Return a controlled facade or make the raw cache
   private.
-- [ ] Validate all configuration inputs consistently. `parseInt()` accepts
+- [x] Validate all configuration inputs consistently. `parseInt()` accepts
   values such as `10oops`, and direct constructor options can be `NaN`, zero,
   or negative (`src/server.ts:135-180`, `src/cache.ts:126-134`). Add shared
   strict parsers and reject invalid `maxEntries`, `maxBytes`, TTLs, ports,
