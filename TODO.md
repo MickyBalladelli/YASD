@@ -113,7 +113,7 @@ source.
 - [x] Enforce constraints on every write. Validate row arity, duplicate INSERT
   columns, supplied `NULL` for `NOT NULL`, type conversion failures, primary-key
   uniqueness, and primary-key updates (`src/executor.ts:253-343,419-487`).
-- [ ] Make writes atomic on validation failure. Multi-row INSERT and UPDATE can
+- [x] Make writes atomic on validation failure. Multi-row INSERT and UPDATE can
   modify earlier rows before a later row/clause fails. Validate the complete
   statement first or roll it back on error.
 - [ ] Define NULL behavior and implement it consistently. Current comparisons

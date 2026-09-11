@@ -257,8 +257,20 @@ async function runTests() {
     )
 
     assert.strictEqual(db.query('SELECT * FROM constrained').rows.length, 1)
+    assert.throws(
+      () => db.query("INSERT INTO constrained VALUES (2, 'B', true, 20), (1, 'C', true, 30)"),
+      /Duplicate primary key value/
+    )
+    assert.strictEqual(db.query('SELECT * FROM constrained WHERE id = 2').rows.length, 0)
+
     db.query("INSERT INTO constrained VALUES (2, 'B', true, 20)")
 
+    assert.throws(
+      () => db.query('UPDATE constrained SET id = 9 WHERE id >= 1'),
+      /Duplicate primary key value/
+    )
+    assert.strictEqual(db.query('SELECT * FROM constrained WHERE id = 1').rows.length, 1)
+    assert.strictEqual(db.query('SELECT * FROM constrained WHERE id = 2').rows.length, 1)
     assert.throws(
       () => db.query('UPDATE constrained SET id = 1 WHERE id = 2'),
       /Duplicate primary key value/
