@@ -113,11 +113,23 @@ export interface NotClause {
   clause: WhereClause;
 }
 
+export type Expression = LiteralExpression | ColumnReferenceExpression;
+
+export interface LiteralExpression {
+  type: 'literal';
+  value: Value;
+}
+
+export interface ColumnReferenceExpression {
+  type: 'column_ref';
+  name: string;
+}
+
 export interface ComparisonClause {
   type: 'comparison';
-  left: string | Value;
+  left: Expression;
   operator: '=' | '!=' | '>' | '>=' | '<' | '<=' | 'like' | 'in' | 'between';
-  right: string | Value | Value[];
+  right: Expression | Expression[];
 }
 
 export interface OrderByClause {

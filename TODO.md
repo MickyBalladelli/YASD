@@ -95,7 +95,7 @@ source.
 
 ## P1 — SQL correctness and predictable semantics
 
-- [ ] Preserve literal-vs-column identity in the AST. Both quoted strings and
+- [x] Preserve literal-vs-column identity in the AST. Both quoted strings and
   identifiers become `string`; execution then treats a string as a column when
   a same-named column exists (`src/parser.ts:188-229`,
   `src/executor.ts:572-589`). For example, `name = 'age'` can compare against

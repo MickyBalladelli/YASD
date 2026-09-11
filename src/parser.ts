@@ -12,6 +12,7 @@ import {
   ColumnDefinition,
   WhereClause,
   ComparisonClause,
+  Expression,
   AndClause,
   OrClause,
   NotClause,
@@ -227,6 +228,19 @@ class Parser {
     }
 
     throw new Error(`Unexpected value: ${token}`);
+  }
+
+  private parseExpression(): Expression {
+    const token = this.peek();
+    if (token === null) {
+      throw new Error('Unexpected end of input');
+    }
+    if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(token) &&
+        !['null', 'true', 'false'].includes(token.toLowerCase())) {
+      this.consume();
+      return { type: 'column_ref', name: token };
+    }
+    return { type: 'literal', value: this.parseValue() };
   }
 
   parse(): SqlStatement {
@@ -542,7 +556,7 @@ class Parser {
   }
 
   private parseComparisonClause(): WhereClause {
-    const left = this.parseValue();
+    const left = this.parseExpression();
 
     const op = this.peek()?.toLowerCase();
     if (!op || !['=', '!=', '>', '>=', '<', '<=', 'like', 'in', 'between'].includes(op)) {
@@ -553,24 +567,24 @@ class Parser {
     // `IN (...)` and `BETWEEN a AND b` take structured operands — parse them
     // before the generic single-value path (the old code called parseValue()
     // first, which choked on the opening paren).
-    let right: any;
+    let right: Expression | Expression[];
     if (op === 'in') {
       this.consume('(');
-      const values: any[] = [];
-      values.push(this.parseValue());
+      const values: Expression[] = [];
+      values.push(this.parseExpression());
       while (this.peek() === ',') {
         this.consume();
-        values.push(this.parseValue());
+        values.push(this.parseExpression());
       }
       this.consume(')');
       right = values;
     } else if (op === 'between') {
-      const low = this.parseValue();
+      const low = this.parseExpression();
       this.consume('and');
-      const high = this.parseValue();
+      const high = this.parseExpression();
       right = [low, high];
     } else {
-      right = this.parseValue();
+      right = this.parseExpression();
     }
 
     return {

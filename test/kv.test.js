@@ -2,9 +2,9 @@
 // KV / TTL / LRU regression tests for the P0 cache fast path.
 // Run: node test/kv.test.js (no dependencies beyond the built dist).
 
-let YASD;
+let mod;
 try {
-  YASD = require('../dist/index.js').YASD;
+  mod = require('../dist/index.js');
   console.log('Using compiled version from dist/index.js');
 } catch (e) {
   console.log('YASD not available, skipping tests');
@@ -13,6 +13,7 @@ try {
 }
 
 const assert = require('assert');
+const { YASD, parse } = mod;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -178,6 +179,21 @@ async function runTests() {
     const scan = db.query('SELECT * FROM users').rows.filter(r => r.age === 25 && r.name === 'Bob');
     assert.strictEqual(andRes.rows.length, scan.length, 'AND matches full scan');
     assert.ok(andRes.rows.every(r => r.age === 25 && r.name === 'Bob'));
+    db.close();
+  });
+
+  await test('WHERE preserves literal and column-reference identity', () => {
+    const ast = parse("SELECT * FROM people WHERE name = 'age'");
+    assert.strictEqual(ast.where.left.type, 'column_ref');
+    assert.deepStrictEqual(ast.where.right, { type: 'literal', value: 'age' });
+
+    const db = new YASD({ sweepIntervalMs: 0 });
+    db.query('CREATE TABLE people (name string, age string)');
+    db.query("INSERT INTO people VALUES ('age', '30'), ('bob', 'age'), ('age', 'age')");
+    const literal = db.query("SELECT * FROM people WHERE name = 'age'");
+    assert.deepStrictEqual(literal.rows.map(row => row.name), ['age', 'age']);
+    const column = db.query('SELECT * FROM people WHERE name = age');
+    assert.deepStrictEqual(column.rows.map(row => row.name), ['age']);
     db.close();
   });
 

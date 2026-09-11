@@ -19,7 +19,8 @@ import {
   ComparisonClause,
   AndClause,
   OrClause,
-  NotClause
+  NotClause,
+  Expression,
 } from './types';
 import { parse } from './parser';
 import { performance } from 'perf_hooks';
@@ -157,20 +158,36 @@ export class Executor {
       case 'comparison': {
         const comp = where as ComparisonClause;
         if (comp.operator === '=') {
-          if (this.isColumn(table, comp.left) && this.isIndexableValue(comp.right)) {
-            return this.indexGet(table, comp.left, comp.right);
+          if (
+            comp.left.type === 'column_ref' &&
+            this.isColumn(table, comp.left.name) &&
+            !Array.isArray(comp.right) &&
+            comp.right.type === 'literal' &&
+            this.isIndexableValue(comp.right.value)
+          ) {
+            return this.indexGet(table, comp.left.name, comp.right.value);
           }
-          if (this.isColumn(table, comp.right) && this.isIndexableValue(comp.left)) {
-            return this.indexGet(table, comp.right, comp.left);
+          if (
+            comp.left.type === 'literal' &&
+            this.isIndexableValue(comp.left.value) &&
+            !Array.isArray(comp.right) &&
+            comp.right.type === 'column_ref' &&
+            this.isColumn(table, comp.right.name)
+          ) {
+            return this.indexGet(table, comp.right.name, comp.left.value);
           }
           return undefined;
         }
         if (comp.operator === 'in') {
-          if (this.isColumn(table, comp.left) && Array.isArray(comp.right)) {
+          if (
+            comp.left.type === 'column_ref' &&
+            this.isColumn(table, comp.left.name) &&
+            Array.isArray(comp.right)
+          ) {
             const out = new Set<number>();
             for (const v of comp.right) {
-              if (!this.isIndexableValue(v)) return undefined;
-              const rows = this.indexGet(table, comp.left, v);
+              if (v.type !== 'literal' || !this.isIndexableValue(v.value)) return undefined;
+              const rows = this.indexGet(table, comp.left.name, v.value);
               if (rows === undefined) return undefined;
               for (const i of rows) out.add(i);
             }
@@ -569,23 +586,22 @@ export class Executor {
     return false;
   }
 
-  private evaluateComparison(row: Row, comp: ComparisonClause, table: TableData): boolean {
+  private evaluateExpression(row: Row, expression: Expression): Value {
+    if (expression.type === 'column_ref') {
+      return row[expression.name];
+    }
+    return expression.value;
+  }
+
+  private evaluateComparison(row: Row, comp: ComparisonClause, _table: TableData): boolean {
     const { left, operator, right } = comp;
 
-    // Resolve left value
-    let leftValue: Value;
-    if (typeof left === 'string' && row.hasOwnProperty(left)) {
-      leftValue = row[left];
-    } else {
-      leftValue = left as Value;
-    }
-
-    // Resolve right value
+    const leftValue = this.evaluateExpression(row, left);
     let rightValue: Value | Value[];
-    if (typeof right === 'string' && row.hasOwnProperty(right)) {
-      rightValue = row[right as string];
+    if (Array.isArray(right)) {
+      rightValue = right.map(expression => this.evaluateExpression(row, expression));
     } else {
-      rightValue = right as Value | Value[];
+      rightValue = this.evaluateExpression(row, right);
     }
 
     // Handle NULL comparisons
@@ -728,22 +744,35 @@ export class Executor {
       case 'comparison': {
         const comp = where as ComparisonClause;
         if (comp.operator === '=') {
-          if (this.isColumn(table, comp.left) && this.isIndexableValue(comp.right)) {
-            return table.indexes[comp.left] ? [comp.left] : undefined;
+          if (
+            comp.left.type === 'column_ref' &&
+            this.isColumn(table, comp.left.name) &&
+            !Array.isArray(comp.right) &&
+            comp.right.type === 'literal' &&
+            this.isIndexableValue(comp.right.value)
+          ) {
+            return table.indexes[comp.left.name] ? [comp.left.name] : undefined;
           }
-          if (this.isColumn(table, comp.right) && this.isIndexableValue(comp.left)) {
-            return table.indexes[comp.right] ? [comp.right] : undefined;
+          if (
+            comp.left.type === 'literal' &&
+            this.isIndexableValue(comp.left.value) &&
+            !Array.isArray(comp.right) &&
+            comp.right.type === 'column_ref' &&
+            this.isColumn(table, comp.right.name)
+          ) {
+            return table.indexes[comp.right.name] ? [comp.right.name] : undefined;
           }
           return undefined;
         }
         if (comp.operator === 'in') {
           if (
-            this.isColumn(table, comp.left) &&
+            comp.left.type === 'column_ref' &&
+            this.isColumn(table, comp.left.name) &&
             Array.isArray(comp.right) &&
-            (comp.right as unknown[]).every(v => this.isIndexableValue(v)) &&
-            table.indexes[comp.left]
+            comp.right.every(v => v.type === 'literal' && this.isIndexableValue(v.value)) &&
+            table.indexes[comp.left.name]
           ) {
-            return [comp.left];
+            return [comp.left.name];
           }
           return undefined;
         }

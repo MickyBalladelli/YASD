@@ -13,7 +13,10 @@ import {
   Primitive,
   JsonValue,
   TableSchema,
-  SqlStatement
+  SqlStatement,
+  Expression,
+  LiteralExpression,
+  ColumnReferenceExpression,
 } from './types';
 
 // Re-export types
@@ -25,6 +28,9 @@ export type {
   JsonValue,
   TableSchema,
   SqlStatement,
+  Expression,
+  LiteralExpression,
+  ColumnReferenceExpression,
   KVOptions,
   KVExpiryListener,
   KVStats,
