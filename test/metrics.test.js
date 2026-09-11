@@ -68,6 +68,13 @@ async function runTests() {
     db.close();
   });
 
+  await test('byte accounting uses UTF-8 bytes for keys', async () => {
+    const db = new YASD({ sweepIntervalMs: 0 });
+    db.set('漢', 1);
+    assert.strictEqual(db.cacheStats().bytes, 4); // 3 UTF-8 key bytes + 1 JSON value byte
+    db.close();
+  });
+
   await test('expiries counted on lazy expiry', async () => {
     const db = new YASD({ sweepIntervalMs: 0 });
     db.set('fast', 1, 20);

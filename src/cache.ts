@@ -39,7 +39,7 @@ export const DEFAULT_NAMESPACE_TTLS: Record<string, number> = {
 export interface KVOptions {
   /** Max live entries; oldest (LRU) evicted first. Default 10_000. */
   maxEntries?: number;
-  /** Max total bytes (key + JSON value estimate). Oversized entries reject. Default 64 MiB. */
+  /** Max total bytes (UTF-8 key bytes + UTF-8 JSON value bytes). Oversized entries reject. Default 64 MiB. */
   maxBytes?: number;
   /** Fallback TTL (ms) when no namespace default matches. Default: persist. */
   defaultTTLMs?: number;
@@ -90,21 +90,26 @@ interface CacheState {
   keyVersions: Map<string, number>;
 }
 
+/** Return the UTF-8 byte length used by the cache's byte accounting model. */
+function utf8ByteLength(value: string): number {
+  if (typeof Buffer !== 'undefined' && typeof Buffer.byteLength === 'function') {
+    return Buffer.byteLength(value, 'utf8');
+  }
+  return new TextEncoder().encode(value).length;
+}
+
+/** Size model: UTF-8 bytes in the key plus UTF-8 bytes in JSON.stringify(value). */
 function estimateSize(key: string, value: Value): number {
   let jsonLen = 8;
   try {
     const json = JSON.stringify(value);
     if (json !== undefined) {
-      if (typeof Buffer !== 'undefined' && typeof Buffer.byteLength === 'function') {
-        jsonLen = Buffer.byteLength(json, 'utf8');
-      } else {
-        jsonLen = json.length;
-      }
+      jsonLen = utf8ByteLength(json);
     }
   } catch {
     jsonLen = 64;
   }
-  return key.length * 2 + jsonLen;
+  return utf8ByteLength(key) + jsonLen;
 }
 
 /**

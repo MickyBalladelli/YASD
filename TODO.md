@@ -65,7 +65,7 @@ source.
   eviction deliberately keeps one entry (`src/cache.ts:242-267`). Validate
   positive limits and define whether an oversized single value is rejected or
   allowed.
-- [ ] Make byte accounting use UTF-8 for keys as well as values. The current
+- [x] Make byte accounting use UTF-8 for keys as well as values. The current
   estimate uses `key.length * 2` (`src/cache.ts:76-90`) while the public metric
   is called bytes. Use one documented size model and test non-ASCII keys.
 - [ ] Add backpressure and output limits. Server writes ignore the return value
