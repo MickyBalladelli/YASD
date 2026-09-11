@@ -27,6 +27,10 @@ import {
   validatePositiveSafeInteger,
 } from './validation';
 
+const RECONNECT_MAX_ATTEMPTS = 4;
+const RECONNECT_BASE_DELAY_MS = 25;
+const RECONNECT_MAX_DELAY_MS = 1000;
+
 export interface YasdClientOptions {
   /** e.g. `yasd://127.0.0.1:7379?poolSize=4` (`yasds://` enables TLS). Host/port/poolSize fields win. */
   url?: string;
@@ -177,25 +181,7 @@ export class YasdClient {
       await this.connecting;
       return;
     }
-    this.connecting = (async () => {
-      const needed = this.poolSize - this.pool.filter(c => !c.dead).length;
-      const created: PooledConn[] = [];
-      try {
-        for (let i = 0; i < needed; i++) {
-          created.push(await this.dialCommand());
-        }
-      } catch (err) {
-        for (const c of created) {
-          try {
-            c.socket.destroy();
-          } catch {
-            // ignore
-          }
-        }
-        throw err;
-      }
-      this.pool.push(...created);
-    })();
+    this.connecting = this.replenishPool();
     try {
       await this.connecting;
     } finally {
@@ -215,7 +201,9 @@ export class YasdClient {
     }
     this.subHandlers.clear();
     this.subDecoder.reset();
-    for (const conn of this.pool) {
+    const connections = this.pool.splice(0);
+    this.roundRobin = 0;
+    for (const conn of connections) {
       conn.dead = true;
       for (const p of conn.pending.splice(0)) {
         if (p.timer) clearTimeout(p.timer);
@@ -227,7 +215,6 @@ export class YasdClient {
         // ignore
       }
     }
-    this.pool = [];
   }
 
   // ---- health ----
@@ -536,18 +523,86 @@ export class YasdClient {
   }
 
   private async liveConn(): Promise<PooledConn> {
+    const existing = this.nextLiveConn();
+    if (existing) {
+      if (this.pool.length < this.poolSize) {
+        void this.connect().catch(() => undefined);
+      }
+      return existing;
+    }
     await this.connect();
+    const conn = this.nextLiveConn();
+    if (conn) return conn;
+    throw new Error('no connections available');
+  }
+
+  private nextLiveConn(): PooledConn | undefined {
+    this.pruneDeadConnections();
+    if (this.pool.length === 0) return undefined;
     for (let i = 0; i < this.pool.length; i++) {
       this.roundRobin = (this.roundRobin + 1) % this.pool.length;
       const conn = this.pool[this.roundRobin] as PooledConn;
-      if (!conn.dead) return conn;
+      if (!conn.dead && !conn.socket.destroyed) return conn;
     }
-    // All dead (or pool emptied): reconnect fresh.
-    this.pool = [];
-    await this.connect();
-    const conn = this.pool[0];
-    if (!conn) throw new Error('no connections available');
-    return conn;
+    return undefined;
+  }
+
+  private async replenishPool(): Promise<void> {
+    let lastError: Error | undefined;
+    for (let attempt = 0; attempt < RECONNECT_MAX_ATTEMPTS; attempt++) {
+      if (this.closed) throw new Error('client is closed');
+      this.pruneDeadConnections();
+      const needed = this.poolSize - this.pool.length;
+      if (needed <= 0) return;
+      const created: PooledConn[] = [];
+      try {
+        for (let i = 0; i < needed; i++) {
+          const conn = await this.dialCommand();
+          if (this.closed) {
+            conn.dead = true;
+            conn.socket.destroy();
+            throw new Error('client is closed');
+          }
+          created.push(conn);
+        }
+      } catch (err) {
+        lastError = err as Error;
+      }
+      if (this.closed) {
+        for (const conn of created) {
+          conn.dead = true;
+          conn.socket.destroy();
+        }
+        throw new Error('client is closed');
+      }
+      this.pool.push(...created.filter(conn => !conn.dead && !conn.socket.destroyed));
+      this.pruneDeadConnections();
+      if (this.pool.length >= this.poolSize) return;
+      if (attempt + 1 < RECONNECT_MAX_ATTEMPTS) {
+        const delayMs = Math.min(RECONNECT_MAX_DELAY_MS, RECONNECT_BASE_DELAY_MS * 2 ** attempt);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+      }
+    }
+    throw lastError ?? new Error('could not establish client connections');
+  }
+
+  private removeConn(conn: PooledConn): void {
+    const index = this.pool.indexOf(conn);
+    if (index === -1) return;
+    this.pool.splice(index, 1);
+    if (this.pool.length === 0) {
+      this.roundRobin = 0;
+    } else if (this.roundRobin >= this.pool.length) {
+      this.roundRobin = this.pool.length - 1;
+    }
+  }
+
+  private pruneDeadConnections(): void {
+    for (const conn of Array.from(this.pool)) {
+      if (conn.dead || conn.socket.destroyed) {
+        this.failConn(conn, new Error('connection is no longer usable'));
+      }
+    }
   }
 
   /** Open one transport socket (TLS when configured), resolved when ready. */
@@ -565,6 +620,7 @@ export class YasdClient {
       }
       const onError = (err: Error): void => {
         socket.off(readyEvent, onReady);
+        socket.destroy();
         reject(err);
       };
       const onReady = (): void => {
@@ -604,6 +660,10 @@ export class YasdClient {
   /** Send a command on an explicit connection (used by exec + AUTH on dial). */
   private sendOn(conn: PooledConn, cmd: string[]): Promise<RespReply> {
     return new Promise<RespReply>((resolve, reject) => {
+      if (conn.dead || conn.socket.destroyed) {
+        reject(new Error('connection is closed'));
+        return;
+      }
       const pending: Pending = { resolve, reject };
       if (this.requestTimeoutMs > 0) {
         pending.timer = setTimeout(() => {
@@ -645,7 +705,10 @@ export class YasdClient {
   }
 
   private failConn(conn: PooledConn, err: Error): void {
-    if (conn.dead) return;
+    if (conn.dead) {
+      this.removeConn(conn);
+      return;
+    }
     conn.dead = true;
     for (const p of conn.pending.splice(0)) {
       if (p.timer) clearTimeout(p.timer);
@@ -656,6 +719,7 @@ export class YasdClient {
     } catch {
       // ignore
     }
+    this.removeConn(conn);
   }
 
   // -- subscriber connection --

@@ -323,6 +323,24 @@ async function runTests() {
     await server.close();
   });
 
+  await test('server/client: dead pooled connections are removed and replenished', async () => {
+    const server = new YasdServer({ host: '127.0.0.1', port: 0 })
+    await server.start()
+    const { port } = server.address()
+    const client = new YasdClient({ host: '127.0.0.1', port, poolSize: 2 })
+    await client.connect()
+
+    for (let i = 0; i < 3; i++) {
+      client.pool[0].socket.destroy()
+      await client.connect()
+      await client.ping()
+      assert.strictEqual(client.pool.length, 2, 'pool stays bounded after replacement')
+    }
+
+    await client.close()
+    await server.close()
+  });
+
   await test('server/client: pub/sub + invalidation event', async () => {
     const server = new YasdServer({ host: '127.0.0.1', port: 0 });
     await server.start();

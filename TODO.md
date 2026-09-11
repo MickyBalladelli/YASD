@@ -72,7 +72,7 @@ source.
   of `socket.write()` (`src/server.ts:524-526,796-855`), so a slow subscriber can
   grow memory without bound. Queue bounded output, pause reads, or disconnect
   slow consumers.
-- [ ] Improve client pool recovery. Dead connections remain in `pool` until a
+- [x] Improve client pool recovery. Dead connections remain in `pool` until a
   full-pool reset (`src/client.ts:514-527,623-635`), so repeated partial failures
   can grow stale entries. Remove dead connections and reconnect with bounded
   backoff.
