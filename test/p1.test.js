@@ -18,7 +18,7 @@ const os = require('os');
 const path = require('path');
 const http = require('http');
 
-const { YASD, YasdServer, YasdClient, parseCacheUrl, saveSnapshot, loadSnapshot, AofLog } = mod;
+const { YASD, KVCache, YasdServer, YasdClient, parseCacheUrl, saveSnapshot, loadSnapshot, AofLog } = mod;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -131,7 +131,7 @@ async function runTests() {
     log.append({ op: 'del', keys: ['zz'] });
     log.append({ op: 'clear', prefix: 'zz' });
     fs.appendFileSync(aofPath, '{"version":1,"seq":8,"op":{"op":"set","key":"partial"')
-    const db = new YASD({ sweepIntervalMs: 0 });
+    const db = new KVCache({ sweepIntervalMs: 0 });
     const applied = await log.replay(db);
     assert.strictEqual(applied, 7);
     assert.strictEqual(log.recoveryState, 'torn-tail')

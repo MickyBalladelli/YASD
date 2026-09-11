@@ -441,7 +441,7 @@ export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Yasd
     );
   }
   if (env.YASD_LOAD_ON_START !== undefined) opts.loadOnStart = env.YASD_LOAD_ON_START !== '0';
-  if (env.YASD_SAVE_ON_SHUTDOWN !== undefined) opts.saveOnShutdown = env.YASD_SAVE_ON_SHUTDOWN !== '0';
+  if (env.YASD_SAVE_ON_SHUTDOWN !== undefined) opts.saveOnShutdown = parseBoolean(env.YASD_SAVE_ON_SHUTDOWN, 'YASD_SAVE_ON_SHUTDOWN');
   const healthToken = env.YASD_HEALTH_TOKEN === undefined
     ? undefined
     : validateToken(env.YASD_HEALTH_TOKEN, 'YASD_HEALTH_TOKEN');
@@ -644,7 +644,7 @@ export class YasdServer {
     this.saveOnShutdown = options.saveOnShutdown ?? options.snapshotPath !== undefined;
     this.autoSaveMs = options.autoSaveMs === undefined
       ? 0
-      : validateNonNegativeNumber(options.autoSaveMs, 'autoSaveMs');
+      : validateTimeout(options.autoSaveMs, 'autoSaveMs');
     this.maxPendingOutputBytes = options.maxPendingOutputBytes === undefined
       ? DEFAULT_MAX_PENDING_OUTPUT_BYTES
       : validatePositiveSafeInteger(options.maxPendingOutputBytes, 'maxPendingOutputBytes');
@@ -1764,7 +1764,7 @@ export class YasdServer {
         const next = cmd === 'INCR' ? this.kv.incr(args[0] as string, rawBy) : this.kv.decr(args[0] as string, rawBy);
         this.logAof({ op: 'incr', key: args[0] as string, by: cmd === 'INCR' ? rawBy : -rawBy }, effects);
         this.publishInvalidate({ event: 'set', key: args[0] as string }, effects);
-        return Number.isInteger(next)
+        return Number.isSafeInteger(next)
           ? { kind: 'int', value: next }
           : { kind: 'bulk', value: JSON.stringify(next) };
       }

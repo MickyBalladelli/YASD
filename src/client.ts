@@ -1206,7 +1206,7 @@ export class YasdTransaction {
   /** Forget watched versions (queued writes are kept). */
   async unwatch(): Promise<'OK'> {
     this.assertWritable('UNWATCH');
-    return this.expectOk(['UNWATCH']);
+    return this.serialize(() => this.expectOk(['UNWATCH']));
   }
 
   /** Immediate read (must precede MULTI — read first, then write). */
@@ -1356,12 +1356,15 @@ export class YasdTransaction {
   /** Drop the queue (and watches) without committing. */
   async discard(): Promise<void> {
     this.assertWritable('DISCARD');
-    this.done = true;
-    try {
-      if (this.begun) await this.send(['DISCARD']);
-    } finally {
-      await this.closeSocket();
-    }
+    this.finishing = true;
+    return this.serialize(async () => {
+      try {
+        if (this.begun) await this.send(['DISCARD']);
+      } finally {
+        this.done = true;
+        await this.closeSocket();
+      }
+    });
   }
 
   /** Abandon the transaction (watches die with the connection). */
