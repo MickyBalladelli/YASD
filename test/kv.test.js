@@ -45,6 +45,20 @@ async function runTests() {
     db.close();
   });
 
+  await test('KV owns mutable values at the cache boundary', () => {
+    const db = new YASD({ sweepIntervalMs: 0 })
+    const input = { nested: { items: ['before'] } }
+    db.set('mutable', input)
+
+    input.nested.items.push('input mutation')
+    assert.deepStrictEqual(db.get('mutable'), { nested: { items: ['before'] } })
+
+    const output = db.get('mutable')
+    output.nested.items.push('output mutation')
+    assert.deepStrictEqual(db.get('mutable'), { nested: { items: ['before'] } })
+    db.close()
+  })
+
   await test('CAS compares nested JSON independent of key order', () => {
     const db = new YASD({ sweepIntervalMs: 0 })
     const original = {

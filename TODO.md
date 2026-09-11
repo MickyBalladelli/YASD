@@ -163,7 +163,7 @@ source.
   successfully after printing “skipping tests” when `dist` is unavailable
   (`test/basic.test.js:4-24`, `test/kv.test.js:5-13`). Build in the test script
   or use a runner that reports missing prerequisites as failures.
-- [ ] Add regression tests for every P0/P1 item: literal-vs-column parsing,
+- [x] Add regression tests for every P0/P1 item: literal-vs-column parsing,
   trailing tokens, constraints, atomic failed writes, mutable cache values,
   CAS `PX 0`, TTL-preserving restart, snapshot/AOF crash windows, corrupted
   AOF lines, RESP limits, partial HTTP headers, PERSIST invalidation, expiry

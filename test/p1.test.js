@@ -360,6 +360,49 @@ async function runTests() {
     await server.close()
   });
 
+  await test('server: slow consumers are disconnected at the output limit', async () => {
+    const net = require('net')
+    const server = new YasdServer({
+      host: '127.0.0.1', port: 0, maxPendingOutputBytes: 8,
+    })
+    await server.start()
+    const raw = net.createConnection({ host: '127.0.0.1', port: server.address().port })
+    try {
+      await new Promise((resolve, reject) => {
+        raw.once('connect', resolve)
+        raw.once('error', reject)
+      })
+
+      const waitFor = async (predicate, message) => {
+        const deadline = Date.now() + 1000
+        while (!predicate() && Date.now() < deadline) await sleep(5)
+        assert.ok(predicate(), message)
+      }
+      await waitFor(() => server.sockets.size === 1, 'server accepted slow socket')
+
+      const accepted = Array.from(server.sockets)[0]
+      const originalWrite = accepted.write
+      accepted.write = () => false
+      try {
+        raw.write('*2\r\n$9\r\nSUBSCRIBE\r\n$4\r\nslow\r\n')
+        await waitFor(() => server.pubsub.channelNames().includes('slow'), 'subscription registered')
+
+        const closed = new Promise(resolve => raw.once('close', resolve))
+        assert.strictEqual(server.pubsub.publish('slow', 'x'), 1)
+        await Promise.race([
+          closed,
+          sleep(1000).then(() => { throw new Error('slow consumer stayed connected') }),
+        ])
+        assert.strictEqual(raw.destroyed, true)
+      } finally {
+        accepted.write = originalWrite
+      }
+    } finally {
+      raw.destroy()
+      await server.close()
+    }
+  })
+
   await test('server/client: pub/sub + invalidation event', async () => {
     const server = new YasdServer({ host: '127.0.0.1', port: 0 });
     await server.start();
