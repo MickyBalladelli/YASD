@@ -987,9 +987,9 @@ type TxQueuedOp =
   | { op: 'decr'; key: string; by: number }
   | { op: 'cas'; key: string; expected: Value | undefined; value: Value; ttlMs?: number };
 
-export class TransactionError extends Error {
+export class TransactionError extends DatabaseError {
   constructor(message: string) {
-    super(message);
+    super(message, 'TRANSACTION_ERROR');
     this.name = 'TransactionError';
   }
 }

@@ -468,7 +468,7 @@ export class AofLog {
         // A v2 snapshot covers all legacy unsequenced records that existed
         // when it was written. New records always carry a sequence number.
         if (snapshotSeq !== undefined && (parsed.seq === undefined || parsed.seq <= snapshotSeq)) continue;
-        applyAofOp(cache, parsed.op);
+        cache.atomic(() => applyAofOp(cache, parsed.op));
         applied++;
       } catch (error) {
         this.noteRecovery(lines, i, error, raw)

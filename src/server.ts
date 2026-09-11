@@ -221,7 +221,11 @@ export interface PersistenceStatus {
 interface ConnState {
   socket: net.Socket;
   decoder: RespDecoder;
-  httpBuf: Buffer | null; // non-null once an HTTP method prefix is detected
+  httpBuf: Buffer | null;
+  protocol: 'undecided' | 'resp' | 'http';
+  requestQueue: RespReply[];
+  requestQueueBytes: number;
+  processing: boolean;
   subs: Map<string, PubSubListener>; // active subscriptions (empty = normal mode, null = never-subscribed?)
   subMode: boolean;
   authed: boolean;

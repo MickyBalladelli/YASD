@@ -1320,27 +1320,22 @@ export class YasdTransaction {
     return ok;
   }
 
-  /**
-   * Commit: array of per-op results in queue order, or null when a watched
-   * key changed (nothing applied). A per-op runtime failure throws (earlier
-   * ops in the batch were already applied server-side).
-   */
+  /** Commit all queued writes, or roll back the entire batch on a runtime error. */
   async exec(): Promise<TxExecResult[] | null> {
     this.assertWritable('EXEC');
-    this.done = true;
-    try {
-      if (!this.begun) {
-        const ok = await this.expectOk(['MULTI']);
-        if (ok !== 'OK') throw new Error('MULTI failed');
-        this.begun = true;
+    this.finishing = true;
+    return this.serialize(async () => {
+      try {
+        if (!this.begun) await this.beginUnlocked();
+        const reply = await this.send(['EXEC']);
+        if (reply.kind === 'nil') return null;
+        if (reply.kind !== 'array') throw new Error(`unexpected EXEC reply: ${JSON.stringify(reply)}`);
+        return reply.items.map(item => (item === null ? null : txValue(item)));
+      } finally {
+        this.done = true;
+        await this.closeSocket();
       }
-      const reply = await this.send(['EXEC']);
-      if (reply.kind === 'nil') return null;
-      if (reply.kind !== 'array') throw new Error(`unexpected EXEC reply: ${JSON.stringify(reply)}`);
-      return reply.items.map(item => (item === null ? null : txValue(item)));
-    } finally {
-      await this.closeSocket();
-    }
+    });
   }
 
   /** Drop the queue (and watches) without committing. */
@@ -1363,7 +1358,7 @@ export class YasdTransaction {
   // ---- internals ----
 
   private assertWritable(what: string): void {
-    if (this.done) throw new TransactionError(`cannot ${what}: transaction is finished`);
+    if (this.done || this.finishing) throw new TransactionError(`cannot ${what}: transaction is finished`);
   }
 
   private assertReadable(what: string): void {
