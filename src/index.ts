@@ -39,7 +39,7 @@ export { parse, KVCache, KVTransaction, TransactionError, DEFAULT_NAMESPACE_TTLS
 export { SlowLog, SLOW_LOG_CAP, checkSlowThreshold } from './metrics';
 export type { SlowEntry } from './metrics';
 export { YasdServer, serverOptionsFromEnv, DEFAULT_HOST, DEFAULT_PORT } from './server'
-export type { YasdServerOptions, YasdServerTlsOptions, ServerInfo } from './server';
+export type { YasdServerOptions, YasdServerTlsOptions, YasdServerCache, ServerInfo } from './server';
 export { YasdClient, parseCacheUrl } from './client';
 export type { YasdClientOptions, ParsedCacheUrl, SubscribeHandler, TxExecResult, YasdTransactionOptions } from './client';
 export { YasdTransaction } from './client';

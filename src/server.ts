@@ -34,6 +34,7 @@ import {
   KVCache,
   KVOptions,
   KVBatchEntry,
+  KVStats,
   SnapshotEntry,
 } from './cache';
 import { PubSubHub, PubSubListener, INVALIDATE_CHANNEL, invalidateMessage, InvalidationEvent } from './pubsub';
@@ -252,8 +253,94 @@ export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Yasd
   return opts;
 }
 
+/**
+ * Cache operations safe for embedded server callers.
+ *
+ * Mutations go through the server so AOF and invalidation hooks cannot be
+ * bypassed. Persistence and transaction primitives stay server-internal.
+ */
+export interface YasdServerCache {
+  readonly size: number;
+  readonly bytesUsed: number;
+  get(key: string): SnapshotEntry['value'] | undefined;
+  set(key: string, value: SnapshotEntry['value'], ttlMs?: number): SnapshotEntry['value'];
+  del(key: string): boolean;
+  clearPrefix(prefix: string): number;
+  clear(): void;
+  mget(keys: string[]): Array<SnapshotEntry['value'] | undefined>;
+  mset(entries: KVBatchEntry[]): number;
+  incr(key: string, by?: number): number;
+  decr(key: string, by?: number): number;
+  cas(
+    key: string,
+    expected: SnapshotEntry['value'] | undefined,
+    value: SnapshotEntry['value'],
+    ttlMs?: number
+  ): boolean;
+  ttl(key: string): number;
+  expiration(key: string): number | undefined | null;
+  expire(key: string, ttlMs: number): boolean;
+  persist(key: string): boolean;
+  dump(): SnapshotEntry[];
+  sweep(): number;
+  stats(): KVStats;
+  resetStats(): void;
+  getVersion(key: string): number;
+}
+
+interface YasdServerCacheHooks {
+  set(key: string, value: SnapshotEntry['value'], ttlMs?: number): SnapshotEntry['value'];
+  del(key: string): boolean;
+  clearPrefix(prefix: string): number;
+  clear(): void;
+  mset(entries: KVBatchEntry[]): number;
+  incr(key: string, by?: number): number;
+  decr(key: string, by?: number): number;
+  cas(
+    key: string,
+    expected: SnapshotEntry['value'] | undefined,
+    value: SnapshotEntry['value'],
+    ttlMs?: number
+  ): boolean;
+  expire(key: string, ttlMs: number): boolean;
+  persist(key: string): boolean;
+}
+
+/** Build a facade whose closure keeps the raw KVCache out of the public API. */
+function createYasdServerCacheFacade(cache: KVCache, hooks: YasdServerCacheHooks): YasdServerCache {
+  const facade: YasdServerCache = {
+    get: key => cache.get(key),
+    set: (key, value, ttlMs) => hooks.set(key, value, ttlMs),
+    del: key => hooks.del(key),
+    clearPrefix: prefix => hooks.clearPrefix(prefix),
+    clear: () => hooks.clear(),
+    mget: keys => cache.mget(keys),
+    mset: entries => hooks.mset(entries),
+    incr: (key, by) => hooks.incr(key, by),
+    decr: (key, by) => hooks.decr(key, by),
+    cas: (key, expected, value, ttlMs) => hooks.cas(key, expected, value, ttlMs),
+    ttl: key => cache.ttl(key),
+    expiration: key => cache.expiration(key),
+    expire: (key, ttlMs) => hooks.expire(key, ttlMs),
+    persist: key => hooks.persist(key),
+    dump: () => cache.dump(),
+    sweep: () => cache.sweep(),
+    stats: () => cache.stats(),
+    resetStats: () => cache.resetStats(),
+    getVersion: key => cache.getVersion(key),
+    get size() {
+      return cache.size;
+    },
+    get bytesUsed() {
+      return cache.bytesUsed;
+    },
+  };
+  return Object.freeze(facade);
+}
+
 export class YasdServer {
   private kv: KVCache;
+  private readonly cacheFacade: YasdServerCache;
   private hub = new PubSubHub();
   private aof: AofLog;
   private netServer?: net.Server;
@@ -298,11 +385,23 @@ export class YasdServer {
     if (options.slowCommandMs !== undefined) {
       this.slow.setThreshold(checkSlowThreshold(options.slowCommandMs, 'slowCommandMs'));
     }
+    this.cacheFacade = createYasdServerCacheFacade(this.kv, {
+      set: (key, value, ttlMs) => this.cacheSet(key, value, ttlMs),
+      del: key => this.cacheDel(key),
+      clearPrefix: prefix => this.cacheClearPrefix(prefix),
+      clear: () => this.cacheClear(),
+      mset: entries => this.cacheMset(entries),
+      incr: (key, by) => this.cacheIncr(key, by),
+      decr: (key, by) => this.cacheDecr(key, by),
+      cas: (key, expected, value, ttlMs) => this.cacheCas(key, expected, value, ttlMs),
+      expire: (key, ttlMs) => this.cacheExpire(key, ttlMs),
+      persist: key => this.cachePersist(key),
+    });
   }
 
-  /** Direct access to the underlying cache (embedded use, tests). */
-  get cache(): KVCache {
-    return this.kv;
+  /** Hooked cache access for embedded use. The raw cache remains private. */
+  get cache(): YasdServerCache {
+    return this.cacheFacade;
   }
 
   get pubsub(): PubSubHub {
@@ -660,6 +759,146 @@ export class YasdServer {
 
   private onCacheExpiry(key: string): void {
     this.publishInvalidate({ event: 'expire', key })
+  }
+
+  private runCacheMutation<T>(operation: (effects: TransactionEffects) => T): T {
+    const effects: TransactionEffects = { aof: [], invalidations: [] };
+    const commit = (): T => {
+      const result = operation(effects);
+      if (effects.aof.length === 1) {
+        this.appendAof(effects.aof[0] as AofOp);
+      } else if (effects.aof.length > 1) {
+        this.appendAof({ op: 'transaction', ops: effects.aof });
+      }
+      return result;
+    };
+    const result = this.aof.enabled ? this.kv.atomic(commit) : commit();
+    for (const event of effects.invalidations) {
+      this.publishInvalidate(event);
+    }
+    return result;
+  }
+
+  private cacheSet(
+    key: string,
+    value: SnapshotEntry['value'],
+    ttlMs?: number
+  ): SnapshotEntry['value'] {
+    return this.runCacheMutation(effects => {
+      const result = this.kv.set(key, value, ttlMs);
+      this.logAof({ op: 'set', key, value, expiresAt: this.aofExpiry(key) }, effects);
+      this.publishInvalidate({ event: 'set', key }, effects);
+      return result;
+    });
+  }
+
+  private cacheDel(key: string): boolean {
+    return this.runCacheMutation(effects => {
+      const deleted = this.kv.del(key);
+      if (deleted) {
+        this.logAof({ op: 'del', keys: [key] }, effects);
+        this.publishInvalidate({ event: 'del', key }, effects);
+      }
+      return deleted;
+    });
+  }
+
+  private cacheClearPrefix(prefix: string): number {
+    return this.runCacheMutation(effects => {
+      const count = this.kv.clearPrefix(prefix);
+      this.logAof({ op: 'clear', prefix }, effects);
+      this.publishInvalidate({ event: 'clear', prefix }, effects);
+      return count;
+    });
+  }
+
+  private cacheClear(): void {
+    this.runCacheMutation(effects => {
+      const keys = this.kv.dump().map(entry => entry.key);
+      this.kv.clear();
+      if (keys.length > 0) {
+        this.logAof({ op: 'del', keys }, effects);
+        for (const key of keys) {
+          this.publishInvalidate({ event: 'del', key }, effects);
+        }
+      }
+    });
+  }
+
+  private cacheMset(entries: KVBatchEntry[]): number {
+    return this.runCacheMutation(effects => {
+      const count = this.kv.mset(entries);
+      const aofEntries: AofBatchEntry[] = entries.map(entry => ({
+        ...entry,
+        expiresAt: this.aofExpiry(entry.key),
+      }));
+      this.logAof({ op: 'mset', entries: aofEntries }, effects);
+      for (const entry of entries) {
+        this.publishInvalidate({ event: 'set', key: entry.key }, effects);
+      }
+      return count;
+    });
+  }
+
+  private cacheIncr(key: string, by = 1): number {
+    return this.runCacheMutation(effects => {
+      const next = this.kv.incr(key, by);
+      this.logAof({ op: 'incr', key, by }, effects);
+      this.publishInvalidate({ event: 'set', key }, effects);
+      return next;
+    });
+  }
+
+  private cacheDecr(key: string, by = 1): number {
+    return this.runCacheMutation(effects => {
+      const next = this.kv.decr(key, by);
+      this.logAof({ op: 'incr', key, by: -by }, effects);
+      this.publishInvalidate({ event: 'set', key }, effects);
+      return next;
+    });
+  }
+
+  private cacheCas(
+    key: string,
+    expected: SnapshotEntry['value'] | undefined,
+    value: SnapshotEntry['value'],
+    ttlMs?: number
+  ): boolean {
+    return this.runCacheMutation(effects => {
+      const ok = this.kv.cas(key, expected, value, ttlMs);
+      if (ok) {
+        const expiresAt = this.kv.expiration(key);
+        if (expiresAt === null) {
+          this.logAof({ op: 'del', keys: [key] }, effects);
+        } else {
+          this.logAof({ op: 'set', key, value, expiresAt: expiresAt ?? null }, effects);
+        }
+        this.publishInvalidate({ event: 'set', key }, effects);
+      }
+      return ok;
+    });
+  }
+
+  private cacheExpire(key: string, ttlMs: number): boolean {
+    return this.runCacheMutation(effects => {
+      const ok = this.kv.expire(key, ttlMs);
+      if (ok) {
+        this.logAof({ op: 'expire', key, expiresAt: this.aofExpiry(key) ?? 0 }, effects);
+        this.publishInvalidate({ event: 'expire', key }, effects);
+      }
+      return ok;
+    });
+  }
+
+  private cachePersist(key: string): boolean {
+    return this.runCacheMutation(effects => {
+      const ok = this.kv.persist(key);
+      if (ok) {
+        this.logAof({ op: 'persist', key }, effects);
+        this.publishInvalidate({ event: 'persist', key }, effects);
+      }
+      return ok;
+    });
   }
 
   private parseValue(json: string): SnapshotEntry['value'] {
