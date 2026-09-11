@@ -229,6 +229,72 @@ export class Executor {
     }
   }
 
+  private assertColumnExists(table: TableData, column: string, tableName: string): void {
+    if (!table.schema.columns.some(col => col.name === column)) {
+      throw new DatabaseError(`Column '${column}' not found in table '${tableName}'`, 'COLUMN_NOT_FOUND');
+    }
+  }
+
+  private validateExpressionColumns(
+    table: TableData,
+    expression: Expression,
+    tableName: string
+  ): void {
+    if (expression.type === 'column_ref') {
+      this.assertColumnExists(table, expression.name, tableName);
+    }
+  }
+
+  private validateWhereColumns(table: TableData, where: WhereClause, tableName: string): void {
+    switch (where.type) {
+      case 'and':
+        this.validateWhereColumns(table, where.left, tableName);
+        this.validateWhereColumns(table, where.right, tableName);
+        return;
+      case 'or':
+        this.validateWhereColumns(table, where.left, tableName);
+        this.validateWhereColumns(table, where.right, tableName);
+        return;
+      case 'not':
+        this.validateWhereColumns(table, where.clause, tableName);
+        return;
+      case 'is_null':
+      case 'is_not_null':
+        this.validateExpressionColumns(table, where.expression, tableName);
+        return;
+      case 'comparison':
+        this.validateExpressionColumns(table, where.left, tableName);
+        if (Array.isArray(where.right)) {
+          for (const expression of where.right) {
+            this.validateExpressionColumns(table, expression, tableName);
+          }
+        } else {
+          this.validateExpressionColumns(table, where.right, tableName);
+        }
+        return;
+    }
+  }
+
+  private validateSelectReferences(
+    table: TableData,
+    columns: string[] | '*',
+    orderBy: SelectStatement['orderBy'],
+    where: WhereClause | undefined,
+    tableName: string
+  ): void {
+    if (columns !== '*') {
+      for (const column of columns) {
+        this.assertColumnExists(table, column, tableName);
+      }
+    }
+    if (orderBy) {
+      this.assertColumnExists(table, orderBy.column, tableName);
+    }
+    if (where) {
+      this.validateWhereColumns(table, where, tableName);
+    }
+  }
+
   private coerceWriteValue(
     value: Value,
     column: ColumnDefinition,
@@ -439,6 +505,7 @@ export class Executor {
     if (!table) {
       throw new DatabaseError(`Table '${tableName}' not found`, 'TABLE_NOT_FOUND');
     }
+    this.validateSelectReferences(table, columns, orderBy, where, tableName);
 
     // WHERE: prefer the column index for `=` / `IN` (incl. ANDs of those);
     // anything else falls back to a full scan. Index candidates are always
@@ -513,6 +580,7 @@ export class Executor {
     if (!table) {
       throw new DatabaseError(`Table '${tableName}' not found`, 'TABLE_NOT_FOUND');
     }
+    if (where) this.validateWhereColumns(table, where, tableName);
 
     const setColumns = new Set<string>();
     const preparedSet: Array<{ column: string; value: Value }> = [];
@@ -576,6 +644,7 @@ export class Executor {
     if (!table) {
       throw new DatabaseError(`Table '${tableName}' not found`, 'TABLE_NOT_FOUND');
     }
+    if (where) this.validateWhereColumns(table, where, tableName);
 
     if (!where) {
       const affectedRows = table.rows.length;
@@ -793,6 +862,15 @@ export class Executor {
       return { statement: statement.type, strategy: 'n/a', hasOrderBy: false };
     }
     const table = this.db.tables.get(statement.tableName);
+    if (table) {
+      this.validateSelectReferences(
+        table,
+        statement.columns,
+        statement.orderBy,
+        statement.where,
+        statement.tableName
+      );
+    }
     const plan: QueryPlan = {
       statement: 'select',
       table: statement.tableName,

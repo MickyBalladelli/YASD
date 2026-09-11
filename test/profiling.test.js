@@ -322,6 +322,21 @@ async function runTests() {
     db.close()
   })
 
+  await test('referenced columns must exist', async () => {
+    const db = seed()
+    const assertColumnNotFound = fn => {
+      assert.throws(fn, error => error && error.code === 'COLUMN_NOT_FOUND')
+    }
+
+    assertColumnNotFound(() => db.query('SELECT missing FROM users'))
+    assertColumnNotFound(() => db.query('SELECT * FROM users ORDER BY missing'))
+    assertColumnNotFound(() => db.query('SELECT * FROM users WHERE missing = 1'))
+    assertColumnNotFound(() => db.explain('SELECT missing FROM users'))
+    assertColumnNotFound(() => db.query('UPDATE users SET age = 1 WHERE missing = 1'))
+    assertColumnNotFound(() => db.query('DELETE FROM users WHERE missing = 1'))
+    db.close()
+  })
+
   // ---- PROFILE ----
 
   await test('profile: SELECT reports plan + timing + row counts', async () => {

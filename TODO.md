@@ -120,7 +120,7 @@ source.
   return `true` for many `NULL != value` cases (`src/executor.ts:591-604`) and
   there is no `IS NULL`/`IS NOT NULL`. Choose SQL-like three-valued behavior or
   explicitly document the simpler rules and test them.
-- [ ] Validate referenced columns. Unknown projection and ORDER BY columns are
+- [x] Validate referenced columns. Unknown projection and ORDER BY columns are
   silently returned/sorted as `null` (`src/executor.ts:372-410`). Return a clear
   `COLUMN_NOT_FOUND` error instead.
 - [ ] Fix or remove unsupported SQL examples. `examples/basic.js:75-77` uses
