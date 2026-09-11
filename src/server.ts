@@ -1,5 +1,5 @@
 // Standalone YASD cache server: one TCP port serves the RESP-like KV
-// protocol and an HTTP `/healthz` endpoint (detected from the first bytes).
+// protocol and an HTTP `/healthz` endpoint (detected incrementally).
 // Multi-instance Echo replicas point at it via YasdClient + CACHE_URL.
 //
 // Wire protocol (RESP2 subset, commands are arrays of bulk strings):
@@ -167,7 +167,7 @@ export interface ServerInfo {
 interface ConnState {
   socket: net.Socket;
   decoder: RespDecoder;
-  httpBuf: Buffer | null; // non-null once HTTP detected
+  httpBuf: Buffer | null; // non-null once an HTTP method prefix is detected
   subs: Map<string, PubSubListener>; // active subscriptions (empty = normal mode, null = never-subscribed?)
   subMode: boolean;
   authed: boolean;
@@ -181,6 +181,67 @@ interface ConnState {
   outputBackpressured: boolean;
   closeWhenDrained: boolean;
   outputClosed: boolean;
+}
+
+const MAX_HTTP_HEADER_BYTES = 16 * 1024;
+const HTTP_METHOD = /^[A-Z][A-Z0-9!#$%&'*+\-.^_`|~]*$/;
+const HTTP_HEADER_NAME = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
+
+interface ParsedHttpRequest {
+  method: string;
+  path: string;
+  query: string;
+  version: string;
+}
+
+function isHttpMethodStart(chunk: Buffer): boolean {
+  const first = chunk[0] as number | undefined;
+  return first !== undefined && (
+    (first >= 0x41 && first <= 0x5a) ||
+    (first >= 0x61 && first <= 0x7a)
+  );
+}
+
+function validHttpEncoding(value: string, plusAsSpace = false): boolean {
+  try {
+    decodeURIComponent(plusAsSpace ? value.replace(/\+/g, ' ') : value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function parseHttpRequest(head: Buffer): ParsedHttpRequest | undefined {
+  for (const byte of head) {
+    if (byte > 0x7f) return undefined;
+  }
+  const text = head.toString('ascii');
+  const lines = text.split('\r\n');
+  const requestLine = lines.shift() ?? '';
+  const match = /^([^\s]+) (\/[^\s?#]*)(?:\?([^\s#]*))? (HTTP\/\d+\.\d+)$/.exec(requestLine);
+  if (!match || !HTTP_METHOD.test(match[1] as string)) return undefined;
+  for (const line of lines) {
+    const colon = line.indexOf(':');
+    if (colon <= 0 || !HTTP_HEADER_NAME.test(line.slice(0, colon))) return undefined;
+    if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(line.slice(colon + 1))) {
+      return undefined;
+    }
+  }
+  const path = match[2] as string;
+  const query = match[3] ?? '';
+  if (!validHttpEncoding(path) || !validHttpEncoding(query, true)) return undefined;
+  for (const part of query.split('&')) {
+    const equals = part.indexOf('=');
+    const key = equals === -1 ? part : part.slice(0, equals);
+    const value = equals === -1 ? '' : part.slice(equals + 1);
+    if (!validHttpEncoding(key, true) || !validHttpEncoding(value, true)) return undefined;
+  }
+  return {
+    method: match[1] as string,
+    path,
+    query,
+    version: match[4] as string,
+  };
 }
 
 interface TransactionEffects {
@@ -733,14 +794,14 @@ export class YasdServer {
   }
 
   private onData(state: ConnState, chunk: Buffer): void {
-    // Single-port HTTP: a connection starting with `GET ` is a health check.
+    // Single-port HTTP: buffer an ASCII method prefix until the full header arrives.
     if (state.httpBuf !== null) {
       this.onHttpData(state, chunk);
       return;
     }
-    if (chunk.length >= 4 && chunk.toString('utf8', 0, 4) === 'GET ') {
-      state.httpBuf = chunk;
-      this.onHttpData(state, Buffer.alloc(0));
+    if (isHttpMethodStart(chunk)) {
+      state.httpBuf = Buffer.alloc(0);
+      this.onHttpData(state, chunk);
       return;
     }
     const requests = state.decoder.push(chunk);
@@ -755,35 +816,46 @@ export class YasdServer {
     state.httpBuf = Buffer.concat([state.httpBuf ?? Buffer.alloc(0), chunk]);
     const end = state.httpBuf.indexOf('\r\n\r\n');
     if (end === -1) {
-      if (state.httpBuf.length > 16 * 1024) state.socket.destroy();
+      if (state.httpBuf.length > MAX_HTTP_HEADER_BYTES) this.disconnectSocket(state);
       return; // wait for full headers
     }
-    const head = state.httpBuf.toString('utf8', 0, end);
-    const requestLine = head.split('\r\n')[0] ?? '';
-    const path = requestLine.split(' ')[1] ?? '/';
-    if (path === '/healthz' || path === '/health') {
-      const body = Buffer.from(JSON.stringify(this.info()), 'utf8');
-      this.writeSocket(state,
-        Buffer.concat([
-          Buffer.from(
-            'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n' +
-              `Content-Length: ${body.length}\r\nConnection: close\r\n\r\n`,
-            'utf8'
-          ),
-          body,
-        ]));
-    } else {
-      const body = Buffer.from('{"error":"not found"}', 'utf8');
-      this.writeSocket(state,
-        Buffer.concat([
-          Buffer.from(
-            'HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\n' +
-              `Content-Length: ${body.length}\r\nConnection: close\r\n\r\n`,
-            'utf8'
-          ),
-          body,
-        ]));
+    const request = parseHttpRequest(state.httpBuf.subarray(0, end));
+    if (!request) {
+      this.writeHttpResponse(state, 400, 'Bad Request', { error: 'bad request' });
+      return;
     }
+    if (request.version !== 'HTTP/1.1') {
+      this.writeHttpResponse(state, 505, 'HTTP Version Not Supported', { error: 'unsupported HTTP version' });
+      return;
+    }
+    if (request.method !== 'GET') {
+      this.writeHttpResponse(state, 405, 'Method Not Allowed', { error: 'method not allowed' }, 'Allow: GET\r\n');
+      return;
+    }
+    if (request.path === '/healthz' || request.path === '/health') {
+      this.writeHttpResponse(state, 200, 'OK', this.info());
+      return;
+    }
+    this.writeHttpResponse(state, 404, 'Not Found', { error: 'not found' });
+  }
+
+  private writeHttpResponse(
+    state: ConnState,
+    status: number,
+    statusText: string,
+    value: unknown,
+    extraHeaders = ''
+  ): void {
+    const body = Buffer.from(JSON.stringify(value), 'utf8');
+    this.writeSocket(state,
+      Buffer.concat([
+        Buffer.from(
+          `HTTP/1.1 ${status} ${statusText}\r\nContent-Type: application/json\r\n` +
+            `Content-Length: ${body.length}\r\n${extraHeaders}Connection: close\r\n\r\n`,
+          'utf8'
+        ),
+        body,
+      ]));
     this.endSocket(state);
   }
 

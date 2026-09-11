@@ -84,7 +84,7 @@ source.
 - [x] Add input validation and limits to `parseCacheUrl()` and client options.
   Validate host, port, timeout, pool size, URL decoding, and TLS combinations in
   one place (`src/client.ts:44-141`).
-- [ ] Separate the HTTP health endpoint from RESP detection, or make detection
+- [x] Separate the HTTP health endpoint from RESP detection, or make detection
   fully incremental. `src/server.ts:438-447` only recognizes `GET ` when the
   first TCP chunk already contains four bytes. Partial HTTP writes are treated
   as RESP and dropped. Also parse method, path, query, and HTTP version strictly.

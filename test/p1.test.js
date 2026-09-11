@@ -495,6 +495,53 @@ async function runTests() {
     await client.connect();
     await client.set('k', { v: 1 }, 60000);
 
+    const rawHttp = request => new Promise((resolve, reject) => {
+      const chunks = [];
+      let timer;
+      const sock = require('net').createConnection({ host: '127.0.0.1', port }, () => {
+        sock.write(request);
+      });
+      sock.on('data', chunk => chunks.push(chunk));
+      sock.on('end', () => {
+        clearTimeout(timer);
+        resolve(Buffer.concat(chunks).toString());
+      });
+      sock.on('error', error => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      timer = setTimeout(() => {
+        sock.destroy();
+        reject(new Error('raw HTTP test timed out'));
+      }, 3000);
+    });
+
+    const partialHealth = await new Promise((resolve, reject) => {
+      const chunks = [];
+      let timer;
+      const sock = require('net').createConnection({ host: '127.0.0.1', port }, () => {
+        sock.write('G');
+        setTimeout(() => sock.write('ET /healthz?probe=1 HTTP/1.1\r\nHost: localhost\r\n\r\n'), 5);
+      });
+      sock.on('data', chunk => chunks.push(chunk));
+      sock.on('end', () => {
+        clearTimeout(timer);
+        resolve(Buffer.concat(chunks).toString());
+      });
+      sock.on('error', error => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      timer = setTimeout(() => {
+        sock.destroy();
+        reject(new Error('partial HTTP test timed out'));
+      }, 3000);
+    });
+    assert.match(partialHealth, /^HTTP\/1\.1 200 OK/);
+    assert.match(await rawHttp('POST /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n'), /^HTTP\/1\.1 405 Method Not Allowed/);
+    assert.match(await rawHttp('GET /healthz?bad=%ZZ HTTP/1.1\r\nHost: localhost\r\n\r\n'), /^HTTP\/1\.1 400 Bad Request/);
+    assert.match(await rawHttp('GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n'), /^HTTP\/1\.1 505 HTTP Version Not Supported/);
+
     const health = await new Promise((resolve, reject) => {
       http.get({ host: '127.0.0.1', port, path: '/healthz', timeout: 2000 }, res => {
         let body = '';
