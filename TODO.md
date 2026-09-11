@@ -123,7 +123,7 @@ source.
 - [x] Validate referenced columns. Unknown projection and ORDER BY columns are
   silently returned/sorted as `null` (`src/executor.ts:372-410`). Return a clear
   `COLUMN_NOT_FOUND` error instead.
-- [ ] Fix or remove unsupported SQL examples. `examples/basic.js:75-77` uses
+- [x] Fix or remove unsupported SQL examples. `examples/basic.js:75-77` uses
   `COUNT(*) AS count`, but the parser has no aggregate or alias support. Either
   implement aggregates/aliases or change the example to count returned rows.
 - [ ] Fix ORDER BY NULL ordering and type mismatch behavior. Null placement

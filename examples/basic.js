@@ -73,8 +73,8 @@ console.log('   Deleted', deleted.affectedRows, 'users\n');
 
 // Count remaining users
 console.log('9. Counting remaining users:');
-const remaining = db.query('SELECT COUNT(*) as count FROM users');
-console.log('   Remaining users:', remaining.rows[0].count, '\n');
+const remaining = db.query('SELECT * FROM users')
+console.log('   Remaining users:', remaining.rows.length, '\n')
 
 // Table information
 console.log('10. Database info:');
