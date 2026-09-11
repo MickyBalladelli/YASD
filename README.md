@@ -174,7 +174,9 @@ DROP TABLE table_name
 
 For multi-instance Echo (Socket.IO scaling), run YASD standalone and share
 it via `CACHE_URL=yasd://host:7379?poolSize=4`. One TCP port serves the
-RESP-like protocol **and** `GET /healthz` (JSON: entries, hits/misses, …).
+RESP-like protocol plus `GET /livez`, `GET /readyz`, and `GET /healthz`.
+`/livez` is minimal liveness, `/readyz` is readiness, and `/healthz` is
+redacted by default (`{"status":"ok"}`).
 
 ```bash
 npm run build
@@ -184,8 +186,10 @@ node dist/cli.js --port 7379 --snapshot ./data/snapshot.json \
 ```
 
 Protect the RESP port with a password, TLS, or both. Password auth is per
-connection; `/healthz` stays open for load balancers. Use `yasds://` on clients
-when TLS is enabled:
+connection; `/livez` and `/readyz` stay open for load balancers. To expose
+operational health data, set `YASD_HEALTH_DETAILS=true`. Add
+`YASD_HEALTH_TOKEN` to require `Authorization: Bearer <token>` for those
+details. Use `yasds://` on clients when TLS is enabled:
 
 Each connection has a bounded pending-output queue of 1 MiB by default. If a
 slow subscriber fills its queue, YASD disconnects it. Configure the limit with
@@ -239,7 +243,7 @@ const stop = await client.subscribe('presence', (ch, msg) => console.log(ch, msg
 await client.publish('presence', JSON.stringify({ user: 'bob' }));
 await client.reconnectSubscriptions() // restore registered channels after a drop
 
-await client.healthcheck(); // { status: 'ok', entries, ... }
+await client.healthcheck(); // { status: 'ok' } unless health details are enabled
 await client.save();        // snapshot now (also truncates the AOF)
 await stop();
 await client.close();
@@ -308,7 +312,8 @@ db2.clearSlowLog();
 ```
 
 Server mode exposes the same counters plus a slow-**command** log through
-`INFO` (and `GET /healthz`, which serves the same JSON):
+`INFO`. `/healthz` serves that operational JSON only when health details are
+enabled; otherwise it stays redacted.
 
 ```bash
 node dist/cli.js --slow-command-ms 5   # or YASD_SLOW_COMMAND_MS=5
@@ -325,6 +330,9 @@ await client.info();
 
 `aofRecoveryState` is `clean`, `torn-tail`, or `corrupt`. A corrupt AOF stops
 replay at the bad line and rejects further AOF writes until it is repaired.
+
+The equivalent server options are `health: { exposeDetails: true, token }`.
+When `token` is set, details require `Authorization: Bearer <token>`.
 
 Conventions: `hits`/`misses` count cache lookups (`get`/`mget`, plus `ttl`
 misses); `bytes` tracks key + JSON value size; slow thresholds are in ms

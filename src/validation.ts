@@ -101,3 +101,15 @@ export function validateTimeout(value: unknown, name = 'timeoutMs'): number {
   }
   return timeout;
 }
+
+export function validateToken(value: unknown, name = 'token'): string | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    /[\u0000-\u0020\u007f]/.test(value)
+  ) {
+    throw new Error(`${name} must be a non-empty token without whitespace or control characters`);
+  }
+  return value;
+}

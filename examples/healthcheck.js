@@ -5,7 +5,7 @@ const protocol = require(process.env.YASD_TLS_KEY ? 'node:https' : 'node:http')
 const request = protocol.get({
   host: '127.0.0.1',
   port: Number(process.env.YASD_PORT || 7379),
-  path: '/healthz',
+  path: '/readyz',
   rejectUnauthorized: false
 }, response => {
   const healthy = response.statusCode === 200

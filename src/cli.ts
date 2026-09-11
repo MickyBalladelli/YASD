@@ -13,6 +13,8 @@
 //   --default-ttl-ms 15000 CACHE_DEFAULT_TTL_MS
 //   --slow-command-ms 5    YASD_SLOW_COMMAND_MS (slow-command log threshold)
 //   --max-pending-output-bytes 1048576 YASD_MAX_PENDING_OUTPUT_BYTES
+//   --health-details        YASD_HEALTH_DETAILS (expose operational health data)
+//   --health-token secret   YASD_HEALTH_TOKEN (protect operational health data)
 //   --password s3cret      YASD_PASSWORD (AUTH required)
 //   --tls-key key.pem      YASD_TLS_KEY (PEM path; needs --tls-cert)
 //   --tls-cert cert.pem    YASD_TLS_CERT (PEM path; needs --tls-key)
@@ -60,6 +62,15 @@ function stringArg(args: Record<string, string | boolean>, name: string): string
   return value;
 }
 
+function booleanArg(args: Record<string, string | boolean>, name: string): boolean | undefined {
+  const value = args[name];
+  if (value === undefined) return undefined;
+  if (typeof value === 'boolean') return value;
+  if (value === '1' || value.toLowerCase() === 'true') return true;
+  if (value === '0' || value.toLowerCase() === 'false') return false;
+  throw new Error(`--${name} must be true/false or 1/0`);
+}
+
 async function main(): Promise<void> {
   const args = parseArgv(process.argv.slice(2));
   if (args.help === true || args.h === true) {
@@ -68,9 +79,11 @@ async function main(): Promise<void> {
     console.log('  --no-load, --no-save-on-shutdown,');
     console.log('  --max-entries, --max-bytes, --default-ttl-ms, --slow-command-ms,');
     console.log('  --max-pending-output-bytes,');
+    console.log('  --health-details, --health-token <token>,');
     console.log('  --password, --tls-key <pem>, --tls-cert <pem>, --tls-ca <pem>');
     console.log('Env: YASD_PORT YASD_HOST YASD_SNAPSHOT YASD_AOF YASD_AUTO_SAVE_MS YASD_SLOW_COMMAND_MS');
     console.log('     YASD_MAX_PENDING_OUTPUT_BYTES');
+    console.log('     YASD_HEALTH_DETAILS YASD_HEALTH_TOKEN');
     console.log('     CACHE_MAX_ENTRIES CACHE_MAX_BYTES CACHE_DEFAULT_TTL_MS CACHE_NAMESPACE_TTLS');
     console.log('     YASD_PASSWORD YASD_TLS_KEY YASD_TLS_CERT YASD_TLS_CA YASD_TLS_MIN_VERSION');
     console.log('     YASD_TLS_REQUEST_CERT YASD_TLS_REJECT_UNAUTHORIZED');
@@ -117,6 +130,15 @@ async function main(): Promise<void> {
       1
     );
   }
+  const healthDetails = booleanArg(args, 'health-details');
+  const healthToken = stringArg(args, 'health-token');
+  if (healthDetails !== undefined || healthToken !== undefined) {
+    base.health = {
+      ...base.health,
+      ...(healthDetails === undefined ? {} : { exposeDetails: healthDetails }),
+      ...(healthToken === undefined ? {} : { token: healthToken }),
+    };
+  }
   const password = stringArg(args, 'password');
   if (password !== undefined) base.password = password;
   const requirepass = stringArg(args, 'requirepass');
@@ -152,7 +174,7 @@ async function main(): Promise<void> {
 
   await server.start();
   const addr = server.address();
-  console.log(`yasd: listening on ${addr.host}:${addr.port} (health: http://${addr.host}:${addr.port}/healthz)`);
+  console.log(`yasd: listening on ${addr.host}:${addr.port} (ready: http://${addr.host}:${addr.port}/readyz)`);
   if (base.snapshotPath) console.log(`yasd: snapshot: ${base.snapshotPath}`);
   if (base.aofPath) console.log(`yasd: aof: ${base.aofPath}`);
 }

@@ -6,7 +6,7 @@ services:
     build: .
     container_name: yasd
     ports:
-      # Single port serves the RESP-like protocol AND http://:7379/healthz
+      # Single port serves RESP plus /livez, /readyz, and /healthz
       - "7379:7379"
     environment:
       YASD_PORT: "7379"

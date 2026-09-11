@@ -65,6 +65,7 @@ import {
   validateNonNegativeNumber,
   validatePort,
   validatePositiveSafeInteger,
+  validateToken,
 } from './validation';
 
 export const DEFAULT_HOST = '127.0.0.1'
@@ -128,14 +129,23 @@ export interface YasdServerOptions {
   slowCommandMs?: number;
   /** Maximum queued output bytes per connection. Slow consumers are disconnected. Default 1 MiB. */
   maxPendingOutputBytes?: number;
+  /** HTTP health exposure. Details are redacted unless exposeDetails is enabled. */
+  health?: YasdHealthOptions;
   /**
    * Password for the AUTH command. When set, every command except AUTH/QUIT
-   * is rejected with NOAUTH until authenticated. HTTP /healthz stays open
-   * (load balancers shouldn't need the secret).
+   * is rejected with NOAUTH until authenticated. HTTP /livez and /readyz stay
+   * open; operational /healthz details use the separate health policy.
    */
   password?: string;
   /** TLS identity and optional client-certificate settings. */
   tls?: YasdServerTlsOptions;
+}
+
+export interface YasdHealthOptions {
+  /** Include counters, channels, persistence, and slow-command data in /healthz. Default false. */
+  exposeDetails?: boolean;
+  /** Bearer token required when health details are exposed. Token implies exposeDetails. */
+  token?: string;
 }
 
 export interface ServerInfo {
@@ -163,6 +173,12 @@ export interface ServerInfo {
   /** Newest-first slow-command ring (capped at 100). */
   slowLog: SlowEntry[];
 }
+
+export interface HealthStatus {
+  status: 'ok' | 'not_ready';
+}
+
+export type HealthResponse = HealthStatus | ServerInfo;
 
 interface ConnState {
   socket: net.Socket;
@@ -192,6 +208,7 @@ interface ParsedHttpRequest {
   path: string;
   query: string;
   version: string;
+  headers: Map<string, string>;
 }
 
 function isHttpMethodStart(chunk: Buffer): boolean {
@@ -220,12 +237,16 @@ function parseHttpRequest(head: Buffer): ParsedHttpRequest | undefined {
   const requestLine = lines.shift() ?? '';
   const match = /^([^\s]+) (\/[^\s?#]*)(?:\?([^\s#]*))? (HTTP\/\d+\.\d+)$/.exec(requestLine);
   if (!match || !HTTP_METHOD.test(match[1] as string)) return undefined;
+  const headers = new Map<string, string>();
   for (const line of lines) {
     const colon = line.indexOf(':');
     if (colon <= 0 || !HTTP_HEADER_NAME.test(line.slice(0, colon))) return undefined;
     if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(line.slice(colon + 1))) {
       return undefined;
     }
+    const name = line.slice(0, colon).toLowerCase();
+    if (name === 'authorization' && headers.has(name)) return undefined;
+    headers.set(name, line.slice(colon + 1).trim());
   }
   const path = match[2] as string;
   const query = match[3] ?? '';
@@ -241,6 +262,7 @@ function parseHttpRequest(head: Buffer): ParsedHttpRequest | undefined {
     path,
     query,
     version: match[4] as string,
+    headers,
   };
 }
 
@@ -267,6 +289,28 @@ function parseTlsVersion(value: string): tls.SecureVersion {
   const allowed = new Set(['TLSv1', 'TLSv1.1', 'TLSv1.2', 'TLSv1.3']);
   if (!allowed.has(value)) throw new Error(`invalid YASD_TLS_MIN_VERSION: ${value}`);
   return value as tls.SecureVersion;
+}
+
+interface ResolvedHealthOptions {
+  exposeDetails: boolean;
+  token?: string;
+}
+
+function resolveHealthOptions(value: unknown): ResolvedHealthOptions {
+  if (value === undefined) return { exposeDetails: false };
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('health options must be an object');
+  }
+  const options = value as YasdHealthOptions;
+  const token = validateToken(options.token, 'health.token');
+  const exposeDetails = options.exposeDetails === undefined ? token !== undefined : options.exposeDetails;
+  if (typeof exposeDetails !== 'boolean') {
+    throw new Error(`health.exposeDetails must be true or false, got ${String(options.exposeDetails)}`);
+  }
+  if (token !== undefined && !exposeDetails) {
+    throw new Error('health.token requires health.exposeDetails=true');
+  }
+  return { exposeDetails, ...(token === undefined ? {} : { token }) };
 }
 
 export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): YasdServerOptions {
@@ -310,6 +354,17 @@ export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Yasd
   }
   if (env.YASD_LOAD_ON_START !== undefined) opts.loadOnStart = env.YASD_LOAD_ON_START !== '0';
   if (env.YASD_SAVE_ON_SHUTDOWN !== undefined) opts.saveOnShutdown = env.YASD_SAVE_ON_SHUTDOWN !== '0';
+  const healthToken = env.YASD_HEALTH_TOKEN === undefined
+    ? undefined
+    : validateToken(env.YASD_HEALTH_TOKEN, 'YASD_HEALTH_TOKEN');
+  if (healthToken !== undefined || env.YASD_HEALTH_DETAILS !== undefined) {
+    opts.health = resolveHealthOptions({
+      exposeDetails: env.YASD_HEALTH_DETAILS === undefined
+        ? undefined
+        : parseBoolean(env.YASD_HEALTH_DETAILS, 'YASD_HEALTH_DETAILS'),
+      ...(healthToken === undefined ? {} : { token: healthToken }),
+    });
+  }
   const password = env.YASD_PASSWORD ?? env.YASD_REQUIREPASS;
   if (password !== undefined && password.length > 0) opts.password = password;
   const tlsKeyPath = env.YASD_TLS_KEY;
@@ -450,13 +505,16 @@ export class YasdServer {
   readonly saveOnShutdown: boolean;
   readonly autoSaveMs: number;
   readonly maxPendingOutputBytes: number;
+  readonly healthExposeDetails: boolean;
   readonly authRequired: boolean;
   readonly tlsEnabled: boolean;
   private password: string | undefined;
+  private healthToken: string | undefined;
   private tlsOptions: YasdServerTlsOptions | undefined;
   private slow = new SlowLog();
 
   constructor(options: YasdServerOptions = {}) {
+    const health = resolveHealthOptions(options.health);
     this.host = options.host === undefined ? DEFAULT_HOST : validateHost(options.host, 'host');
     this.port = options.port === undefined ? DEFAULT_PORT : validatePort(options.port, 'port');
     this.kv = new KVCache(options.cache, key => this.onCacheExpiry(key))
@@ -471,6 +529,8 @@ export class YasdServer {
     this.maxPendingOutputBytes = options.maxPendingOutputBytes === undefined
       ? DEFAULT_MAX_PENDING_OUTPUT_BYTES
       : validatePositiveSafeInteger(options.maxPendingOutputBytes, 'maxPendingOutputBytes');
+    this.healthExposeDetails = health.exposeDetails;
+    this.healthToken = health.token;
     this.password = options.password && options.password.length > 0 ? options.password : undefined;
     this.authRequired = this.password !== undefined;
     if (options.tls && (!options.tls.key || !options.tls.cert)) {
@@ -793,6 +853,18 @@ export class YasdServer {
     state.socket.destroy();
   }
 
+  private isReady(): boolean {
+    return !this.closing &&
+      this.netServer?.listening === true &&
+      !this.aofDegraded &&
+      this.aof.recoveryState !== 'corrupt';
+  }
+
+  private healthAuthorized(request: ParsedHttpRequest): boolean {
+    return this.healthToken === undefined ||
+      request.headers.get('authorization') === `Bearer ${this.healthToken}`;
+  }
+
   private onData(state: ConnState, chunk: Buffer): void {
     // Single-port HTTP: buffer an ASCII method prefix until the full header arrives.
     if (state.httpBuf !== null) {
@@ -832,7 +904,35 @@ export class YasdServer {
       this.writeHttpResponse(state, 405, 'Method Not Allowed', { error: 'method not allowed' }, 'Allow: GET\r\n');
       return;
     }
+    if (request.path === '/livez') {
+      this.writeHttpResponse(state, 200, 'OK', { status: 'ok' });
+      return;
+    }
+    if (request.path === '/readyz') {
+      const ready = this.isReady();
+      this.writeHttpResponse(
+        state,
+        ready ? 200 : 503,
+        ready ? 'OK' : 'Service Unavailable',
+        { status: ready ? 'ok' : 'not_ready' }
+      );
+      return;
+    }
     if (request.path === '/healthz' || request.path === '/health') {
+      if (!this.healthExposeDetails) {
+        this.writeHttpResponse(state, 200, 'OK', { status: 'ok' });
+        return;
+      }
+      if (!this.healthAuthorized(request)) {
+        this.writeHttpResponse(
+          state,
+          401,
+          'Unauthorized',
+          { error: 'health details require authorization' },
+          'WWW-Authenticate: Bearer\r\n'
+        );
+        return;
+      }
       this.writeHttpResponse(state, 200, 'OK', this.info());
       return;
     }

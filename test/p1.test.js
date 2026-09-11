@@ -495,10 +495,10 @@ async function runTests() {
     await client.connect();
     await client.set('k', { v: 1 }, 60000);
 
-    const rawHttp = request => new Promise((resolve, reject) => {
+    const rawHttp = (request, targetPort = port) => new Promise((resolve, reject) => {
       const chunks = [];
       let timer;
-      const sock = require('net').createConnection({ host: '127.0.0.1', port }, () => {
+      const sock = require('net').createConnection({ host: '127.0.0.1', port: targetPort }, () => {
         sock.write(request);
       });
       sock.on('data', chunk => chunks.push(chunk));
@@ -538,6 +538,8 @@ async function runTests() {
       }, 3000);
     });
     assert.match(partialHealth, /^HTTP\/1\.1 200 OK/);
+    assert.match(await rawHttp('GET /livez HTTP/1.1\r\nHost: localhost\r\n\r\n'), /^HTTP\/1\.1 200 OK/);
+    assert.match(await rawHttp('GET /readyz HTTP/1.1\r\nHost: localhost\r\n\r\n'), /^HTTP\/1\.1 200 OK/);
     assert.match(await rawHttp('POST /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n'), /^HTTP\/1\.1 405 Method Not Allowed/);
     assert.match(await rawHttp('GET /healthz?bad=%ZZ HTTP/1.1\r\nHost: localhost\r\n\r\n'), /^HTTP\/1\.1 400 Bad Request/);
     assert.match(await rawHttp('GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n'), /^HTTP\/1\.1 505 HTTP Version Not Supported/);
@@ -551,8 +553,25 @@ async function runTests() {
     });
     assert.strictEqual(health.status, 200);
     assert.strictEqual(health.body.status, 'ok');
-    assert.ok(health.body.entries >= 1);
+    assert.deepStrictEqual(health.body, { status: 'ok' });
     assert.deepStrictEqual(await client.healthcheck().then(h => h.status), 'ok');
+
+    const detailedServer = new YasdServer({
+      host: '127.0.0.1', port: 0, health: { token: 'health-secret' },
+    });
+    await detailedServer.start();
+    const detailedPort = detailedServer.address().port;
+    assert.match(
+      await rawHttp('GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n', detailedPort),
+      /^HTTP\/1\.1 401 Unauthorized/
+    );
+    const detailed = await rawHttp(
+      'GET /healthz HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer health-secret\r\n\r\n',
+      detailedPort
+    );
+    assert.match(detailed, /^HTTP\/1\.1 200 OK/);
+    assert.match(detailed, /"channels"/);
+    await detailedServer.close();
 
     assert.strictEqual(await client.save(), 'OK');
     assert.ok(fs.existsSync(snap), 'snapshot written');

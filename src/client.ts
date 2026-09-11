@@ -16,7 +16,7 @@ import * as https from 'https';
 import { Value, JsonValue } from './types';
 import { KVStats, TransactionError } from './cache';
 import { RespDecoder, RespReply, encodeCommand } from './protocol';
-import { DEFAULT_PORT, ServerInfo } from './server';
+import { DEFAULT_PORT, HealthResponse, ServerInfo } from './server';
 import {
   parsePort,
   parseStrictInteger,
@@ -26,6 +26,7 @@ import {
   validatePort,
   validatePositiveSafeInteger,
   validateTimeout,
+  validateToken,
 } from './validation';
 
 const RECONNECT_MAX_ATTEMPTS = 4;
@@ -44,6 +45,8 @@ export interface YasdClientOptions {
   requestTimeoutMs?: number;
   /** Server password (AUTH). Also read from CACHE_URL userinfo/query. */
   password?: string;
+  /** Bearer token for protected HTTP health details. */
+  healthToken?: string;
   /** TLS: `true` for defaults, or `tls.ConnectionOptions` (ca, rejectUnauthorized, ...). */
   tls?: boolean | tls.ConnectionOptions;
 }
@@ -101,6 +104,7 @@ interface ResolvedClientOptions {
   poolSize: number;
   requestTimeoutMs: number;
   password: string | undefined;
+  healthToken: string | undefined;
   tlsOptions: tls.ConnectionOptions | undefined;
 }
 
@@ -124,6 +128,7 @@ function resolveClientOptions(options: YasdClientOptions): ResolvedClientOptions
     password: options.password === undefined
       ? fromUrl?.password
       : validatePassword(options.password, 'password'),
+    healthToken: validateToken(options.healthToken, 'healthToken'),
     tlsOptions: resolveTlsOptions(
       options.tls,
       fromUrl === undefined ? undefined : fromUrl.tls === true
@@ -222,6 +227,7 @@ export class YasdClient {
   private poolSize: number;
   private requestTimeoutMs: number;
   private password: string | undefined;
+  private healthToken: string | undefined;
   private tlsOptions: tls.ConnectionOptions | undefined;
   private pool: PooledConn[] = [];
   private roundRobin = 0;
@@ -246,6 +252,7 @@ export class YasdClient {
     this.poolSize = resolved.poolSize;
     this.requestTimeoutMs = resolved.requestTimeoutMs;
     this.password = resolved.password;
+    this.healthToken = resolved.healthToken;
     this.tlsOptions = resolved.tlsOptions;
   }
 
@@ -302,15 +309,18 @@ export class YasdClient {
     throw new Error(`unexpected PING reply: ${JSON.stringify(reply)}`);
   }
 
-  /** HTTP(S) `/healthz` against the server port. Throws when unhealthy. */
-  async healthcheck(timeoutMs = 3000): Promise<ServerInfo> {
+  /** HTTP(S) `/healthz` against the server port. Returns redacted health by default. */
+  async healthcheck(timeoutMs = 3000): Promise<HealthResponse> {
     const timeout = validateTimeout(timeoutMs, 'healthcheck timeoutMs');
-    return new Promise<ServerInfo>((resolve, reject) => {
+    return new Promise<HealthResponse>((resolve, reject) => {
       const requestOptions: http.RequestOptions = {
         host: this.host,
         port: this.port,
         path: '/healthz',
         timeout,
+        ...(this.healthToken === undefined
+          ? {}
+          : { headers: { authorization: `Bearer ${this.healthToken}` } }),
       };
       const onResponse = (res: http.IncomingMessage): void => {
         let body = '';
@@ -323,7 +333,7 @@ export class YasdClient {
             return;
           }
           try {
-            resolve(JSON.parse(body) as ServerInfo);
+            resolve(JSON.parse(body) as HealthResponse);
           } catch (err) {
             reject(err as Error);
           }

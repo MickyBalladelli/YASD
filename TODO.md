@@ -88,7 +88,7 @@ source.
   fully incremental. `src/server.ts:438-447` only recognizes `GET ` when the
   first TCP chunk already contains four bytes. Partial HTTP writes are treated
   as RESP and dropped. Also parse method, path, query, and HTTP version strictly.
-- [ ] Decide what health data may be public. `/healthz` exposes channels,
+- [x] Decide what health data may be public. `/healthz` exposes channels,
   counters, TLS/auth flags, and slow-command details without auth
   (`src/server.ts:456-492`). Add a minimal liveness endpoint, a readiness
   endpoint, and optional protection/redaction for operational data.
