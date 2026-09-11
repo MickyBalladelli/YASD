@@ -669,7 +669,7 @@ export class Executor {
         continue;
       }
 
-      const nextRow = { ...row };
+      const nextRow: Row = Object.assign(Object.create(null), row);
       for (const { column, value } of preparedSet) {
         nextRow[column] = value;
       }

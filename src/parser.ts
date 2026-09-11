@@ -371,8 +371,9 @@ class Parser {
         primaryKey = this.expectIdentifier();
         this.consume(')');
         primaryKeyDeclarations++;
-        if (this.peek() === ',') {
-          this.consume();
+        if (this.peek() !== ')') {
+          this.consume(',');
+          if (this.peek() === ')') throw new Error('Unexpected trailing comma');
         }
         continue;
       }
@@ -457,9 +458,9 @@ class Parser {
       columns = [];
       while (this.peek() !== ')') {
         columns.push(this.expectIdentifier());
-        if (this.peek() === ',') {
-          this.consume();
-        }
+        if (this.peek() === ')') break;
+        this.consume(',');
+        if (this.peek() === ')') throw new Error('Unexpected trailing comma');
       }
       this.consume(')');
     }
@@ -470,9 +471,9 @@ class Parser {
     const rowValues: Value[] = [];
     while (this.peek() !== ')') {
       rowValues.push(this.parseValue());
-      if (this.peek() === ',') {
-        this.consume();
-      }
+      if (this.peek() === ')') break;
+      this.consume(',');
+      if (this.peek() === ')') throw new Error('Unexpected trailing comma');
     }
     this.consume(')');
     
@@ -485,9 +486,9 @@ class Parser {
       const nextRow: Value[] = [];
       while (this.peek() !== ')') {
         nextRow.push(this.parseValue());
-        if (this.peek() === ',') {
-          this.consume();
-        }
+        if (this.peek() === ')') break;
+        this.consume(',');
+        if (this.peek() === ')') throw new Error('Unexpected trailing comma');
       }
       this.consume(')');
       values.push(nextRow);

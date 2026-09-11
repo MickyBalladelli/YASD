@@ -4,6 +4,8 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { isIncompleteJson } from './json-prefix';
+import { DatabaseError } from './errors';
 import { KVCache, SnapshotEntry, KVBatchEntry } from './cache';
 
 export interface SnapshotFile {
@@ -119,6 +121,11 @@ function isAofMutation(value: unknown): value is AofMutation {
         ((hasOwn(value, 'expiresAt') && isFiniteNumber(value.expiresAt)) ||
           (hasOwn(value, 'ttlMs') && isFiniteNumber(value.ttlMs)))
       )
+    case 'patch':
+      return Array.isArray(value.entries) && Array.isArray(value.deleted) &&
+        value.deleted.every(key => typeof key === 'string') &&
+        value.entries.every(entry => isRecord(entry) && typeof entry.key === 'string' &&
+          hasOwn(entry, 'value') && (!hasOwn(entry, 'expiresAt') || isFiniteNumber(entry.expiresAt)))
     case 'persist':
       return typeof value.key === 'string'
     case 'incr':
@@ -263,6 +270,12 @@ export function applyAofOp(cache: KVCache, op: AofOp): void {
     case 'incr':
       cache.incr(op.key, op.by);
       break;
+    case 'patch':
+      cache.atomic(() => {
+        for (const key of op.deleted) cache.del(key);
+        for (const entry of op.entries) cache.setAt(entry.key, entry.value, entry.expiresAt);
+      });
+      break;
     case 'transaction':
       cache.atomic(() => {
         for (const child of op.ops) applyAofOp(cache, child);
@@ -343,7 +356,15 @@ export class AofLog {
     validateAofOp(op)
     if (this.lastSeq >= Number.MAX_SAFE_INTEGER) throw new Error('AOF sequence exhausted');
     const record: AofRecord = { version: 1, seq: this.lastSeq + 1, op };
-    fs.appendFileSync(this.filePath, JSON.stringify(record) + '\n', 'utf8');
+    const encoded = JSON.stringify(record) + '\n';
+    try {
+      fs.appendFileSync(this.filePath, encoded, 'utf8');
+    } catch (error) {
+      // A failed append may have written a prefix. Never append past that prefix.
+      this.recoveryStatus = 'corrupt';
+      this.recoveryDetail = 'AOF append failed; reopen and repair before writing';
+      throw error;
+    }
     this.lastSeq = record.seq;
   }
 

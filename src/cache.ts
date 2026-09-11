@@ -119,7 +119,9 @@ import { cloneJsonValue } from './json';
 import { DatabaseError } from './errors';
 
 function validateTTL(ttlMs: number, what: string): number {
-  return validateNonNegativeNumber(ttlMs, what);
+  const ttl = validateNonNegativeNumber(ttlMs, what);
+  if (ttl > Number.MAX_SAFE_INTEGER - Date.now()) throw new DatabaseError(`${what} deadline exceeds safe epoch range`, 'INVALID_VALUE');
+  return ttl;
 }
 
 export function validateKVOptions(options: KVOptions = {}): KVOptions {
@@ -776,7 +778,7 @@ export class KVCache {
       return -2;
     }
     if (entry.expiresAt === undefined) return -1;
-    return Math.max(0, entry.expiresAt - Date.now());
+    return Math.ceil(Math.max(0, entry.expiresAt - Date.now()));
   }
 
   /** Absolute expiry deadline; undefined = persistent, null = missing/expired. */
@@ -868,7 +870,7 @@ export class KVCache {
   startSweeper(intervalMs?: number): void {
     const ms = intervalMs === undefined
       ? this.sweepIntervalMs
-      : validateNonNegativeNumber(intervalMs, 'sweepIntervalMs');
+      : validateTimeout(intervalMs, 'sweepIntervalMs');
     if (!(ms > 0)) return;
     this.stopSweeper();
     this.timer = setInterval(() => {
@@ -921,7 +923,12 @@ export class KVCache {
       const tx = this.multi();
       tx.watch(...keys);
       attempts++;
-      value = await fn(tx);
+      try {
+        value = await fn(tx);
+      } catch (error) {
+        if (!tx.finished) tx.discard();
+        throw error;
+      }
       if (tx.finished) {
         return { committed: false, attempts, results: null, value };
       }

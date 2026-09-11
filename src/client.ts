@@ -92,6 +92,12 @@ function resolveTlsOptions(
   }
   if (urlTls === false) throw new Error(`${name} conflicts with the URL TLS scheme`);
   const tlsOptions = value as tls.ConnectionOptions;
+  for (const key of ['host', 'port', 'path', 'socket', 'servername', 'lookup'] as const) {
+    // servername is a legitimate certificate identity override, not routing.
+    if (key !== 'servername' && Object.prototype.hasOwnProperty.call(tlsOptions, key)) {
+      throw new DatabaseError(`${name}.${key} must not override transport routing`, 'INVALID_CONFIG');
+    }
+  }
   const hasKey = tlsOptions.key !== undefined;
   const hasCert = tlsOptions.cert !== undefined;
   if (hasKey !== hasCert && tlsOptions.pfx === undefined) {
@@ -145,7 +151,7 @@ export function parseCacheUrl(url: string): ParsedCacheUrl {
   const trimmed = url.trim();
   // yasd://[[user]:password@]host[:port][?poolSize=&password=] — yasds:// enables TLS.
   const match = /^(yasds?):\/\/(?:([^@/?#]*)@)?(\[[^\]]+\]|[^/:?#]+)(?::(\d+))?(?:\?(.*))?$/.exec(trimmed);
-  if (!match) throw new Error(`invalid CACHE_URL (want yasd://host:port): ${url}`);
+  if (!match) throw new DatabaseError('invalid CACHE_URL (want yasd://host:port)', 'INVALID_CONFIG');
   const tls = match[1] === 'yasds';
   const userinfo = match[2];
   const rawHost = match[3] as string;
@@ -343,7 +349,7 @@ export class YasdClient {
       };
       const req = this.tlsOptions === undefined
         ? http.get(requestOptions, onResponse)
-        : https.get({ ...requestOptions, ...this.tlsOptions }, onResponse);
+        : https.get({ ...this.tlsOptions, ...requestOptions }, onResponse);
       req.on('timeout', () => {
         req.destroy(new Error('healthcheck timed out'));
       });
@@ -707,7 +713,7 @@ export class YasdClient {
       let socket: net.Socket;
       try {
         socket = this.tlsOptions !== undefined
-          ? tls.connect({ host: this.host, port: this.port, ...this.tlsOptions })
+          ? tls.connect({ ...this.tlsOptions, host: this.host, port: this.port })
           : net.createConnection({ host: this.host, port: this.port });
       } catch (err) {
         reject(err as Error);
@@ -1140,7 +1146,7 @@ export class YasdTransaction {
         let s: net.Socket;
         try {
           s = this.tlsOptions !== undefined
-            ? tls.connect({ host: this.host, port: this.port, ...this.tlsOptions })
+            ? tls.connect({ ...this.tlsOptions, host: this.host, port: this.port })
             : net.createConnection({ host: this.host, port: this.port });
         } catch (err) {
           reject(err as Error);

@@ -28,6 +28,8 @@
 import * as net from 'net';
 import * as tls from 'tls';
 import * as fs from 'fs';
+import * as path from 'path';
+import { DatabaseError, wireError } from './errors';
 import { performance } from 'perf_hooks';
 import { SlowLog, SlowEntry, checkSlowThreshold } from './metrics';
 import {
@@ -1279,7 +1281,11 @@ export class YasdServer {
       }
       return result;
     };
-    const result = this.aof.enabled ? this.kv.atomic(commit) : commit();
+    const result = this.aof.enabled
+      ? this.kv.atomicChanges(() => operation(effects), (entries, deleted) => {
+          if (entries.length || deleted.length) this.appendAof({ op: 'patch', entries, deleted });
+        })
+      : commit();
     for (const event of effects.invalidations) {
       this.publishInvalidate(event);
     }
@@ -1467,8 +1473,8 @@ export class YasdServer {
           state.txQueue.push({ cmd, args });
           return { kind: 'simple', value: 'QUEUED' };
         }
-        if (this.aof.enabled && AOF_COMMANDS.has(cmd)) {
-          return this.kv.atomic(() => this.executeCommand(state, cmd, args));
+        if (AOF_COMMANDS.has(cmd)) {
+          return this.runCacheMutation(effects => this.executeCommand(state, cmd, args, effects));
         }
         return this.executeCommand(state, cmd, args);
       }
@@ -1497,7 +1503,7 @@ export class YasdServer {
     const effects: TransactionEffects = { aof: [], invalidations: [] };
     const abort = Symbol('transaction aborted');
     try {
-      this.kv.atomic(() => {
+      this.kv.atomicChanges(() => {
         let failed = false;
         for (const op of queue) {
           try {

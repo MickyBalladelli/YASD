@@ -31,6 +31,7 @@ export function cloneJsonValue(value: unknown, what = 'value'): Value {
     ancestors.add(object);
     try {
       const out: Value[] | Record<string, Value> = array ? [] : {};
+      if (array && (object as Value[]).length > MAX_JSON_NODES - nodes) fail('exceeds JSON node limits');
       const keys = array ? Array.from({ length: (object as Value[]).length }, (_, i) => String(i)) : Object.keys(object);
       if (keys.length > MAX_JSON_NODES - nodes) fail('exceeds JSON node limits');
       for (const key of keys) {
