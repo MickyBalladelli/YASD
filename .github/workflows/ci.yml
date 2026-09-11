@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Node ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['18.x', '20.x', '22.x', '24.x']
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Confirm clean checkout has no build output
+        run: test ! -e dist
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+      - name: Verify package contents
+        run: npm run package:check
+
+      - name: Run server smoke test
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict')
+          const { YasdClient, YasdServer } = require('./dist/index.js')
+
+          async function main() {
+            const server = new YasdServer({
+              host: '127.0.0.1',
+              port: 0,
+              cache: { sweepIntervalMs: 0 },
+              saveOnShutdown: false,
+            })
+            let client
+            try {
+              await server.start()
+              client = new YasdClient({
+                host: '127.0.0.1',
+                port: server.address().port,
+              })
+              await client.connect()
+              assert.equal(await client.ping(), 'PONG')
+              await client.set('ci:smoke', { ok: true })
+              assert.deepEqual(await client.get('ci:smoke'), { ok: true })
+            } finally {
+              if (client) await client.close()
+              await server.close()
+            }
+          }
+
+          main().catch(error => {
+            console.error(error)
+            process.exitCode = 1
+          })
+          NODE

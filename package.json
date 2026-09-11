@@ -35,9 +35,11 @@
   },
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
     "test": "npm run build && node test/basic.test.js && node test/kv.test.js && node test/p1.test.js && node test/transactions.test.js && node test/metrics.test.js && node test/profiling.test.js && node test/fuzz.test.js",
     "benchmark:indexes": "npm run build && node --expose-gc benchmark/indexes.js",
     "benchmark:load": "npm run build && node --expose-gc benchmark/load.js",
+    "package:check": "npm pack --dry-run",
     "serve": "node dist/cli.js",
     "dev": "node test/server.js",
     "prepublish": "npm run build"

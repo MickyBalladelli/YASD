@@ -174,7 +174,7 @@ source.
 - [x] Add concurrency and load benchmarks for LRU, expiry sweeping, indexed
   reads, UPDATE/DELETE, pub/sub fanout, pooled client traffic, and persistence.
   Track latency percentiles and memory, not only operation counts.
-- [ ] Add CI that runs build, tests, type checks, packaging, and a short server
+- [x] Add CI that runs build, tests, type checks, packaging, and a short server
   smoke test on supported Node versions. Do not rely on a pre-existing `dist/`
   directory.
 

@@ -417,6 +417,10 @@ fanout, pooled client traffic, AOF appends, and snapshot saves. Results include
 p50/p95/p99/max latency, throughput, heap/RSS deltas and peaks. The persistence
 run leaves artifacts under a temporary directory named in its JSON output.
 
+CI runs on Node 18, 20, 22, and 24. Each job starts from a checkout without
+`dist/`, runs the build, type check, tests, package dry-run, and a short
+server/client smoke test.
+
 ## Test Server
 
 A test server is included in the `test/` directory. Run it to see YASD in action:
