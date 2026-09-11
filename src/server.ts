@@ -1058,8 +1058,12 @@ export class YasdServer {
   /** Write immediately until Node signals backpressure, then queue bounded output. */
   private writeSocket(state: ConnState, data: Buffer): boolean {
     if (state.outputClosed || state.closeWhenDrained || state.socket.destroyed) return false;
+    if (state.outputQueueBytes + state.socket.writableLength + data.length > this.maxPendingOutputBytes) {
+      this.disconnectSlowConsumer(state);
+      return false;
+    }
     if (state.outputBackpressured || state.outputQueue.length > 0) {
-      if (state.outputQueueBytes + data.length > this.maxPendingOutputBytes) {
+      if (state.outputQueueBytes + state.socket.writableLength + data.length > this.maxPendingOutputBytes) {
         this.disconnectSlowConsumer(state);
         return false;
       }

@@ -152,7 +152,7 @@ async function runTests() {
     fs.writeFileSync(aofPath, `${records[0]}\nnot json\n${records[1]}\n`)
 
     const log = new AofLog(aofPath)
-    const db = new YASD({ sweepIntervalMs: 0 })
+    const db = new KVCache({ sweepIntervalMs: 0 })
     assert.strictEqual(await log.replay(db), 1)
     assert.strictEqual(db.get('before'), 1)
     assert.strictEqual(db.get('after'), undefined)
@@ -177,7 +177,7 @@ async function runTests() {
     log.append({ op: 'set', key: 'ttl', value: 1, expiresAt: deadline });
     await sleep(40);
 
-    const db = new YASD({ sweepIntervalMs: 0 });
+    const db = new KVCache({ sweepIntervalMs: 0 });
     assert.strictEqual(await log.replay(db), 1);
     const afterReplay = Date.now();
     const remaining = db.ttl('ttl');
