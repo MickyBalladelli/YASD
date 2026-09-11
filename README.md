@@ -222,6 +222,22 @@ slow subscriber fills its queue, YASD disconnects it. Configure the limit with
 `maxPendingOutputBytes`, `--max-pending-output-bytes`, or
 `YASD_MAX_PENDING_OUTPUT_BYTES`.
 
+Cache writes also have separate UTF-8 limits: `maxKeyBytes` defaults to 1 KiB
+and `maxValueBytes` defaults to 4 MiB. Set them under `cache`, or with
+`--max-key-bytes` / `--max-value-bytes` and `CACHE_MAX_KEY_BYTES` /
+`CACHE_MAX_VALUE_BYTES`. The aggregate `maxBytes` limit still applies.
+
+Operational limits are opt-in: `maxCommandMs` returns an error and closes a
+connection after an over-budget synchronous command, `idleConnectionTimeoutMs`
+closes inactive connections, and `shutdownDeadlineMs` bounds socket draining
+and the final persistence wait. Their CLI/env forms are
+`--max-command-ms` / `YASD_MAX_COMMAND_MS`,
+`--idle-connection-timeout-ms` / `YASD_IDLE_CONNECTION_TIMEOUT_MS`, and
+`--shutdown-deadline-ms` / `YASD_SHUTDOWN_DEADLINE_MS`. A value of `0`
+disables the first two; shutdown defaults to 2 seconds. JavaScript cannot
+interrupt a synchronous command already running, so the command limit acts
+when that command returns.
+
 ```bash
 YASD_PASSWORD='change-me' \
 YASD_TLS_KEY=./tls/server.key \
@@ -270,6 +286,7 @@ await client.publish('presence', JSON.stringify({ user: 'bob' }));
 await client.reconnectSubscriptions() // restore registered channels after a drop
 
 await client.healthcheck(); // { status: 'ok' } unless health details are enabled
+await client.info();         // includes safe persistence status and limits
 await client.save();        // snapshot now (also truncates the AOF)
 await stop();
 await client.close();
@@ -349,13 +366,17 @@ node dist/cli.js --slow-command-ms 5   # or YASD_SLOW_COMMAND_MS=5
 await client.info();
 // { status, version, uptimeMs, connections, tls, auth,
 //   entries, bytes, hits, misses, evictions, expiries,
-//   aofRecoveryState, aofRecoveryError, subscribers, channels,
+//   aofRecoveryState, aofRecoveryError, persistence, subscribers, channels,
 //   slowCommandMs, slowLog }
 // slowLog: newest-first [{ name, durationMs, at, argc }], capped at 100
 ```
 
 `aofRecoveryState` is `clean`, `torn-tail`, or `corrupt`. A corrupt AOF stops
 replay at the bad line and rejects further AOF writes until it is repaired.
+`persistence.errors` contains only safe component/operation/error-code/time
+metadata; it never includes file paths, cache keys, values, or raw filesystem
+messages. Use `server.persistenceStatus()` in embedded mode or `INFO` over the
+wire to inspect it.
 
 The equivalent server options are `health: { exposeDetails: true, token }`.
 When `token` is set, details require `Authorization: Bearer <token>`.

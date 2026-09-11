@@ -37,11 +37,18 @@ export const DEFAULT_NAMESPACE_TTLS: Record<string, number> = {
   unread: 30_000,
 };
 
+export const DEFAULT_MAX_KEY_BYTES = 1024;
+export const DEFAULT_MAX_VALUE_BYTES = 4 * 1024 * 1024;
+
 export interface KVOptions {
   /** Max live entries; oldest (LRU) evicted first. Default 10_000. */
   maxEntries?: number;
   /** Max total bytes (UTF-8 key bytes + UTF-8 JSON value bytes). Oversized entries reject. Default 64 MiB. */
   maxBytes?: number;
+  /** Max UTF-8 bytes in one key. Default 1 KiB. */
+  maxKeyBytes?: number;
+  /** Max UTF-8 bytes in one JSON-encoded value. Default 4 MiB. */
+  maxValueBytes?: number;
   /** Fallback TTL (ms) when no namespace default matches. Default: persist. */
   defaultTTLMs?: number;
   /** Per-namespace TTL defaults (ms). Merged over DEFAULT_NAMESPACE_TTLS. */
@@ -100,17 +107,10 @@ function utf8ByteLength(value: string): number {
 }
 
 /** Size model: UTF-8 bytes in the key plus UTF-8 bytes in JSON.stringify(value). */
-function estimateSize(key: string, value: Value): number {
-  let jsonLen = 8;
-  try {
-    const json = JSON.stringify(value);
-    if (json !== undefined) {
-      jsonLen = utf8ByteLength(json);
-    }
-  } catch {
-    jsonLen = 64;
-  }
-  return utf8ByteLength(key) + jsonLen;
+function valueByteLength(value: Value): number {
+  const json = JSON.stringify(value);
+  if (json === undefined) throw new Error('value is not JSON-serializable');
+  return utf8ByteLength(json);
 }
 
 /**
@@ -187,6 +187,12 @@ export function validateKVOptions(options: KVOptions = {}): KVOptions {
   const maxBytes = options.maxBytes === undefined
     ? 64 * 1024 * 1024
     : validatePositiveSafeInteger(options.maxBytes, 'maxBytes');
+  const maxKeyBytes = options.maxKeyBytes === undefined
+    ? DEFAULT_MAX_KEY_BYTES
+    : validatePositiveSafeInteger(options.maxKeyBytes, 'maxKeyBytes');
+  const maxValueBytes = options.maxValueBytes === undefined
+    ? DEFAULT_MAX_VALUE_BYTES
+    : validatePositiveSafeInteger(options.maxValueBytes, 'maxValueBytes');
   const defaultTTLMs = options.defaultTTLMs === undefined
     ? undefined
     : validateTTL(options.defaultTTLMs, 'defaultTTLMs');
@@ -212,6 +218,8 @@ export function validateKVOptions(options: KVOptions = {}): KVOptions {
   return {
     maxEntries,
     maxBytes,
+    maxKeyBytes,
+    maxValueBytes,
     ...(defaultTTLMs === undefined ? {} : { defaultTTLMs }),
     namespaceTTLMs,
     sweepIntervalMs,
@@ -241,6 +249,8 @@ export class KVCache {
 
   readonly maxEntries: number;
   readonly maxBytes: number;
+  readonly maxKeyBytes: number;
+  readonly maxValueBytes: number;
   readonly defaultTTLMs?: number;
   readonly namespaceTTLMs: Record<string, number>;
   readonly sweepIntervalMs: number;
@@ -249,6 +259,8 @@ export class KVCache {
     const validated = validateKVOptions(options);
     this.maxEntries = validated.maxEntries as number;
     this.maxBytes = validated.maxBytes as number;
+    this.maxKeyBytes = validated.maxKeyBytes as number;
+    this.maxValueBytes = validated.maxValueBytes as number;
     this.defaultTTLMs = validated.defaultTTLMs;
     this.namespaceTTLMs = validated.namespaceTTLMs as Record<string, number>;
     this.sweepIntervalMs = validated.sweepIntervalMs as number;
@@ -374,6 +386,7 @@ export class KVCache {
    * read-modify-write conflicts between watch time and commit time.
    */
   getVersion(key: string): number {
+    this.assertKeyFits(key);
     return this.keyVersions.get(key) ?? 0;
   }
 
@@ -392,6 +405,7 @@ export class KVCache {
 
   /** O(1) lookup with lazy expiry + LRU touch. */
   get(key: string): Value | undefined {
+    this.assertKeyFits(key);
     const entry = this.map.get(key);
     if (!entry) {
       this.misses++;
@@ -415,6 +429,7 @@ export class KVCache {
    * A single entry larger than `maxBytes` is rejected.
    */
   set(key: string, value: Value, ttlMs?: number): Value {
+    this.assertKeyFits(key);
     const ownedValue = cloneJsonValue(value, 'cache value');
     const ttl = this.resolveTTLMs(key, ttlMs);
     const expiresAt = ttl === undefined ? undefined : Date.now() + ttl;
@@ -423,6 +438,7 @@ export class KVCache {
 
   /** Store a value with an absolute expiry deadline (used by AOF replay). */
   setAt(key: string, value: Value, expiresAt?: number): Value {
+    this.assertKeyFits(key);
     if (expiresAt !== undefined && !Number.isFinite(expiresAt)) {
       throw new Error(`expiresAt must be a finite epoch ms, got ${String(expiresAt)}`);
     }
@@ -431,8 +447,7 @@ export class KVCache {
   }
 
   private setOwned(key: string, ownedValue: Value, expiresAt: number | undefined, returned: Value): Value {
-    const size = estimateSize(key, ownedValue);
-    this.assertEntryFits(key, size);
+    const size = this.assertValueFits(key, ownedValue);
     // Immediate expiry (ttl 0): behave like a write-through miss.
     if (expiresAt !== undefined && expiresAt <= Date.now()) {
       const old = this.map.get(key);
@@ -457,9 +472,34 @@ export class KVCache {
     return returned;
   }
 
+  private assertValueFits(key: string, value: Value): number {
+    this.assertKeyFits(key);
+    const keyBytes = utf8ByteLength(key);
+    if (keyBytes > this.maxKeyBytes) {
+      throw new Error(`cache key exceeds maxKeyBytes (${keyBytes} > ${this.maxKeyBytes})`);
+    }
+    const valueBytes = valueByteLength(value);
+    if (valueBytes > this.maxValueBytes) {
+      throw new Error(`cache value exceeds maxValueBytes (${valueBytes} > ${this.maxValueBytes})`);
+    }
+    const size = keyBytes + valueBytes;
+    this.assertEntryFits(key, size);
+    return size;
+  }
+
+  private assertKeyFits(key: string): void {
+    if (typeof key !== 'string') {
+      throw new Error(`cache key must be a string, got ${String(key)}`);
+    }
+    const keyBytes = utf8ByteLength(key);
+    if (keyBytes > this.maxKeyBytes) {
+      throw new Error(`cache key exceeds maxKeyBytes (${keyBytes} > ${this.maxKeyBytes})`);
+    }
+  }
+
   private assertEntryFits(key: string, size: number): void {
     if (size > this.maxBytes) {
-      throw new Error(`cache entry '${key}' exceeds maxBytes (${size} > ${this.maxBytes})`);
+      throw new Error(`cache entry exceeds maxBytes (${size} > ${this.maxBytes})`);
     }
   }
 
@@ -483,6 +523,7 @@ export class KVCache {
   }
 
   del(key: string): boolean {
+    this.assertKeyFits(key);
     const entry = this.map.get(key);
     if (!entry) return false;
     if (this.isExpired(entry, Date.now())) {
@@ -501,6 +542,7 @@ export class KVCache {
    * Returns the number of keys removed.
    */
   clearPrefix(prefix: string): number {
+    this.assertKeyFits(prefix);
     const needle = prefix + ':';
     let count = 0;
     for (const key of Array.from(this.map.keys())) {
@@ -542,7 +584,7 @@ export class KVCache {
       }
       const value = cloneJsonValue(e.value, 'mset value');
       if (e.ttlMs !== undefined) validateTTL(e.ttlMs, 'ttlMs');
-      this.assertEntryFits(e.key, estimateSize(e.key, value));
+      this.assertValueFits(e.key, value);
       return { key: e.key, value, ttlMs: e.ttlMs };
     });
     for (const e of validated) {
@@ -557,6 +599,7 @@ export class KVCache {
    * TTL is preserved. Returns the new value.
    */
   incr(key: string, by = 1): number {
+    this.assertKeyFits(key);
     if (typeof by !== 'number' || !Number.isFinite(by)) {
       throw new Error(`incr delta must be a finite number, got ${String(by)}`);
     }
@@ -579,8 +622,7 @@ export class KVCache {
     if (!Number.isFinite(next)) {
       throw new Error(`INCR overflow at '${key}'`);
     }
-    const size = estimateSize(key, next);
-    this.assertEntryFits(key, size);
+    const size = this.assertValueFits(key, next);
     const live = this.map.get(key);
     if (live && !this.isExpired(live, Date.now())) {
       this.bytes -= live.size;
@@ -614,10 +656,10 @@ export class KVCache {
    * preserved; new keys fall back to namespace/default resolution (as `set`).
    */
   cas(key: string, expected: Value | undefined, value: Value, ttlMs?: number): boolean {
+    this.assertKeyFits(key);
     const ownedExpected = expected === undefined ? undefined : cloneJsonValue(expected, 'cas expected');
     const ownedValue = cloneJsonValue(value, 'cas value');
-    const size = estimateSize(key, ownedValue);
-    this.assertEntryFits(key, size);
+    const size = this.assertValueFits(key, ownedValue);
     const now = Date.now();
     const entry = this.map.get(key);
     let current: Value | undefined;
@@ -692,7 +734,7 @@ export class KVCache {
       if (!e || typeof e.key !== 'string' || e.value === undefined) continue;
       if (e.expiresAt !== undefined && e.expiresAt <= now) continue;
       const value = cloneJsonValue(e.value, 'snapshot value');
-      this.assertEntryFits(e.key, estimateSize(e.key, value));
+      this.assertValueFits(e.key, value);
       pending.push({ entry: e, value });
     }
     let count = 0;
@@ -702,7 +744,7 @@ export class KVCache {
         this.bytes -= old.size;
         this.map.delete(e.key);
       }
-      const size = estimateSize(e.key, value);
+      const size = this.assertValueFits(e.key, value);
       this.map.set(e.key, { value, expiresAt: e.expiresAt, size });
       this.bytes += size;
       this.bumpVersion(e.key);
@@ -724,6 +766,7 @@ export class KVCache {
 
   /** Ms remaining; -1 = persists; -2 = missing/expired. */
   ttl(key: string): number {
+    this.assertKeyFits(key);
     const entry = this.map.get(key);
     if (!entry) {
       this.misses++;
@@ -740,6 +783,7 @@ export class KVCache {
 
   /** Absolute expiry deadline; undefined = persistent, null = missing/expired. */
   expiration(key: string): number | undefined | null {
+    this.assertKeyFits(key);
     const entry = this.map.get(key);
     if (!entry) return null;
     if (this.isExpired(entry, Date.now())) {
@@ -751,6 +795,7 @@ export class KVCache {
 
   /** Apply an absolute expiry deadline without extending it during replay. */
   expireAt(key: string, expiresAt: number): boolean {
+    this.assertKeyFits(key);
     if (!Number.isFinite(expiresAt)) {
       throw new Error(`expiresAt must be a finite epoch ms, got ${String(expiresAt)}`);
     }
@@ -777,6 +822,7 @@ export class KVCache {
 
   /** Replace a key's TTL. Returns false if missing/expired. */
   expire(key: string, ttlMs: number): boolean {
+    this.assertKeyFits(key);
     const ttl = validateTTL(ttlMs, 'ttlMs');
     const entry = this.map.get(key);
     if (!entry) return false;
@@ -794,6 +840,7 @@ export class KVCache {
 
   /** Drop a key's TTL so it persists. Returns false if missing/expired. */
   persist(key: string): boolean {
+    this.assertKeyFits(key);
     const entry = this.map.get(key);
     if (!entry) return false;
     if (this.isExpired(entry, Date.now())) {

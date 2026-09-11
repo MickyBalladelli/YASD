@@ -153,7 +153,7 @@ source.
 - [x] Add package metadata and an explicit package surface: supported Node
   versions, repository/homepage, exports for CommonJS/types, included files,
   and a version source shared by `package.json`, server INFO, and docs.
-- [ ] Add graceful operational controls: max key/value size, max command time,
+- [x] Add graceful operational controls: max key/value size, max command time,
   idle connection timeout, shutdown deadline, and a way to inspect persistence
   errors without exposing sensitive values.
 

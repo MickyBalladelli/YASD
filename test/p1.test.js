@@ -164,6 +164,8 @@ async function runTests() {
     const server = new YasdServer({ aofPath, loadOnStart: false })
     assert.strictEqual(server.info().aofRecoveryState, 'corrupt')
     assert.match(server.info().aofRecoveryError, /line 2/)
+    assert.strictEqual(server.persistenceStatus().errors[0].code, 'AOF_CORRUPT')
+    assert.ok(!JSON.stringify(server.info()).includes('not json'))
     db.close()
     await server.close()
   })
@@ -477,6 +479,9 @@ async function runTests() {
     assert.strictEqual(info.aofEnabled, true);
     assert.strictEqual(info.aofDegraded, true);
     assert.ok(info.aofLastError);
+    assert.strictEqual(info.aofLastError, 'AOF_WRITE_FAILED')
+    assert.strictEqual(info.persistence.errors[0].component, 'aof')
+    assert.strictEqual(info.persistence.errors[0].operation, 'write')
 
     await client.close();
     await server.close();

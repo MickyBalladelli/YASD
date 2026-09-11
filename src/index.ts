@@ -3,7 +3,7 @@
 // path (for Echo hot feeds, channel lists, presence/typing, rate limits).
 
 import { Executor, SlowQueryEntry, QueryPlan, QueryProfile } from './executor';
-import { KVCache, KVOptions, KVExpiryListener, KVStats, KVBatchEntry, KVTransaction, TransactionError, TxResult, SnapshotEntry, DEFAULT_NAMESPACE_TTLS } from './cache'
+import { KVCache, KVOptions, KVExpiryListener, KVStats, KVBatchEntry, KVTransaction, TransactionError, TxResult, SnapshotEntry, DEFAULT_NAMESPACE_TTLS, DEFAULT_MAX_KEY_BYTES, DEFAULT_MAX_VALUE_BYTES } from './cache'
 import { PubSubHub, PubSubListener, INVALIDATE_CHANNEL, InvalidationEvent } from './pubsub';
 import { parse } from './parser';
 import {
@@ -43,7 +43,17 @@ export type {
   InvalidationEvent
 };
 
-export { parse, KVCache, KVTransaction, TransactionError, DEFAULT_NAMESPACE_TTLS, PubSubHub, INVALIDATE_CHANNEL };
+export {
+  parse,
+  KVCache,
+  KVTransaction,
+  TransactionError,
+  DEFAULT_NAMESPACE_TTLS,
+  DEFAULT_MAX_KEY_BYTES,
+  DEFAULT_MAX_VALUE_BYTES,
+  PubSubHub,
+  INVALIDATE_CHANNEL,
+};
 export { SlowLog, SLOW_LOG_CAP, checkSlowThreshold } from './metrics';
 export type { SlowEntry } from './metrics';
 export { YasdServer, serverOptionsFromEnv, DEFAULT_HOST, DEFAULT_PORT } from './server'
@@ -55,6 +65,10 @@ export type {
   ServerInfo,
   HealthStatus,
   HealthResponse,
+  PersistenceErrorComponent,
+  PersistenceErrorOperation,
+  PersistenceErrorStatus,
+  PersistenceStatus,
 } from './server';
 export { YasdClient, parseCacheUrl } from './client';
 export type { YasdClientOptions, ParsedCacheUrl, SubscribeHandler, TxExecResult, YasdTransactionOptions } from './client';

@@ -10,9 +10,14 @@
 //   --no-save-on-shutdown  YASD_SAVE_ON_SHUTDOWN=0
 //   --max-entries 10000    CACHE_MAX_ENTRIES
 //   --max-bytes 67108864   CACHE_MAX_BYTES
+//   --max-key-bytes 1024   CACHE_MAX_KEY_BYTES
+//   --max-value-bytes 4194304 CACHE_MAX_VALUE_BYTES
 //   --default-ttl-ms 15000 CACHE_DEFAULT_TTL_MS
 //   --slow-command-ms 5    YASD_SLOW_COMMAND_MS (slow-command log threshold)
 //   --max-pending-output-bytes 1048576 YASD_MAX_PENDING_OUTPUT_BYTES
+//   --max-command-ms 1000  YASD_MAX_COMMAND_MS
+//   --idle-connection-timeout-ms 60000 YASD_IDLE_CONNECTION_TIMEOUT_MS
+//   --shutdown-deadline-ms 2000 YASD_SHUTDOWN_DEADLINE_MS
 //   --health-details        YASD_HEALTH_DETAILS (expose operational health data)
 //   --health-token secret   YASD_HEALTH_TOKEN (protect operational health data)
 //   --password s3cret      YASD_PASSWORD (AUTH required)
@@ -27,6 +32,7 @@ import {
   parsePort,
   parseStrictInteger,
   parseStrictNonNegativeNumber,
+  validateTimeout,
 } from './validation';
 
 function parseArgv(argv: string[]): Record<string, string | boolean> {
@@ -77,14 +83,17 @@ async function main(): Promise<void> {
     console.log('Usage: yasd-server [options]');
     console.log('  --port, --host, --snapshot, --aof, --auto-save-ms,');
     console.log('  --no-load, --no-save-on-shutdown,');
-    console.log('  --max-entries, --max-bytes, --default-ttl-ms, --slow-command-ms,');
-    console.log('  --max-pending-output-bytes,');
+    console.log('  --max-entries, --max-bytes, --max-key-bytes, --max-value-bytes,');
+    console.log('  --default-ttl-ms, --slow-command-ms, --max-pending-output-bytes,');
+    console.log('  --max-command-ms, --idle-connection-timeout-ms, --shutdown-deadline-ms,');
     console.log('  --health-details, --health-token <token>,');
     console.log('  --password, --tls-key <pem>, --tls-cert <pem>, --tls-ca <pem>');
-    console.log('Env: YASD_PORT YASD_HOST YASD_SNAPSHOT YASD_AOF YASD_AUTO_SAVE_MS YASD_SLOW_COMMAND_MS');
-    console.log('     YASD_MAX_PENDING_OUTPUT_BYTES');
+    console.log('Env: YASD_PORT YASD_HOST YASD_SNAPSHOT YASD_AOF YASD_AUTO_SAVE_MS');
+    console.log('     YASD_SLOW_COMMAND_MS YASD_MAX_PENDING_OUTPUT_BYTES YASD_MAX_COMMAND_MS');
+    console.log('     YASD_IDLE_CONNECTION_TIMEOUT_MS YASD_SHUTDOWN_DEADLINE_MS');
     console.log('     YASD_HEALTH_DETAILS YASD_HEALTH_TOKEN');
-    console.log('     CACHE_MAX_ENTRIES CACHE_MAX_BYTES CACHE_DEFAULT_TTL_MS CACHE_NAMESPACE_TTLS');
+    console.log('     CACHE_MAX_ENTRIES CACHE_MAX_BYTES CACHE_MAX_KEY_BYTES CACHE_MAX_VALUE_BYTES');
+    console.log('     CACHE_DEFAULT_TTL_MS CACHE_NAMESPACE_TTLS');
     console.log('     YASD_PASSWORD YASD_TLS_KEY YASD_TLS_CERT YASD_TLS_CA YASD_TLS_MIN_VERSION');
     console.log('     YASD_TLS_REQUEST_CERT YASD_TLS_REJECT_UNAUTHORIZED');
     return;
@@ -114,6 +123,14 @@ async function main(): Promise<void> {
   if (maxBytes !== undefined) {
     base.cache.maxBytes = parseStrictInteger(maxBytes, '--max-bytes', 1);
   }
+  const maxKeyBytes = stringArg(args, 'max-key-bytes');
+  if (maxKeyBytes !== undefined) {
+    base.cache.maxKeyBytes = parseStrictInteger(maxKeyBytes, '--max-key-bytes', 1);
+  }
+  const maxValueBytes = stringArg(args, 'max-value-bytes');
+  if (maxValueBytes !== undefined) {
+    base.cache.maxValueBytes = parseStrictInteger(maxValueBytes, '--max-value-bytes', 1);
+  }
   const defaultTtlMs = stringArg(args, 'default-ttl-ms');
   if (defaultTtlMs !== undefined) {
     base.cache.defaultTTLMs = parseStrictNonNegativeNumber(defaultTtlMs, '--default-ttl-ms');
@@ -128,6 +145,33 @@ async function main(): Promise<void> {
       maxPendingOutputBytes,
       '--max-pending-output-bytes',
       1
+    );
+  }
+  const maxCommandMs = stringArg(args, 'max-command-ms');
+  if (maxCommandMs !== undefined) {
+    base.maxCommandMs = validateTimeout(
+      parseStrictNonNegativeNumber(maxCommandMs, '--max-command-ms'),
+      '--max-command-ms'
+    );
+  }
+  const idleConnectionTimeoutMs = stringArg(args, 'idle-connection-timeout-ms');
+  if (idleConnectionTimeoutMs !== undefined) {
+    base.idleConnectionTimeoutMs = validateTimeout(
+      parseStrictNonNegativeNumber(
+        idleConnectionTimeoutMs,
+        '--idle-connection-timeout-ms'
+      ),
+      '--idle-connection-timeout-ms'
+    );
+  }
+  const shutdownDeadlineMs = stringArg(args, 'shutdown-deadline-ms');
+  if (shutdownDeadlineMs !== undefined) {
+    base.shutdownDeadlineMs = validateTimeout(
+      parseStrictNonNegativeNumber(
+        shutdownDeadlineMs,
+        '--shutdown-deadline-ms'
+      ),
+      '--shutdown-deadline-ms'
     );
   }
   const healthDetails = booleanArg(args, 'health-details');

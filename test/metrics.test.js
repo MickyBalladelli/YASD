@@ -234,6 +234,40 @@ async function runTests() {
     assert.throws(() => serverOptionsFromEnv({ YASD_SLOW_COMMAND_MS: '-1' }), />= 0/);
   });
 
+  await test('operational limits are validated and persistence status is safe', async () => {
+    const db = new YASD({ maxKeyBytes: 3, maxValueBytes: 5, sweepIntervalMs: 0 })
+    assert.throws(() => db.set('long', 1), /maxKeyBytes/)
+    assert.throws(() => db.set('ok', '123456'), /maxValueBytes/)
+    db.close()
+
+    const options = serverOptionsFromEnv({
+      CACHE_MAX_KEY_BYTES: '10',
+      CACHE_MAX_VALUE_BYTES: '20',
+      YASD_MAX_COMMAND_MS: '2.5',
+      YASD_IDLE_CONNECTION_TIMEOUT_MS: '3000',
+      YASD_SHUTDOWN_DEADLINE_MS: '4000',
+    })
+    assert.deepStrictEqual(options.cache, {
+      maxKeyBytes: 10,
+      maxValueBytes: 20,
+    })
+    assert.strictEqual(options.maxCommandMs, 2.5)
+    assert.strictEqual(options.idleConnectionTimeoutMs, 3000)
+    assert.strictEqual(options.shutdownDeadlineMs, 4000)
+    assert.throws(() => serverOptionsFromEnv({ YASD_MAX_COMMAND_MS: '3000000000' }), /<=/)
+
+    const server = new YasdServer({
+      ...options,
+      cache: { ...options.cache, sweepIntervalMs: 0 },
+    })
+    assert.deepStrictEqual(server.persistenceStatus().errors, [])
+    assert.deepStrictEqual(server.info().persistence.errors, [])
+    assert.strictEqual(server.maxCommandMs, 2.5)
+    assert.strictEqual(server.idleConnectionTimeoutMs, 3000)
+    assert.strictEqual(server.shutdownDeadlineMs, 4000)
+    await server.close()
+  })
+
   await test('server defaults to loopback', async () => {
     assert.strictEqual(serverOptionsFromEnv({}).host, '127.0.0.1')
     assert.strictEqual(new YasdServer().host, '127.0.0.1')

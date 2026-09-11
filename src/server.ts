@@ -65,6 +65,7 @@ import {
   validateNonNegativeNumber,
   validatePort,
   validatePositiveSafeInteger,
+  validateTimeout,
   validateToken,
 } from './validation';
 import { YASD_VERSION } from './version';
@@ -110,6 +111,9 @@ const AOF_COMMANDS = new Set([
 
 /** Maximum queued output per connection after socket backpressure. */
 const DEFAULT_MAX_PENDING_OUTPUT_BYTES = 1024 * 1024;
+const DEFAULT_MAX_COMMAND_MS = 0;
+const DEFAULT_IDLE_CONNECTION_TIMEOUT_MS = 0;
+const DEFAULT_SHUTDOWN_DEADLINE_MS = 2000;
 
 export interface YasdServerOptions {
   host?: string;
@@ -130,6 +134,12 @@ export interface YasdServerOptions {
   slowCommandMs?: number;
   /** Maximum queued output bytes per connection. Slow consumers are disconnected. Default 1 MiB. */
   maxPendingOutputBytes?: number;
+  /** Maximum synchronous command duration in ms; exceeded commands return an error and close. 0 disables. */
+  maxCommandMs?: number;
+  /** Close idle RESP/HTTP connections after this many ms. 0 disables. */
+  idleConnectionTimeoutMs?: number;
+  /** Maximum graceful shutdown duration in ms. Default 2000. */
+  shutdownDeadlineMs?: number;
   /** HTTP health exposure. Details are redacted unless exposeDetails is enabled. */
   health?: YasdHealthOptions;
   /**
@@ -167,6 +177,12 @@ export interface ServerInfo {
   aofLastError?: string;
   aofRecoveryState: AofRecoveryState
   aofRecoveryError?: string
+  persistence: PersistenceStatus;
+  maxKeyBytes: number;
+  maxValueBytes: number;
+  maxCommandMs: number;
+  idleConnectionTimeoutMs: number;
+  shutdownDeadlineMs: number;
   subscribers: number;
   channels: string[];
   /** Slow-command threshold in ms (0 = off). */
@@ -180,6 +196,25 @@ export interface HealthStatus {
 }
 
 export type HealthResponse = HealthStatus | ServerInfo;
+
+export type PersistenceErrorComponent = 'aof' | 'snapshot';
+export type PersistenceErrorOperation = 'write' | 'recovery' | 'save' | 'load';
+
+/** Safe persistence failure metadata; no paths, keys, values, or raw messages. */
+export interface PersistenceErrorStatus {
+  component: PersistenceErrorComponent;
+  operation: PersistenceErrorOperation;
+  code: string;
+  at: number;
+}
+
+export interface PersistenceStatus {
+  aofEnabled: boolean;
+  aofDegraded: boolean;
+  aofRecoveryState: AofRecoveryState;
+  snapshotConfigured: boolean;
+  errors: PersistenceErrorStatus[];
+}
 
 interface ConnState {
   socket: net.Socket;
@@ -297,6 +332,14 @@ interface ResolvedHealthOptions {
   token?: string;
 }
 
+function persistenceErrorCode(error: unknown): string {
+  if (error && typeof error === 'object') {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === 'string' && /^[A-Z][A-Z0-9_]*$/.test(code)) return code;
+  }
+  return 'UNKNOWN';
+}
+
 function resolveHealthOptions(value: unknown): ResolvedHealthOptions {
   if (value === undefined) return { exposeDetails: false };
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -321,6 +364,12 @@ export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Yasd
   }
   if (env.CACHE_MAX_BYTES !== undefined) {
     cache.maxBytes = parseStrictInteger(env.CACHE_MAX_BYTES, 'CACHE_MAX_BYTES', 1);
+  }
+  if (env.CACHE_MAX_KEY_BYTES !== undefined) {
+    cache.maxKeyBytes = parseStrictInteger(env.CACHE_MAX_KEY_BYTES, 'CACHE_MAX_KEY_BYTES', 1);
+  }
+  if (env.CACHE_MAX_VALUE_BYTES !== undefined) {
+    cache.maxValueBytes = parseStrictInteger(env.CACHE_MAX_VALUE_BYTES, 'CACHE_MAX_VALUE_BYTES', 1);
   }
   if (env.CACHE_DEFAULT_TTL_MS !== undefined) {
     cache.defaultTTLMs = parseStrictNonNegativeNumber(env.CACHE_DEFAULT_TTL_MS, 'CACHE_DEFAULT_TTL_MS');
@@ -351,6 +400,30 @@ export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Yasd
       env.YASD_MAX_PENDING_OUTPUT_BYTES,
       'YASD_MAX_PENDING_OUTPUT_BYTES',
       1
+    );
+  }
+  if (env.YASD_MAX_COMMAND_MS !== undefined) {
+    opts.maxCommandMs = validateTimeout(
+      parseStrictNonNegativeNumber(env.YASD_MAX_COMMAND_MS, 'YASD_MAX_COMMAND_MS'),
+      'YASD_MAX_COMMAND_MS'
+    );
+  }
+  if (env.YASD_IDLE_CONNECTION_TIMEOUT_MS !== undefined) {
+    opts.idleConnectionTimeoutMs = validateTimeout(
+      parseStrictNonNegativeNumber(
+        env.YASD_IDLE_CONNECTION_TIMEOUT_MS,
+        'YASD_IDLE_CONNECTION_TIMEOUT_MS'
+      ),
+      'YASD_IDLE_CONNECTION_TIMEOUT_MS'
+    );
+  }
+  if (env.YASD_SHUTDOWN_DEADLINE_MS !== undefined) {
+    opts.shutdownDeadlineMs = validateTimeout(
+      parseStrictNonNegativeNumber(
+        env.YASD_SHUTDOWN_DEADLINE_MS,
+        'YASD_SHUTDOWN_DEADLINE_MS'
+      ),
+      'YASD_SHUTDOWN_DEADLINE_MS'
     );
   }
   if (env.YASD_LOAD_ON_START !== undefined) opts.loadOnStart = env.YASD_LOAD_ON_START !== '0';
@@ -497,6 +570,7 @@ export class YasdServer {
   private startedAt = Date.now();
   private aofDegraded = false;
   private aofLastError?: string;
+  private persistenceErrors = new Map<string, PersistenceErrorStatus>();
 
   readonly host: string;
   readonly port: number;
@@ -506,6 +580,9 @@ export class YasdServer {
   readonly saveOnShutdown: boolean;
   readonly autoSaveMs: number;
   readonly maxPendingOutputBytes: number;
+  readonly maxCommandMs: number;
+  readonly idleConnectionTimeoutMs: number;
+  readonly shutdownDeadlineMs: number;
   readonly healthExposeDetails: boolean;
   readonly authRequired: boolean;
   readonly tlsEnabled: boolean;
@@ -520,6 +597,7 @@ export class YasdServer {
     this.port = options.port === undefined ? DEFAULT_PORT : validatePort(options.port, 'port');
     this.kv = new KVCache(options.cache, key => this.onCacheExpiry(key))
     this.aof = new AofLog(options.aofPath);
+    this.syncAofRecoveryStatus();
     this.snapshotPath = options.snapshotPath;
     this.aofPath = options.aofPath;
     this.loadOnStart = options.loadOnStart ?? true;
@@ -530,6 +608,15 @@ export class YasdServer {
     this.maxPendingOutputBytes = options.maxPendingOutputBytes === undefined
       ? DEFAULT_MAX_PENDING_OUTPUT_BYTES
       : validatePositiveSafeInteger(options.maxPendingOutputBytes, 'maxPendingOutputBytes');
+    this.maxCommandMs = options.maxCommandMs === undefined
+      ? DEFAULT_MAX_COMMAND_MS
+      : validateTimeout(options.maxCommandMs, 'maxCommandMs');
+    this.idleConnectionTimeoutMs = options.idleConnectionTimeoutMs === undefined
+      ? DEFAULT_IDLE_CONNECTION_TIMEOUT_MS
+      : validateTimeout(options.idleConnectionTimeoutMs, 'idleConnectionTimeoutMs');
+    this.shutdownDeadlineMs = options.shutdownDeadlineMs === undefined
+      ? DEFAULT_SHUTDOWN_DEADLINE_MS
+      : validateTimeout(options.shutdownDeadlineMs, 'shutdownDeadlineMs');
     this.healthExposeDetails = health.exposeDetails;
     this.healthToken = health.token;
     this.password = options.password && options.password.length > 0 ? options.password : undefined;
@@ -565,6 +652,17 @@ export class YasdServer {
     return this.hub;
   }
 
+  /** Safe persistence state for operators; messages and file paths stay private. */
+  persistenceStatus(): PersistenceStatus {
+    return {
+      aofEnabled: this.aof.enabled,
+      aofDegraded: this.aofDegraded,
+      aofRecoveryState: this.aof.recoveryState,
+      snapshotConfigured: this.snapshotPath !== undefined,
+      errors: Array.from(this.persistenceErrors.values(), error => ({ ...error })),
+    };
+  }
+
   info(): ServerInfo {
     const s = this.kv.stats();
     return {
@@ -584,7 +682,13 @@ export class YasdServer {
       aofDegraded: this.aofDegraded,
       ...(this.aofLastError === undefined ? {} : { aofLastError: this.aofLastError }),
       aofRecoveryState: this.aof.recoveryState,
-      ...(this.aof.recoveryError === undefined ? {} : { aofRecoveryError: this.aof.recoveryError }),
+      ...(this.aof.recoveryState === 'clean' ? {} : { aofRecoveryError: this.safeAofRecoveryError() }),
+      persistence: this.persistenceStatus(),
+      maxKeyBytes: this.kv.maxKeyBytes,
+      maxValueBytes: this.kv.maxValueBytes,
+      maxCommandMs: this.maxCommandMs,
+      idleConnectionTimeoutMs: this.idleConnectionTimeoutMs,
+      shutdownDeadlineMs: this.shutdownDeadlineMs,
       subscribers: this.hub.subscriberCount(),
       channels: this.hub.channelNames(),
       slowCommandMs: this.slow.threshold,
@@ -619,16 +723,28 @@ export class YasdServer {
     if (this.loadOnStart) {
       const snapshotMetadata: SnapshotLoadMetadata = {};
       if (this.snapshotPath) {
-        await loadSnapshot(this.kv, this.snapshotPath, {
-          clearFirst: true,
-          missingOk: true,
-          metadata: snapshotMetadata,
-        });
+        try {
+          await loadSnapshot(this.kv, this.snapshotPath, {
+            clearFirst: true,
+            missingOk: true,
+            metadata: snapshotMetadata,
+          });
+          this.forgetPersistenceError('snapshot', 'load');
+        } catch (err) {
+          this.rememberPersistenceError('snapshot', 'load', err);
+          throw this.safePersistenceError('snapshot load', err);
+        }
       }
-      await this.aof.replay(this.kv, snapshotMetadata.aofSeq);
+      try {
+        await this.aof.replay(this.kv, snapshotMetadata.aofSeq);
+      } catch (err) {
+        this.rememberPersistenceError('aof', 'recovery', err);
+        throw this.safePersistenceError('AOF recovery', err);
+      }
+      this.syncAofRecoveryStatus();
     }
     if (this.aof.recoveryState !== 'clean') {
-      console.error(`yasd: WARNING: ${this.aof.recoveryError ?? 'AOF recovery required'}`)
+      console.error(`yasd: WARNING: ${this.safeAofRecoveryError() ?? 'AOF recovery required'}`)
     }
     this.netServer = this.tlsOptions
       ? tls.createServer(this.tlsOptions, socket => this.onConnection(socket))
@@ -670,10 +786,20 @@ export class YasdServer {
 
   private async saveUnlocked(target: string): Promise<number> {
     const snapshotSeq = this.aof.sequence;
-    const n = await saveSnapshot(this.kv, target, { aofSeq: snapshotSeq });
+    let n: number;
+    try {
+      n = await saveSnapshot(this.kv, target, { aofSeq: snapshotSeq });
+    } catch (err) {
+      this.rememberPersistenceError('snapshot', 'save', err);
+      throw this.safePersistenceError('snapshot save', err);
+    }
     try {
       this.aof.rotateAfter(snapshotSeq);
       this.aofDegraded = false;
+      this.aofLastError = undefined;
+      this.forgetPersistenceError('aof', 'write');
+      this.forgetPersistenceError('snapshot', 'save');
+      this.syncAofRecoveryStatus();
     } catch (err) {
       throw this.aofWriteError(err);
     }
@@ -684,24 +810,42 @@ export class YasdServer {
     const target = snapshotPath ?? this.snapshotPath;
     if (!target) throw new Error('LOAD requires a snapshot path');
     return this.enqueuePersistence(async () => {
-      const count = await loadSnapshot(this.kv, target, { clearFirst: true, missingOk: false })
-      this.publishInvalidate({ event: 'load' })
-      return count
+      try {
+        const count = await loadSnapshot(this.kv, target, { clearFirst: true, missingOk: false })
+        this.forgetPersistenceError('snapshot', 'load');
+        this.publishInvalidate({ event: 'load' })
+        return count
+      } catch (err) {
+        this.rememberPersistenceError('snapshot', 'load', err);
+        throw this.safePersistenceError('snapshot load', err);
+      }
     })
   }
 
-  /** Graceful shutdown: stop accepting, drain sockets, final SAVE, stop timers. */
+  /** Graceful shutdown with a bounded socket drain and persistence deadline. */
   async close(): Promise<void> {
     if (this.closing) return;
     this.closing = true;
+    const deadline = Date.now() + this.shutdownDeadlineMs;
     if (this.autoSaveTimer) {
       clearInterval(this.autoSaveTimer);
       this.autoSaveTimer = undefined;
     }
-    if (this.netServer) {
-      await new Promise<void>(resolve => this.netServer?.close(() => resolve()));
-      this.netServer = undefined;
-    }
+
+    const netServer = this.netServer;
+    this.netServer = undefined;
+    const serverClosed = netServer === undefined
+      ? Promise.resolve()
+      : new Promise<void>(resolve => {
+        try {
+          netServer.close(() => resolve());
+        } catch {
+          resolve();
+        }
+      });
+
+    // Stop accepting first, then give existing clients the configured grace
+    // period. Idle or stuck clients are destroyed at the deadline.
     for (const socket of Array.from(this.sockets)) {
       try {
         socket.end();
@@ -709,9 +853,9 @@ export class YasdServer {
         // ignore
       }
     }
-    const deadline = Date.now() + 2000;
     while (this.sockets.size > 0 && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 10));
+      const remaining = deadline - Date.now();
+      await new Promise(resolve => setTimeout(resolve, Math.min(10, remaining)));
     }
     for (const socket of Array.from(this.sockets)) {
       try {
@@ -720,20 +864,89 @@ export class YasdServer {
         // ignore
       }
     }
+    await this.waitForDeadline(serverClosed, deadline);
     if (this.saveOnShutdown && this.snapshotPath) {
-      try {
-        await this.save();
-      } catch {
-        // best effort on shutdown
-      }
+      await this.waitForDeadline(this.save().catch(() => undefined), deadline);
     } else {
-      await this.persistenceQueue;
+      await this.waitForDeadline(this.persistenceQueue, deadline);
     }
     this.hub.unsubscribeAll();
     this.kv.close();
   }
 
   // ---- internals ----
+
+  private rememberPersistenceError(
+    component: PersistenceErrorComponent,
+    operation: PersistenceErrorOperation,
+    error: unknown,
+    code?: string
+  ): void {
+    const status: PersistenceErrorStatus = {
+      component,
+      operation,
+      code: code ?? persistenceErrorCode(error),
+      at: Date.now(),
+    };
+    this.persistenceErrors.set(`${component}:${operation}`, status);
+  }
+
+  private forgetPersistenceError(
+    component: PersistenceErrorComponent,
+    operation: PersistenceErrorOperation
+  ): void {
+    this.persistenceErrors.delete(`${component}:${operation}`);
+  }
+
+  private syncAofRecoveryStatus(): void {
+    if (this.aof.recoveryState === 'clean') {
+      this.forgetPersistenceError('aof', 'recovery');
+      return;
+    }
+    this.rememberPersistenceError(
+      'aof',
+      'recovery',
+      undefined,
+      this.aof.recoveryState === 'corrupt' ? 'AOF_CORRUPT' : 'AOF_TORN_TAIL'
+    );
+  }
+
+  private safeAofRecoveryError(): string | undefined {
+    if (this.aof.recoveryState === 'clean') return undefined;
+    const line = this.aof.recoveryError?.match(/\bline\s+(\d+)\b/i)?.[1];
+    return line === undefined ? 'AOF recovery failed' : `AOF recovery failed at line ${line}`;
+  }
+
+  private safePersistenceError(prefix: string, error: unknown): Error {
+    return new Error(`${prefix} failed (${persistenceErrorCode(error)}); inspect persistenceStatus()`);
+  }
+
+  private async waitForDeadline(promise: Promise<unknown>, deadline: number): Promise<void> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return;
+    await new Promise<void>(resolve => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      }, remaining);
+      promise.then(
+        () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve();
+        },
+        () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve();
+        }
+      );
+    });
+  }
 
   private enqueuePersistence<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.persistenceQueue.then(operation, operation);
@@ -770,6 +983,9 @@ export class YasdServer {
       }
     });
     socket.on('drain', () => this.flushOutput(state));
+    if (this.idleConnectionTimeoutMs > 0) {
+      socket.setTimeout(this.idleConnectionTimeoutMs, () => this.disconnectSocket(state));
+    }
     const cleanup = (): void => {
       this.sockets.delete(socket);
       state.outputClosed = true;
@@ -979,8 +1195,18 @@ export class YasdServer {
       return 'ok';
     }
     const started = performance.now();
+    let durationMs: number | undefined;
     try {
       const reply = this.dispatch(state, cmd, argv.slice(1));
+      durationMs = performance.now() - started;
+      if (this.maxCommandMs > 0 && durationMs > this.maxCommandMs) {
+        this.writeReply(state, {
+          kind: 'error',
+          message: `ERR command exceeded maxCommandMs (${this.maxCommandMs} ms)`,
+        });
+        this.endSocket(state);
+        return 'close';
+      }
       if (reply === 'close') {
         this.writeReply(state, { kind: 'simple', value: 'OK' });
         this.endSocket(state);
@@ -992,8 +1218,8 @@ export class YasdServer {
     } catch (err) {
       this.writeReply(state, { kind: 'error', message: `ERR ${(err as Error).message}` });
     } finally {
-      // SAVE/LOAD finish asynchronously; the sync portion is what's timed.
-      this.slow.record(cmd, performance.now() - started, argv.length - 1);
+      // SAVE/LOAD finish asynchronously; the synchronous dispatch portion is timed.
+      this.slow.record(cmd, durationMs ?? performance.now() - started, argv.length - 1);
     }
     return 'ok';
   }
@@ -1003,16 +1229,19 @@ export class YasdServer {
     try {
       this.aof.append(op);
       this.aofDegraded = false;
+      this.aofLastError = undefined;
+      this.forgetPersistenceError('aof', 'write');
+      this.syncAofRecoveryStatus();
     } catch (err) {
       throw this.aofWriteError(err);
     }
   }
 
   private aofWriteError(err: unknown): Error {
-    const detail = err instanceof Error ? err.message : String(err);
     this.aofDegraded = true;
-    this.aofLastError = detail;
-    return new Error(`AOF write failed: ${detail}`);
+    this.aofLastError = 'AOF_WRITE_FAILED';
+    this.rememberPersistenceError('aof', 'write', err);
+    return new Error('AOF write failed; inspect persistenceStatus()');
   }
 
   private logAof(op: AofMutation, effects?: TransactionEffects): void {
@@ -1527,7 +1756,7 @@ export class YasdServer {
         this.save(path)
           .then(
             () => this.writeReply(state, { kind: 'simple', value: 'OK' }),
-            err => this.writeReply(state, { kind: 'error', message: `ERR ${(err as Error).message}` })
+            () => this.writeReply(state, { kind: 'error', message: 'ERR SAVE failed; inspect INFO persistence' })
           )
           .catch(() => undefined);
         return 'silent';
@@ -1539,7 +1768,7 @@ export class YasdServer {
         this.load(path)
           .then(
             count => this.writeReply(state, { kind: 'simple', value: `OK ${count}` }),
-            err => this.writeReply(state, { kind: 'error', message: `ERR ${(err as Error).message}` })
+            () => this.writeReply(state, { kind: 'error', message: 'ERR LOAD failed; inspect INFO persistence' })
           )
           .catch(() => undefined);
         return 'silent';
