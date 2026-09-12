@@ -9,7 +9,6 @@ export function dialSocket(host: string, port: number, options: tls.ConnectionOp
     if (signal.aborted) { reject(new DatabaseError('connection cancelled', 'CONNECTION_CLOSED')); return; }
     const ready = options ? 'secureConnect' : 'connect';
     const socket = options ? tls.connect({ ...options, host, port }) : net.createConnection({ host, port });
-    let timer: ReturnType<typeof setTimeout> | undefined;
     let settled = false;
     const cleanup = (): void => {
       if (timer) clearTimeout(timer);

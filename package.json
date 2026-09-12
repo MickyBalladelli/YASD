@@ -38,6 +38,10 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "lint": "eslint src test examples benchmark eslint.config.mjs",
+    "format:check": "prettier --check src test examples benchmark eslint.config.mjs package.json tsconfig.json",
+    "format": "prettier --write src test examples benchmark eslint.config.mjs package.json tsconfig.json",
+    "benchmark:scaling": "npm run build && node --expose-gc benchmark/scaling.js",
     "test": "npm run build && node test/run-all.js",
     "test:package": "node test/package-consumer.js",
     "benchmark:indexes": "npm run build && node --expose-gc benchmark/indexes.js",
@@ -57,6 +61,9 @@
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.10.0",
-    "typescript": "^5.3.0"
+    "eslint": "^9.39.5",
+    "prettier": "^3.9.6",
+    "typescript": "^5.3.0",
+    "typescript-eslint": "^8.70.0"
   }
 }

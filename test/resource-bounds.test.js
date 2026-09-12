@@ -77,7 +77,7 @@ test('S01/S02: aggregate retained-work budget disconnects offender and releases 
   try {
     await once(socket, 'connect'); socket.write(encodeCommand(['MULTI']));
     for (let i = 0; i < 30; i++) socket.write(encodeCommand(['SET', `key${i}`, JSON.stringify('x'.repeat(2000))]));
-    await Promise.race([once(socket, 'close'), delay(1000).then(() => { throw Error('overload was not disconnected'); })]);
+    await Promise.race([new Promise(resolve => socket.once('close', resolve)), delay(1000).then(() => { throw Error('overload was not disconnected'); })]);
     assert.ok(server.resourceStats().inflightBytes <= 32000);
     assert.equal(await client.ping(), 'PONG'); assert.equal(server.cache.get('key0'), undefined);
     await client.close();

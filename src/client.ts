@@ -310,7 +310,7 @@ export class YasdClient {
   }
 
   async connect(): Promise<void> {
-    if (this.closed) throw new Error('client is closed');
+    if (this.closed) throw new DatabaseError('client is closed', 'CONNECTION_CLOSED');
     if (this.connecting) {
       await this.connecting;
       return;
@@ -327,7 +327,7 @@ export class YasdClient {
     this.closed = true;
     this.abortController.abort();
     await Promise.all([...this.transactions].map(tx => tx.close()));
-    this.closeSubSocket(new Error('client is closed'));
+    this.closeSubSocket(new DatabaseError('client is closed', 'CONNECTION_CLOSED'));
     this.subHandlers.clear();
     this.subscriptionStateListeners.clear();
     this.subDecoder.reset();
@@ -337,7 +337,7 @@ export class YasdClient {
       conn.dead = true;
       for (const p of conn.pending.splice(0)) {
         if (p.timer) clearTimeout(p.timer);
-        p.reject(new Error('client is closed'));
+        p.reject(new DatabaseError('client is closed', 'CONNECTION_CLOSED'));
       }
       try {
         conn.socket.destroy();
@@ -516,7 +516,7 @@ export class YasdClient {
    * One-shot: `exec()`/`discard()`/`close()` finish the transaction.
    */
   multi(): YasdTransaction {
-    if (this.closed) throw new Error('client is closed');
+    if (this.closed) throw new DatabaseError('client is closed', 'CONNECTION_CLOSED');
     if (this.transactions.size >= this.maxTransactions) throw new DatabaseError('transaction allocation limit exceeded', 'LIMIT_EXCEEDED');
     const tx = new YasdTransaction({
       host: this.host, port: this.port, password: this.password, tlsOptions: this.tlsOptions,
@@ -630,7 +630,7 @@ export class YasdClient {
 
   /** Reconnect the subscriber socket and restore all registered channels. */
   async reconnectSubscriptions(): Promise<void> {
-    if (this.closed) throw new Error('client is closed');
+    if (this.closed) throw new DatabaseError('client is closed', 'CONNECTION_CLOSED');
     await this.enqueueSubCommand(async () => {
       this.closeSubSocket(new Error('subscriber reconnect requested'));
       if (this.subHandlers.size > 0) await this.ensureSubConn();
@@ -704,7 +704,7 @@ export class YasdClient {
     const end = Date.now() + this.connectTimeoutMs;
     let lastError: Error | undefined;
     for (let attempt = 0; attempt < RECONNECT_MAX_ATTEMPTS; attempt++) {
-      if (this.closed) throw new Error('client is closed');
+      if (this.closed) throw new DatabaseError('client is closed', 'CONNECTION_CLOSED');
       this.pruneDeadConnections();
       const needed = this.poolSize - this.pool.length;
       if (needed <= 0) return;
@@ -716,7 +716,7 @@ export class YasdClient {
           if (this.closed) {
             conn.dead = true;
             conn.socket.destroy();
-            throw new Error('client is closed');
+            throw new DatabaseError('client is closed', 'CONNECTION_CLOSED');
           }
           created.push(conn);
         }
@@ -728,7 +728,7 @@ export class YasdClient {
           conn.dead = true;
           conn.socket.destroy();
         }
-        throw new Error('client is closed');
+        throw new DatabaseError('client is closed', 'CONNECTION_CLOSED');
       }
       this.pool.push(...created.filter(conn => !conn.dead && !conn.socket.destroyed));
       this.pruneDeadConnections();
@@ -872,7 +872,7 @@ export class YasdClient {
   private subAckWaiters = new Map<string, SubAckWaiter[]>();
 
   private async ensureSubConn(): Promise<void> {
-    if (this.closed) throw new Error('client is closed');
+    if (this.closed) throw new DatabaseError('client is closed', 'CONNECTION_CLOSED');
     if (this.subSocket && !this.subSocket.destroyed) return;
     if (this.subSocket?.destroyed) {
       this.closeSubSocket(new Error('subscriber connection is closed'));
@@ -898,7 +898,7 @@ export class YasdClient {
     this.subDialSocket = socket;
     try {
       if (this.password !== undefined) await this.authenticateSubscriber(socket);
-      if (this.closed) throw new Error('client is closed');
+      if (this.closed) throw new DatabaseError('client is closed', 'CONNECTION_CLOSED');
       this.subSocket = socket;
       this.subDecoder.reset();
       socket.on('data', chunk => this.onSubData(Buffer.from(chunk), socket));

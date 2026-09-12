@@ -50,7 +50,7 @@ export function cloneJsonValue(value: unknown, what = 'value', maxBytes = 64 * 1
     }
     const serializer = Object.getOwnPropertyDescriptor(object, 'toJSON');
     if (serializer && (!('value' in serializer) || typeof serializer.value === 'function')) fail('cannot contain custom serialization hooks');
-    if (array && Object.keys(object).some(key => !/^(0|[1-9][0-9]*)$/.test(key))) fail('cannot contain extra array properties');
+    if (array && Object.keys(object).some(key => !/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= (object as Value[]).length)) fail('cannot contain extra array properties');
     ancestors.add(object);
     try {
       const out: Value[] | Record<string, Value> = array ? [] : {};
