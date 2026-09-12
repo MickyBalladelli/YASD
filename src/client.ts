@@ -1660,7 +1660,7 @@ export class YasdTransaction {
       if (this.begun) throw new TransactionError("MGET must precede MULTI");
       await this.connect();
       return this.send(["MGET", ...keys]);
-    });
+    }, commandByteLength(["MGET", ...keys]));
     if (reply.kind !== "array")
       throw new Error(`unexpected MGET reply: ${JSON.stringify(reply)}`);
     return reply.items.map((item) => {
@@ -1681,7 +1681,7 @@ export class YasdTransaction {
       if (this.begun) throw new TransactionError("TTL must precede MULTI");
       await this.connect();
       return this.send(["TTL", key]);
-    });
+    }, commandByteLength(["TTL", key]));
     if (reply.kind === "int") return reply.value;
     throw new Error(`unexpected TTL reply: ${JSON.stringify(reply)}`);
   }
