@@ -303,6 +303,7 @@ export class YasdClient {
   private poolSize: number;
   private maxTransactions: number;
   private transactions = new Set<YasdTransaction>();
+  private healthRequests = new Set<http.ClientRequest>();
   private requestTimeoutMs: number;
   private connectTimeoutMs = 5000;
   private abortController = new AbortController();
@@ -427,6 +428,7 @@ export class YasdClient {
   async close(): Promise<void> {
     this.closed = true;
     this.abortController.abort();
+    for (const request of this.healthRequests) request.destroy(new DatabaseError("client is closed", "CONNECTION_CLOSED"));
     await Promise.all([...this.transactions].map((tx) => tx.close()));
     this.closeSubSocket(
       new DatabaseError("client is closed", "CONNECTION_CLOSED"),
@@ -464,40 +466,34 @@ export class YasdClient {
   /** HTTP(S) `/healthz` against the server port. Returns redacted health by default. */
   async healthcheck(timeoutMs = 3000): Promise<HealthResponse> {
     const timeout = validateTimeout(timeoutMs, "healthcheck timeoutMs");
+    if (this.closed) throw new DatabaseError("client is closed", "CONNECTION_CLOSED");
+    if (this.healthRequests.size >= 8) throw new DatabaseError("health request limit exceeded", "LIMIT_EXCEEDED");
     return new Promise<HealthResponse>((resolve, reject) => {
       const requestOptions: http.RequestOptions = {
-        host: this.host,
-        port: this.port,
-        path: "/healthz",
-        timeout,
-        ...(this.healthToken === undefined
-          ? {}
-          : { headers: { authorization: `Bearer ${this.healthToken}` } }),
+        host: this.host, port: this.port, path: "/healthz", agent: false,
+        maxHeaderSize: 16 * 1024, signal: this.abortController.signal,
+        ...(this.healthToken === undefined ? {} : { headers: { authorization: `Bearer ${this.healthToken}` } }),
       };
       const onResponse = (res: http.IncomingMessage): void => {
-        let body = "";
-        res.on("data", (chunk) => {
-          body += String(chunk);
+        const parts: Buffer[] = []; let bytes = 0;
+        res.on("data", (chunk: Buffer) => {
+          bytes += chunk.length;
+          if (bytes > 1024 * 1024) { req.destroy(new DatabaseError("health response exceeds 1 MiB", "LIMIT_EXCEEDED")); return; }
+          parts.push(chunk);
         });
+        res.on("error", reject);
+        res.on("aborted", () => reject(new DatabaseError("health response aborted", "CONNECTION_CLOSED")));
         res.on("end", () => {
-          if (res.statusCode !== 200) {
-            reject(new Error(`healthcheck failed: HTTP ${res.statusCode}`));
-            return;
-          }
-          try {
-            resolve(JSON.parse(body) as HealthResponse);
-          } catch (err) {
-            reject(err as Error);
-          }
+          if (res.statusCode !== 200) { reject(new DatabaseError(`healthcheck failed: HTTP ${res.statusCode}`, "PROTOCOL_ERROR")); return; }
+          try { resolve(JSON.parse(Buffer.concat(parts).toString("utf8")) as HealthResponse); }
+          catch (cause) { reject(new DatabaseError("invalid health response JSON", "PROTOCOL_ERROR", { cause })); }
         });
       };
-      const req =
-        this.tlsOptions === undefined
-          ? http.get(requestOptions, onResponse)
-          : https.get({ ...this.tlsOptions, ...requestOptions }, onResponse);
-      req.on("timeout", () => {
-        req.destroy(new Error("healthcheck timed out"));
-      });
+      const req = this.tlsOptions === undefined ? http.get(requestOptions, onResponse)
+        : https.get({ ...this.tlsOptions, ...requestOptions }, onResponse);
+      this.healthRequests.add(req);
+      const timer = timeout > 0 ? setTimeout(() => req.destroy(new DatabaseError("healthcheck deadline exceeded", "TIMEOUT")), timeout) : undefined;
+      req.once("close", () => { if (timer) clearTimeout(timer); this.healthRequests.delete(req); });
       req.on("error", reject);
     });
   }
