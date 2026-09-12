@@ -37,6 +37,6 @@ export function dialSocket(host: string, port: number, options: tls.ConnectionOp
     socket.once('close', closed);
     socket.once(ready, connected);
     signal.addEventListener('abort', abort, { once: true });
-    timer = setTimeout(() => failed(new DatabaseError('connection handshake timed out', 'TIMEOUT')), timeoutMs);
+    const timer = setTimeout(() => failed(new DatabaseError('connection handshake timed out', 'TIMEOUT')), timeoutMs);
   });
 }

@@ -64,16 +64,16 @@ db.query('DELETE FROM users WHERE id = 2');
 
 ```javascript
 // Select specific columns
-const result = db.query('SELECT name, email FROM users');
+const projected = db.query('SELECT name, email FROM users');
 
 // With WHERE clause
-const result = db.query('SELECT * FROM users WHERE age > 25 AND name LIKE "%John%"');
+const matching = db.query('SELECT * FROM users WHERE age > 25 AND name LIKE "%John%"');
 
 // With ORDER BY
-const result = db.query('SELECT * FROM users ORDER BY age DESC');
+const sorted = db.query('SELECT * FROM users ORDER BY age DESC');
 
 // With LIMIT and OFFSET
-const result = db.query('SELECT * FROM users LIMIT 10 OFFSET 5');
+const page = db.query('SELECT * FROM users LIMIT 10 OFFSET 5');
 ```
 
 Each `query()` accepts exactly one statement. A final semicolon is optional;
@@ -94,7 +94,8 @@ const schema = db.getTableSchema('users');
 db.query('DROP TABLE users');
 
 // Reset entire database
- db.reset();
+db.reset();
+db.close();
 ```
 
 ## API Reference

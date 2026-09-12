@@ -22,4 +22,8 @@ export default tseslint.config(
     },
   },
   { files: ['**/*.js'], languageOptions: { sourceType: 'commonjs' } },
+  // These validators deliberately recognize forbidden control characters.
+  { files: ['src/server.ts', 'src/validation.ts'], rules: { 'no-control-regex': 'off' } },
+  // Negative contract fixtures intentionally contain malformed arrays.
+  { files: ['test/**/*.js'], rules: { 'no-sparse-arrays': 'off' } },
 );

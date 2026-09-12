@@ -30,6 +30,11 @@ try {
     server.close().catch(e => { throw e; });
   `);
   run(process.execPath, ['consumer.cjs']);
+  const readme = fs.readFileSync(path.join(dir, 'node_modules/yasd/README.md'), 'utf8');
+  const blocks = [...readme.matchAll(/```javascript\n([\s\S]*?)```/g)].slice(0, 3).map(match => match[1]);
+  assert.equal(blocks.length, 3);
+  fs.writeFileSync(path.join(dir, 'readme.cjs'), blocks.join('\n'));
+  run(process.execPath, ['readme.cjs']);
   fs.writeFileSync(path.join(dir, 'consumer.mjs'), `import { YASD, DatabaseError } from 'yasd'; const db = new YASD(); if (!DatabaseError) throw Error('missing export'); db.close();`);
   run(process.execPath, ['consumer.mjs']);
   fs.writeFileSync(path.join(dir, 'consumer.ts'), `import { YASD, DatabaseError, DatabaseErrorCode } from 'yasd'; const db = new YASD({slowQueryMs: 5}); const code: DatabaseErrorCode = 'PARSE_ERROR'; const error = new DatabaseError('message', code); db.close();`);
