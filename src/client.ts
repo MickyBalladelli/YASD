@@ -324,6 +324,7 @@ export class YasdClient {
   private subGeneration = 0;
   private subCommandTail: Promise<void> = Promise.resolve();
   private subCommandDepth = 0;
+  private subCommandBytes = 0;
   private subscriptionStateListeners = new Set<
     (state: "connected" | "disconnected") => void
   >();
@@ -751,7 +752,11 @@ export class YasdClient {
     return this.enqueueSubCommand(async () => {
       await this.ensureSubConn();
       let set = this.subHandlers.get(channel);
+      if (set && !set.has(handler) && set.size >= 64) throw new DatabaseError("subscription handler limit exceeded", "LIMIT_EXCEEDED");
       if (!set) {
+        let nameBytes = Buffer.byteLength(channel);
+        for (const name of this.subHandlers.keys()) nameBytes += Buffer.byteLength(name);
+        if (this.subHandlers.size >= 1024 || nameBytes > 1024 * 1024) throw new DatabaseError("subscription registry limit exceeded", "LIMIT_EXCEEDED");
         set = new Set();
         this.subHandlers.set(channel, set);
       }
@@ -769,8 +774,9 @@ export class YasdClient {
       let unsubscribed = false;
       return async (): Promise<void> => {
         if (unsubscribed) return;
-        unsubscribed = true;
         await this.enqueueSubCommand(async () => {
+          if (unsubscribed) return;
+          unsubscribed = true;
           const current = this.subHandlers.get(channel);
           current?.delete(handler);
           if (!current || current.size > 0) return;
@@ -781,9 +787,9 @@ export class YasdClient {
             );
           }
           if (this.subHandlers.size === 0) this.closeSubSocket();
-        });
+        }, commandByteLength(["UNSUBSCRIBE", channel]));
       };
-    });
+    }, commandByteLength(["SUBSCRIBE", channel]));
   }
 
   /** Reconnect the subscriber socket and restore all registered channels. */
@@ -1274,25 +1280,21 @@ export class YasdClient {
     }
   }
 
-  private enqueueSubCommand<T>(operation: () => Promise<T>): Promise<T> {
-    if (this.subCommandDepth >= 1024)
-      return Promise.reject(
-        new DatabaseError(
-          "subscription queue limit exceeded",
-          "LIMIT_EXCEEDED",
-        ),
-      );
-    this.subCommandDepth++;
-    const result = this.subCommandTail
-      .then(operation, operation)
-      .finally(() => {
-        this.subCommandDepth--;
-      });
-    this.subCommandTail = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
+  private enqueueSubCommand<T>(operation: () => Promise<T>, bytes = 0): Promise<T> {
+    if (this.subCommandDepth >= 1024 || this.subCommandBytes + bytes > 8 * 1024 * 1024) {
+      return Promise.reject(new DatabaseError("subscription queue limit exceeded", "LIMIT_EXCEEDED"));
+    }
+    this.subCommandDepth++; this.subCommandBytes += bytes;
+    let expired = false; let active = false;
+    const result = this.subCommandTail.then(() => {
+      if (expired || this.closed) throw new DatabaseError("subscription operation cancelled before dispatch", "CONNECTION_CLOSED");
+      active = true; return operation();
+    }).finally(() => { this.subCommandDepth--; this.subCommandBytes -= bytes; });
+    this.subCommandTail = result.then(() => undefined, () => undefined);
+    return deadline(result, this.requestTimeoutMs, () => {
+      expired = true;
+      if (active) this.closeSubSocket(new DatabaseError("subscription deadline exceeded", "TIMEOUT"));
+    });
   }
 
   private onSubData(chunk: Buffer, socket: net.Socket): void {
@@ -1656,6 +1658,7 @@ export class YasdTransaction {
   /** Immediate batch read (must precede MULTI). */
   async mget(keys: string[]): Promise<Array<Value | undefined>> {
     this.assertReadable("MGET");
+    keys = [...keys];
     const reply = await this.serialize(async () => {
       if (this.begun) throw new TransactionError("MGET must precede MULTI");
       await this.connect();
