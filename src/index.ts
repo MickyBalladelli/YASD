@@ -106,6 +106,8 @@ export type { RespReply, RespDecoderOptions } from './protocol';
  * The legacy single-arg form `new YASD(kvOptions)` still works.
  */
 export interface YasdOptions extends KVOptions {
+  /** SQL storage/result budgets, independent of the KV cache budget. */
+  sql?: import('./executor').ExecutorOptions;
   /** Log SQL queries slower than this (ms) into the slow-query log. 0 = off. */
   slowQueryMs?: number;
   /** Columns automatically indexed on every table. Omit for all; [] for none. */
@@ -130,7 +132,8 @@ export class YASD {
   private hub: PubSubHub;
 
   constructor(cacheOptions?: YasdOptions) {
-    this.executor = new Executor({ indexColumns: cacheOptions?.indexColumns });
+    this.executor = new Executor({ ...cacheOptions?.sql,
+      indexColumns: cacheOptions?.indexColumns ?? cacheOptions?.sql?.indexColumns });
     const opts = cacheOptions;
     this.cache = new KVCache(cacheOptions);
     if (opts?.slowQueryMs !== undefined) {

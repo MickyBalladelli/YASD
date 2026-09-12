@@ -26,6 +26,7 @@
 // EXEC always clears watches, committed or not. DISCARD clears them too.
 
 import * as net from 'net';
+import { Deque } from './deque';
 import * as tls from 'tls';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -231,7 +232,7 @@ interface ConnState {
   decoder: RespDecoder;
   httpBuf: Buffer | null;
   protocol: 'undecided' | 'resp' | 'http';
-  requestQueue: RespReply[];
+  requestQueue: Deque<RespReply>;
   requestQueueBytes: number;
   processing: boolean;
   subs: Map<string, PubSubListener>; // active subscriptions (empty = normal mode, null = never-subscribed?)
@@ -244,7 +245,7 @@ interface ConnState {
   txBytes: number;
   txFailed: boolean;
   /** User-space output waiting for the socket's drain event. */
-  outputQueue: Buffer[];
+  outputQueue: Deque<Buffer>;
   outputQueueBytes: number;
   outputBackpressured: boolean;
   closeWhenDrained: boolean;
@@ -1054,13 +1055,13 @@ export class YasdServer {
       decoder: new RespDecoder(),
       httpBuf: null,
       protocol: 'undecided',
-      requestQueue: [], requestQueueBytes: 0, processing: false,
+      requestQueue: new Deque<RespReply>(), requestQueueBytes: 0, processing: false,
       subs: new Map(),
       subMode: false,
       authed: !this.authRequired,
       watchVersions: null,
       txQueue: null, txBytes: 0, txFailed: false,
-      outputQueue: [],
+      outputQueue: new Deque<Buffer>(),
       outputQueueBytes: 0,
       outputBackpressured: false,
       closeWhenDrained: false,

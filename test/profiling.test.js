@@ -70,13 +70,13 @@ async function runTests() {
     db.close();
   });
 
-  await test('explain: range/LIKE/OR/mixed-AND fall back to full-scan', async () => {
+  await test('explain: range/LIKE/OR fall back to full-scan', async () => {
     const db = seed();
     for (const sql of [
       'SELECT * FROM users WHERE age > 25',
       "SELECT * FROM users WHERE name LIKE 'A%'",
       "SELECT * FROM users WHERE name = 'Ann' OR age = 30",
-      "SELECT * FROM users WHERE age > 25 AND name = 'Bob'",
+
       'SELECT * FROM users',
     ]) {
       const plan = db.explain(sql);

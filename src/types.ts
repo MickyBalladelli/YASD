@@ -33,10 +33,11 @@ export interface ColumnDefinition {
 
 export interface TableData {
   schema: TableSchema;
-  rows: Row[];
-  // Indexes only cover Primitive values; objects/arrays are not indexed
-  // (reference-equality Map keys would be useless for lookups). Sets make
-  // row membership removal O(1); row positions are rebuilt after DELETE.
+  /** Stable IDs preserve insertion order and make selective deletion incremental. */
+  rows: Map<number, Row>;
+  nextRowId: number;
+  primaryIndex: Map<string, number>;
+  rowBytes: Map<number, number>;
   indexes: { [columnName: string]: Map<Primitive, Set<number>> };
 }
 

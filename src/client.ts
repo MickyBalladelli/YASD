@@ -10,6 +10,7 @@
 //   await client.close();
 
 import * as net from 'net';
+import { Deque } from './deque';
 import { dialSocket } from './transport';
 import * as tls from 'tls';
 import * as http from 'http';
@@ -211,7 +212,7 @@ interface SubAckWaiter {
 interface PooledConn {
   socket: net.Socket;
   decoder: RespDecoder;
-  pending: Pending[];
+  pending: Deque<Pending>;
   dead: boolean;
 }
 
@@ -762,7 +763,7 @@ export class YasdClient {
     socket.on('data', chunk => {
       let replies: RespReply[];
       try {
-        replies = conn.decoder.push(Buffer.from(chunk));
+        replies = conn.decoder.push(chunk);
       } catch (err) {
         this.failConn(conn, err as Error);
         return;
@@ -816,7 +817,7 @@ export class YasdClient {
 
   private async dialCommand(): Promise<PooledConn> {
     const socket = await this.dialRaw();
-    const conn: PooledConn = { socket, decoder: new RespDecoder(), pending: [], dead: false };
+    const conn: PooledConn = { socket, decoder: new RespDecoder(), pending: new Deque<Pending>(), dead: false };
     this.attachCommandHandlers(conn);
     if (this.password !== undefined) {
       try {
@@ -1144,7 +1145,7 @@ export class YasdTransaction {
   private abortController = new AbortController();
   private socket?: net.Socket;
   private decoder = new RespDecoder();
-  private pending: Pending[] = [];
+  private pending = new Deque<Pending>();
   private connecting?: Promise<void>;
   private begun = false;
   private operationTail: Promise<void> = Promise.resolve();

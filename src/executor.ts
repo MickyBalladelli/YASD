@@ -33,6 +33,8 @@ type TruthValue = boolean | null;
 
 import { DatabaseError } from './errors';
 import { cloneJsonValue } from './json';
+import { valueIdentity, TopK, matchLike } from './query-utils';
+import { validatePositiveSafeInteger } from './validation';
 
 export interface SlowQueryEntry {
   sql: string;
@@ -66,12 +68,45 @@ export interface QueryProfile extends QueryPlan {
 export interface ExecutorOptions {
   /** Columns to index on every table. Omit to index all columns; [] disables automatic indexes. */
   indexColumns?: string[];
+  maxRows?: number;
+  maxBytes?: number;
+  maxResultRows?: number;
+  maxResultBytes?: number;
+  maxTables?: number;
 }
 
 export class Executor {
   private db: Database;
   private slow = new SlowLog();
   private indexColumns?: Set<string>;
+  private readonly limits: Required<Omit<ExecutorOptions, 'indexColumns'>>;
+  private storedRows = 0;
+  private storedBytes = 0;
+  private examinedRows = 0;
+  private statements = new Map<string, SqlStatement>();
+  private statementBytes = 0;
+
+  private prepared(sql: string): SqlStatement {
+    const cached = this.statements.get(sql);
+    if (cached) return cached;
+    const statement = parse(sql); const bytes = Buffer.byteLength(sql);
+    if (bytes <= 64 * 1024) {
+      while (this.statements.size >= 128 || this.statementBytes + bytes > 1024 * 1024) {
+        const key = this.statements.keys().next().value as string;
+        this.statements.delete(key); this.statementBytes -= Buffer.byteLength(key);
+      }
+      this.statements.set(sql, statement); this.statementBytes += bytes;
+    }
+    return statement;
+  }
+
+  stats() { return { rows: this.storedRows, bytes: this.storedBytes, tables: this.db.tables.size,
+    lastRowsExamined: this.examinedRows, preparedStatements: this.statements.size, limits: { ...this.limits } }; }
+  private checkCapacity(rows: number, bytes: number): void {
+    if (rows > this.limits.maxRows || bytes > this.limits.maxBytes) {
+      throw new DatabaseError('SQL storage limit exceeded', 'LIMIT_EXCEEDED');
+    }
+  }
 
   constructor(options: ExecutorOptions = {}) {
     if (options === null || typeof options !== 'object' || Array.isArray(options)) {
@@ -93,6 +128,13 @@ export class Executor {
       }
       this.indexColumns = columns;
     }
+    this.limits = {
+      maxRows: validatePositiveSafeInteger(options.maxRows ?? 1_000_000, 'SQL maxRows'),
+      maxBytes: validatePositiveSafeInteger(options.maxBytes ?? 256 * 1024 * 1024, 'SQL maxBytes'),
+      maxResultRows: validatePositiveSafeInteger(options.maxResultRows ?? 100_000, 'SQL maxResultRows'),
+      maxResultBytes: validatePositiveSafeInteger(options.maxResultBytes ?? 16 * 1024 * 1024, 'SQL maxResultBytes'),
+      maxTables: validatePositiveSafeInteger(options.maxTables ?? 1024, 'SQL maxTables'),
+    };
     this.db = { tables: new Map() };
   }
 
@@ -122,7 +164,7 @@ export class Executor {
 
     const started = performance.now();
     try {
-      const statement = parse(text);
+      const statement = this.prepared(text);
       return this.executeStatement(statement);
     } finally {
       this.slow.record(text, performance.now() - started);
@@ -200,81 +242,47 @@ export class Executor {
    * can only cost time, never correctness.
    */
   private planIndexLookup(table: TableData, where: WhereClause): number[] | undefined {
-    switch (where.type) {
-      case 'comparison': {
-        const comp = where as ComparisonClause;
-        if (comp.operator === '=') {
-          if (
-            comp.left.type === 'column_ref' &&
-            this.isColumn(table, comp.left.name) &&
-            !Array.isArray(comp.right) &&
-            comp.right.type === 'literal' &&
-            this.isIndexableValue(comp.right.value)
-          ) {
-            return this.indexGet(table, comp.left.name, comp.right.value);
-          }
-          if (
-            comp.left.type === 'literal' &&
-            this.isIndexableValue(comp.left.value) &&
-            !Array.isArray(comp.right) &&
-            comp.right.type === 'column_ref' &&
-            this.isColumn(table, comp.right.name)
-          ) {
-            return this.indexGet(table, comp.right.name, comp.left.value);
-          }
-          return undefined;
-        }
-        if (comp.operator === 'in') {
-          if (
-            comp.left.type === 'column_ref' &&
-            this.isColumn(table, comp.left.name) &&
-            Array.isArray(comp.right)
-          ) {
-            const out = new Set<number>();
-            for (const v of comp.right) {
-              if (v.type !== 'literal' || !this.isIndexableValue(v.value)) return undefined;
-              const rows = this.indexGet(table, comp.left.name, v.value);
-              if (rows === undefined) return undefined;
-              for (const i of rows) out.add(i);
-            }
-            return [...out].sort((a, b) => a - b);
-          }
-          return undefined;
-        }
-        return undefined;
-      }
-      case 'and': {
-        const and = where as AndClause;
-        const left = this.planIndexLookup(table, and.left);
-        const right = this.planIndexLookup(table, and.right);
-        if (left === undefined || right === undefined) return undefined;
-        const rightSet = new Set(right);
-        return left.filter(i => rightSet.has(i));
-      }
-      default:
-        return undefined;
-    }
+    return this.indexPlan(table, where)?.lookup();
   }
 
-  /** Rebuild every column index in a single O(rows x cols) pass. */
-  private rebuildIndexes(table: TableData): void {
-    for (const index of Object.values(table.indexes)) {
-      index.clear();
+  /** One lazy plan drives both EXPLAIN and execution. Residual filters always run. */
+  private indexPlan(table: TableData, where: WhereClause): { columns: string[]; lookup: () => number[] } | undefined {
+    if (where.type === 'and') {
+      const left = this.indexPlan(table, where.left); const right = this.indexPlan(table, where.right);
+      if (!left) return right; if (!right) return left;
+      return { columns: [...new Set([...left.columns, ...right.columns])], lookup: () => {
+        const a = left.lookup(); const b = new Set(right.lookup()); return a.filter(id => b.has(id));
+      } };
     }
-    for (const colDef of table.schema.columns) {
-      const index = table.indexes[colDef.name];
-      if (!index) continue;
-      for (let i = 0; i < table.rows.length; i++) {
-        const value = table.rows[i][colDef.name];
-        if (!this.isIndexableValue(value)) continue; // objects/arrays aren't indexed
-        let positions = index.get(value);
-        if (!positions) {
-          positions = new Set<number>();
-          index.set(value, positions);
-        }
-        positions.add(i);
+    if (where.type !== 'comparison') return undefined;
+    const { left, right, operator } = where;
+    let column: string | undefined; let values: Primitive[] = [];
+    if (operator === '=' && !Array.isArray(right)) {
+      if (left.type === 'column_ref' && right.type === 'literal' && this.isIndexableValue(right.value)) {
+        column = left.name; values = [right.value];
+      } else if (right.type === 'column_ref' && left.type === 'literal' && this.isIndexableValue(left.value)) {
+        column = right.name; values = [left.value];
+      }
+    } else if (operator === 'in' && left.type === 'column_ref' && Array.isArray(right)) {
+      column = left.name;
+      for (const item of right) {
+        if (item.type !== 'literal' || !this.isIndexableValue(item.value)) return undefined;
+        values.push(item.value);
       }
     }
+    if (column === undefined || !table.indexes[column]) return undefined;
+    const index = table.indexes[column];
+    return { columns: [column], lookup: () => {
+      const ids = new Set<number>(); for (const value of values) for (const id of index.get(value) ?? []) ids.add(id);
+      return [...ids];
+    } };
+  }
+
+  private deleteRow(table: TableData, id: number, row: Row): void {
+    for (const column of table.schema.columns) this.removeIndexEntry(table, column.name, row[column.name], id);
+    if (table.schema.primaryKey) table.primaryIndex.delete(valueIdentity(row[table.schema.primaryKey]));
+    this.storedBytes -= table.rowBytes.get(id) ?? 0; this.storedRows--;
+    table.rowBytes.delete(id); table.rows.delete(id);
   }
 
   private assertColumnExists(table: TableData, column: string, tableName: string): void {
@@ -392,28 +400,15 @@ export class Executor {
     const primaryKey = table.schema.primaryKey;
     if (!primaryKey) return;
 
-    const replacedRows = new Set(
-      candidates
-        .filter(candidate => candidate.index !== undefined)
-        .map(candidate => candidate.index)
-    );
-    const seen: Value[] = [];
-
-    for (let i = 0; i < table.rows.length; i++) {
-      if (!replacedRows.has(i)) {
-        seen.push(table.rows[i][primaryKey]);
-      }
-    }
-
+    const replacedRows = new Set(candidates.map(candidate => candidate.index));
+    const seen = new Set<string>();
     for (const candidate of candidates) {
-      const value = candidate.row[primaryKey];
-      if (seen.some(existing => this.valuesEqual(existing, value))) {
-        throw new DatabaseError(
-          `Duplicate primary key value '${String(value)}' in table '${table.schema.name}'`,
-          'PRIMARY_KEY_CONSTRAINT'
-        );
+      const key = valueIdentity(candidate.row[primaryKey]);
+      const existing = table.primaryIndex.get(key);
+      if (seen.has(key) || (existing !== undefined && !replacedRows.has(existing))) {
+        throw new DatabaseError(`Duplicate primary key value in table '${table.schema.name}'`, 'PRIMARY_KEY_CONSTRAINT');
       }
-      seen.push(value);
+      seen.add(key);
     }
   }
 
@@ -426,13 +421,11 @@ export class Executor {
       throw new DatabaseError(`Table '${tableName}' already exists`, 'TABLE_EXISTS');
     }
 
+    if (this.db.tables.size >= this.limits.maxTables) throw new DatabaseError('SQL table limit exceeded', 'LIMIT_EXCEEDED');
     const tableData: TableData = {
-      schema: {
-        name: tableName,
-        columns,
-        primaryKey
-      },
-      rows: [],
+      schema: { name: tableName, columns: columns.map(column => ({ ...column,
+        ...(column.default === undefined ? {} : { default: cloneJsonValue(column.default) }) })), primaryKey },
+      rows: new Map(), nextRowId: 0, primaryIndex: new Map(), rowBytes: new Map(),
       indexes: Object.create(null)
     };
 
@@ -531,13 +524,17 @@ export class Executor {
       preparedRows.map(row => ({ row }))
     );
 
-    const firstRowIndex = table.rows.length;
-    table.rows.push(...preparedRows);
+    const sizes = preparedRows.map(row => Buffer.byteLength(JSON.stringify(row)));
+    const addedBytes = sizes.reduce((a, b) => a + b, 0);
+    this.checkCapacity(this.storedRows + preparedRows.length, this.storedBytes + addedBytes);
+    if (!Number.isSafeInteger(table.nextRowId + preparedRows.length)) throw new DatabaseError('SQL row ID limit exceeded', 'LIMIT_EXCEEDED');
     for (let i = 0; i < preparedRows.length; i++) {
-      for (const colDef of colDefs) {
-        this.addIndexEntry(table, colDef.name, preparedRows[i][colDef.name], firstRowIndex + i);
-      }
+      const row = preparedRows[i]; const id = table.nextRowId++;
+      table.rows.set(id, row); table.rowBytes.set(id, sizes[i]);
+      if (table.schema.primaryKey) table.primaryIndex.set(valueIdentity(row[table.schema.primaryKey]), id);
+      for (const colDef of colDefs) this.addIndexEntry(table, colDef.name, row[colDef.name], id);
     }
+    this.storedRows += preparedRows.length; this.storedBytes += addedBytes;
 
     return {
       columns: [],
@@ -555,59 +552,48 @@ export class Executor {
     }
     this.validateSelectReferences(table, columns, orderBy, where, tableName);
 
-    // WHERE: prefer the column index for `=` / `IN` (incl. ANDs of those);
-    // anything else falls back to a full scan. Index candidates are always
-    // re-checked with evaluateWhere so staleness can't affect correctness.
-    let rows: Row[];
+    const skip = offset ?? 0;
+    const take = limit ?? this.limits.maxResultRows + 1;
     const planned = where ? this.planIndexLookup(table, where) : undefined;
-    if (planned !== undefined) {
-      rows = [];
-      for (const i of planned) {
-        const row = table.rows[i];
-        if (row && (!where || this.evaluateWhere(row, where, table) === true)) {
-          rows.push(row);
-        }
+    const ids = planned === undefined ? table.rows.keys() : planned.sort((a, b) => a - b);
+    type Selected = { row: Row; id: number };
+    const compare = (a: Selected, b: Selected): number => {
+      if (!orderBy) return a.id - b.id;
+      const av = a.row[orderBy.column]; const bv = b.row[orderBy.column];
+      const cmp = this.compareOrderValues(av, bv);
+      return (cmp && av != null && bv != null && orderBy.direction === 'desc' ? -cmp : cmp) || a.id - b.id;
+    };
+    const k = Math.min(table.rows.size, skip + take);
+    const top = orderBy ? new TopK<Selected>(k, compare) : undefined;
+    let selected: Selected[] = []; let matched = 0; this.examinedRows = 0;
+    if (take > 0) for (const id of ids) {
+      const row = table.rows.get(id); if (!row) continue;
+      this.examinedRows++;
+      if (where && this.evaluateWhere(row, where, table) !== true) continue;
+      if (top) top.add({ row, id });
+      else {
+        if (matched++ < skip) continue;
+        selected.push({ row, id });
+        if (selected.length >= take) break;
       }
-    } else if (where) {
-      rows = table.rows.filter(row => this.evaluateWhere(row, where, table) === true);
-    } else {
-      rows = [...table.rows];
     }
-
-    // Apply ORDER BY
-    if (orderBy) {
-      const orderedRows = rows.map((row, position) => ({ row, position }));
-      orderedRows.sort((a, b) => {
-        const comparison = this.compareOrderValues(
-          a.row[orderBy.column],
-          b.row[orderBy.column]
-        );
-        if (comparison !== 0) {
-          const aNull = a.row[orderBy.column] === null || a.row[orderBy.column] === undefined;
-          const bNull = b.row[orderBy.column] === null || b.row[orderBy.column] === undefined;
-          if (!aNull && !bNull && orderBy.direction === 'desc') return -comparison;
-          return comparison;
-        }
-        return a.position - b.position;
-      });
-      rows = orderedRows.map(entry => entry.row);
-    }
-
-    // Apply OFFSET and LIMIT
-    if (offset !== undefined) {
-      rows = rows.slice(offset);
-    }
-    if (limit !== undefined) {
-      rows = rows.slice(0, limit);
-    }
+    if (top) selected = top.sorted().slice(skip, skip + take);
+    if (selected.length > this.limits.maxResultRows) throw new DatabaseError('SQL result row limit exceeded', 'LIMIT_EXCEEDED');
+    const rows = selected.map(item => item.row);
 
     // Select columns
     const selectedColumns = columns === '*'
       ? table.schema.columns.map(c => c.name)
       : columns;
 
+    let resultBytes = 2;
     const resultRows = rows.map(row => {
       const resultRow: Row = {};
+      for (const col of selectedColumns) {
+        resultBytes += Buffer.byteLength(JSON.stringify(col)) + Buffer.byteLength(JSON.stringify(row[col] ?? null)) + 2;
+      }
+      resultBytes += 3;
+      if (resultBytes > this.limits.maxResultBytes) throw new DatabaseError('SQL result byte limit exceeded', 'LIMIT_EXCEEDED');
       for (const col of selectedColumns) {
         Object.defineProperty(resultRow, col, { value: cloneJsonValue(row[col] ?? null, 'SQL result'),
           enumerable: true, writable: true, configurable: true });
@@ -657,11 +643,11 @@ export class Executor {
     const candidateIndices = where
       ? this.planIndexLookup(table, where)
       : undefined;
-    const rowIndices = candidateIndices ?? table.rows.map((_, index) => index);
+    const rowIndices = candidateIndices ?? table.rows.keys();
     const updates: Array<{ index: number; row: Row }> = [];
 
     for (const i of rowIndices) {
-      const row = table.rows[i];
+      const row = table.rows.get(i);
       if (!row) continue;
 
       // Check WHERE condition
@@ -676,16 +662,23 @@ export class Executor {
       updates.push({ index: i, row: nextRow });
     }
 
-    this.assertPrimaryKeyUnique(table, updates);
-
-    for (const update of updates) {
-      const current = table.rows[update.index];
+    const pk = table.schema.primaryKey;
+    const changesPk = pk !== undefined && setColumns.has(pk);
+    if (changesPk) this.assertPrimaryKeyUnique(table, updates);
+    const sizes = updates.map(update => Buffer.byteLength(JSON.stringify(update.row)));
+    const delta = updates.reduce((total, update, i) => total + sizes[i] - (table.rowBytes.get(update.index) ?? 0), 0);
+    this.checkCapacity(this.storedRows, this.storedBytes + delta);
+    if (changesPk) for (const update of updates) table.primaryIndex.delete(valueIdentity(table.rows.get(update.index)![pk!]));
+    for (let i = 0; i < updates.length; i++) {
+      const update = updates[i]; const current = table.rows.get(update.index)!;
       for (const { column } of preparedSet) {
         this.removeIndexEntry(table, column, current[column], update.index);
         this.addIndexEntry(table, column, update.row[column], update.index);
       }
-      table.rows[update.index] = update.row;
+      table.rows.set(update.index, update.row); table.rowBytes.set(update.index, sizes[i]);
+      if (changesPk) table.primaryIndex.set(valueIdentity(update.row[pk!]), update.index);
     }
+    this.storedBytes += delta;
 
     return {
       columns: [],
@@ -703,39 +696,15 @@ export class Executor {
     }
     if (where) this.validateWhereColumns(table, where, tableName);
 
-    if (!where) {
-      const affectedRows = table.rows.length;
-      table.rows = [];
-      for (const colName of Object.keys(table.indexes)) {
-        table.indexes[colName] = new Map();
-      }
-      return { columns: [], rows: [], affectedRows };
+    const ids = (where ? this.planIndexLookup(table, where) : undefined) ?? table.rows.keys();
+    const deleted: Array<[number, Row]> = [];
+    // Stage predicate evaluation: a work-limit failure must not partially delete.
+    for (const id of ids) {
+      const row = table.rows.get(id);
+      if (row && (!where || this.evaluateWhere(row, where, table) === true)) deleted.push([id, row]);
     }
-
-    const candidateIndices = this.planIndexLookup(table, where);
-    const deletedIndices = new Set<number>();
-    if (candidateIndices !== undefined) {
-      for (const index of candidateIndices) {
-        const row = table.rows[index];
-        if (row && this.evaluateWhere(row, where, table) === true) {
-          deletedIndices.add(index);
-        }
-      }
-    } else {
-      for (let index = 0; index < table.rows.length; index++) {
-        if (this.evaluateWhere(table.rows[index], where, table) === true) {
-          deletedIndices.add(index);
-        }
-      }
-    }
-
-    const affectedRows = deletedIndices.size;
-    if (affectedRows === 0) return { columns: [], rows: [], affectedRows: 0 };
-
-    const keep = table.rows.filter((_, index) => !deletedIndices.has(index));
-    table.rows = keep;
-    // Row positions shift after DELETE, so rebuild only the configured indexes.
-    this.rebuildIndexes(table);
+    for (const [id, row] of deleted) this.deleteRow(table, id, row);
+    const affectedRows = deleted.length;
 
     return {
       columns: [],
@@ -751,6 +720,9 @@ export class Executor {
       throw new DatabaseError(`Table '${tableName}' not found`, 'TABLE_NOT_FOUND');
     }
 
+    const table = this.db.tables.get(tableName)!;
+    this.storedRows -= table.rows.size;
+    for (const bytes of table.rowBytes.values()) this.storedBytes -= bytes;
     this.db.tables.delete(tableName);
 
     return {
@@ -933,22 +905,7 @@ export class Executor {
   }
 
   private likeCompare(value: string, pattern: string): boolean {
-    // Simple LIKE implementation (supports % and _)
-    // Convert LIKE pattern to regex
-    let regexPattern = '';
-    for (let i = 0; i < pattern.length; i++) {
-      const char = pattern[i];
-      if (char === '%') {
-        regexPattern += '.*';
-      } else if (char === '_') {
-        regexPattern += '.';
-      } else {
-        regexPattern += char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      }
-    }
-
-    const regex = new RegExp(`^${regexPattern}$`, 'i');
-    return regex.test(value);
+    return matchLike(value, pattern);
   }
 
   // Public API
@@ -964,7 +921,7 @@ export class Executor {
    */
   explain(sql: string): QueryPlan {
     const text = sql.trim();
-    const statement = parse(text);
+    const statement = this.prepared(text);
     if (statement.type !== 'select') {
       return { statement: statement.type, strategy: 'n/a', hasOrderBy: false };
     }
@@ -981,10 +938,10 @@ export class Executor {
     const plan: QueryPlan = {
       statement: 'select',
       table: statement.tableName,
-      columns: statement.columns,
+      columns: statement.columns === '*' ? '*' : [...statement.columns],
       strategy: 'full-scan',
       hasOrderBy: statement.orderBy !== undefined,
-      tableRows: table?.rows.length,
+      tableRows: table?.rows.size,
     };
     if (statement.orderBy !== undefined) {
       plan.orderBy = { column: statement.orderBy.column, direction: statement.orderBy.direction };
@@ -1021,54 +978,7 @@ export class Executor {
    * planIndexLookup). Returns undefined when it falls back to a full scan.
    */
   private describeIndexUse(table: TableData, where: WhereClause): string[] | undefined {
-    switch (where.type) {
-      case 'comparison': {
-        const comp = where as ComparisonClause;
-        if (comp.operator === '=') {
-          if (
-            comp.left.type === 'column_ref' &&
-            this.isColumn(table, comp.left.name) &&
-            !Array.isArray(comp.right) &&
-            comp.right.type === 'literal' &&
-            this.isIndexableValue(comp.right.value)
-          ) {
-            return table.indexes[comp.left.name] ? [comp.left.name] : undefined;
-          }
-          if (
-            comp.left.type === 'literal' &&
-            this.isIndexableValue(comp.left.value) &&
-            !Array.isArray(comp.right) &&
-            comp.right.type === 'column_ref' &&
-            this.isColumn(table, comp.right.name)
-          ) {
-            return table.indexes[comp.right.name] ? [comp.right.name] : undefined;
-          }
-          return undefined;
-        }
-        if (comp.operator === 'in') {
-          if (
-            comp.left.type === 'column_ref' &&
-            this.isColumn(table, comp.left.name) &&
-            Array.isArray(comp.right) &&
-            comp.right.every(v => v.type === 'literal' && this.isIndexableValue(v.value)) &&
-            table.indexes[comp.left.name]
-          ) {
-            return [comp.left.name];
-          }
-          return undefined;
-        }
-        return undefined;
-      }
-      case 'and': {
-        const and = where as AndClause;
-        const left = this.describeIndexUse(table, and.left);
-        const right = this.describeIndexUse(table, and.right);
-        if (!left || !right) return undefined;
-        return Array.from(new Set([...left, ...right]));
-      }
-      default:
-        return undefined;
-    }
+    return this.indexPlan(table, where)?.columns;
   }
 
   getTableNames(): string[] {
@@ -1084,5 +994,7 @@ export class Executor {
 
   reset(): void {
     this.db = { tables: new Map() };
+    this.storedRows = 0; this.storedBytes = 0; this.examinedRows = 0;
+    this.statements.clear(); this.statementBytes = 0;
   }
 }

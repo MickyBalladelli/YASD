@@ -23,6 +23,8 @@ import {
   validateTimeout,
 } from './validation';
 import { structuralEqual } from './value';
+import { OrderedMap } from './ordered-map';
+import { performance } from 'perf_hooks';
 
 /** Per-namespace TTL defaults (ms). `feed`/`feeds` 15s, channel lists 30s, popular 60s. */
 export const DEFAULT_NAMESPACE_TTLS: Record<string, number> = {
@@ -88,15 +90,11 @@ interface Entry {
 }
 
 interface CacheState {
-  // Keep the complete ordered map. A transaction can clear a prefix, create
-  // new keys, and evict unrelated LRU entries before a later op fails.
-  entries: Array<[string, Entry]>;
   bytes: number;
   hits: number;
   misses: number;
   evictions: number;
   expiries: number;
-  keyVersions: Map<string, number>;
   absentEpoch: number;
 }
 
@@ -175,7 +173,13 @@ export function validateKVOptions(options: KVOptions = {}): KVOptions {
 export type KVExpiryListener = (key: string) => void
 
 export class KVCache {
-  private map = new Map<string, Entry>();
+  private expiring = new OrderedMap<string, number>();
+  private map = new OrderedMap<string, Entry>((key, entry) => {
+    if (entry?.expiresAt === undefined) this.expiring.delete(key);
+    else this.expiring.set(key, entry.expiresAt);
+  });
+  private sweepCursor?: Iterator<[string, number]>;
+  private sweepMaxLagMs = 0;
   private bytes = 0;
   private hits = 0;
   private misses = 0;
@@ -191,7 +195,7 @@ export class KVCache {
    * delete is still observed as a change; the map is pruned (safe direction:
    * pruning can only cause a false abort, never a missed conflict).
    */
-  private keyVersions = new Map<string, number>();
+  private keyVersions = new OrderedMap<string, number>();
 
   readonly maxEntries: number;
   readonly maxBytes: number;
@@ -273,38 +277,25 @@ export class KVCache {
   }
 
   private captureState(): CacheState {
-    const entries: Array<[string, Entry]> = [];
-    for (const [key, entry] of this.map) {
-      entries.push([
-        key,
-        {
-          // Owned values are never modified in place; only entry metadata changes.
-          value: entry.value,
-          expiresAt: entry.expiresAt,
-          size: entry.size,
-        },
-      ]);
-    }
+    this.map.begin(); this.keyVersions.begin(); this.expiring.begin();
     return {
-      entries,
       bytes: this.bytes,
       hits: this.hits,
       misses: this.misses,
       evictions: this.evictions,
       expiries: this.expiries,
-      keyVersions: new Map(this.keyVersions),
       absentEpoch: this.absentEpoch,
     };
   }
 
   private restoreState(state: CacheState): void {
-    this.map = new Map(state.entries);
+    this.map.rollback(); this.keyVersions.rollback(); this.expiring.rollback();
+    this.sweepCursor = undefined;
     this.bytes = state.bytes;
     this.hits = state.hits;
     this.misses = state.misses;
     this.evictions = state.evictions;
     this.expiries = state.expiries;
-    this.keyVersions = new Map(state.keyVersions);
     this.absentEpoch = state.absentEpoch;
   }
 
@@ -314,6 +305,7 @@ export class KVCache {
     this.atomicFrames.push(frame)
     try {
       const result = fn()
+      this.map.commit(); this.keyVersions.commit(); this.expiring.commit();
       this.atomicFrames.pop()
       const parent = this.atomicFrames[this.atomicFrames.length - 1]
       if (parent) {
@@ -414,7 +406,7 @@ export class KVCache {
    */
   set(key: string, value: Value, ttlMs?: number): Value {
     this.assertKeyFits(key);
-    const ownedValue = cloneJsonValue(value, 'cache value');
+    const ownedValue = cloneJsonValue(value, 'cache value', this.maxValueBytes);
     const ttl = this.resolveTTLMs(key, ttlMs);
     const expiresAt = ttl === undefined ? undefined : Date.now() + ttl;
     return this.setOwned(key, ownedValue, expiresAt, value);
@@ -426,7 +418,7 @@ export class KVCache {
     if (expiresAt !== undefined && !Number.isFinite(expiresAt)) {
       throw new Error(`expiresAt must be a finite epoch ms, got ${String(expiresAt)}`);
     }
-    const ownedValue = cloneJsonValue(value, 'cache value');
+    const ownedValue = cloneJsonValue(value, 'cache value', this.maxValueBytes);
     return this.setOwned(key, ownedValue, expiresAt, value);
   }
 
@@ -529,7 +521,7 @@ export class KVCache {
     this.assertKeyFits(prefix);
     const needle = prefix + ':';
     let count = 0;
-    for (const key of Array.from(this.map.keys())) {
+    for (const key of this.map.keys()) {
       if (key === prefix || key.startsWith(needle)) {
         const entry = this.map.get(key);
         if (entry) this.bytes -= entry.size;
@@ -817,9 +809,8 @@ export class KVCache {
       this.notifyExpired(key)
       return true;
     }
-    entry.expiresAt = expiresAt;
     this.map.delete(key);
-    this.map.set(key, entry);
+    this.map.set(key, { ...entry, expiresAt });
     this.bumpVersion(key);
     return true;
   }
@@ -834,10 +825,9 @@ export class KVCache {
       this.removeExpired(key, entry);
       return false;
     }
-    entry.expiresAt = Date.now() + ttl;
-    // LRU touch.
+    // Metadata is copy-on-write so undo records never retain a mutated entry.
     this.map.delete(key);
-    this.map.set(key, entry);
+    this.map.set(key, { ...entry, expiresAt: Date.now() + ttl });
     this.bumpVersion(key);
     return true;
   }
@@ -851,24 +841,45 @@ export class KVCache {
       this.removeExpired(key, entry);
       return false;
     }
-    entry.expiresAt = undefined;
     this.map.delete(key);
-    this.map.set(key, entry);
+    this.map.set(key, { ...entry, expiresAt: undefined });
     this.bumpVersion(key);
     return true;
   }
 
-  /** Remove all expired keys. Returns the number removed. */
+  /** Explicit full sweep; background work uses sweepBudget instead. */
   sweep(): number {
     const now = Date.now();
     let count = 0;
-    for (const [key, entry] of Array.from(this.map)) {
-      if (entry.expiresAt !== undefined && entry.expiresAt <= now) {
-        this.removeExpired(key, entry)
-        count++;
-      }
+    for (const [key] of this.expiring) {
+      const entry = this.map.get(key);
+      if (entry && this.isExpired(entry, now)) { this.removeExpired(key, entry); count++; }
     }
     return count;
+  }
+
+  /** Visit at most maxKeys expiring keys and spend at most maxMs per tick. */
+  sweepBudget(maxKeys = 1000, maxMs = 2): number {
+    validatePositiveSafeInteger(maxKeys, 'sweep maxKeys');
+    validateNonNegativeNumber(maxMs, 'sweep maxMs');
+    const started = performance.now(); const now = Date.now(); let removed = 0;
+    this.sweepCursor ??= this.expiring.entries();
+    for (let seen = 0; seen < maxKeys; seen++) {
+      if (seen > 0 && performance.now() - started >= maxMs) break;
+      const next = this.sweepCursor.next();
+      if (next.done) { this.sweepCursor = undefined; break; }
+      const [key] = next.value; const entry = this.map.get(key);
+      if (entry && this.isExpired(entry, now)) {
+        this.sweepMaxLagMs = Math.max(this.sweepMaxLagMs, now - (entry.expiresAt as number));
+        this.removeExpired(key, entry); removed++;
+      }
+    }
+    return removed;
+  }
+
+  maintenanceStats(): { expiringKeys: number; maxObservedExpiryLagMs: number; undoEntries: number } {
+    return { expiringKeys: this.expiring.size, maxObservedExpiryLagMs: this.sweepMaxLagMs,
+      undoEntries: this.map.journalSize + this.keyVersions.journalSize + this.expiring.journalSize };
   }
 
   startSweeper(intervalMs?: number): void {
@@ -878,7 +889,7 @@ export class KVCache {
     if (!(ms > 0)) return;
     this.stopSweeper();
     this.timer = setInterval(() => {
-      this.sweep();
+      this.sweepBudget();
     }, ms);
     // Don't hold the process open for a cache sweeper.
     const t = this.timer as unknown as { unref?: () => void };

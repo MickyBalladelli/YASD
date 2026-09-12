@@ -12,6 +12,7 @@ export type RespReply =
   | { kind: 'array'; items: Array<RespReply | null> }
   | { kind: 'nil' };
 
+import { RespReader } from './resp-reader';
 const CRLF = '\r\n';
 
 export interface RespDecoderOptions {
@@ -261,48 +262,8 @@ function parseValue(
 }
 
 /** Incremental streaming decoder: push bytes, drain complete values. */
-export class RespDecoder {
-  private buf: Buffer = Buffer.alloc(0);
-  private readonly limits: RespLimits;
-
-  constructor(options: RespDecoderOptions = {}) {
-    this.limits = resolveLimits(options);
-  }
-
-  push(chunk: Buffer | string): RespReply[] {
-    const piece = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
-    if (this.buf.length + piece.length > this.limits.maxBufferedBytes) {
-      this.buf = Buffer.alloc(0);
-      throw new Error(`RESP buffered bytes exceed ${this.limits.maxBufferedBytes}`);
-    }
-    this.buf = this.buf.length === 0 ? piece : Buffer.concat([this.buf, piece]);
-    const out: RespReply[] = [];
-    for (;;) {
-      if (this.buf.length === 0) break;
-      let parsed: [RespReply, number] | null;
-      try {
-        parsed = parseValue(this.buf, 0, this.limits, 0, 0);
-        if (!parsed && this.buf.length > this.limits.maxFrameBytes) {
-          throw new Error(`RESP frame exceeds ${this.limits.maxFrameBytes} bytes`);
-        }
-      } catch (err) {
-        this.buf = Buffer.alloc(0);
-        throw err;
-      }
-      if (!parsed) break;
-      out.push(parsed[0]);
-      this.buf = this.buf.slice(parsed[1]);
-    }
-    return out;
-  }
-
-  get bufferedBytes(): number {
-    return this.buf.length;
-  }
-
-  reset(): void {
-    this.buf = Buffer.alloc(0);
-  }
+export class RespDecoder extends RespReader {
+  constructor(options: RespDecoderOptions = {}) { super(resolveLimits(options)); }
 }
 
 /** Extract command argv (array of strings) from a decoded request. */
