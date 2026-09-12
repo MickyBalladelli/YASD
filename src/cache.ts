@@ -15,16 +15,16 @@
 //   - `persist(key)`: drop TTL, false if missing.
 // Expiry is lazy on `get`/`ttl`/`expire` plus an active background sweeper.
 
-import { Value } from './types';
+import { Value } from "./types";
 import {
   validateNonNegativeSafeInteger,
   validateNonNegativeNumber,
   validatePositiveSafeInteger,
   validateTimeout,
-} from './validation';
-import { structuralEqual } from './value';
-import { OrderedMap } from './ordered-map';
-import { performance } from 'perf_hooks';
+} from "./validation";
+import { structuralEqual } from "./value";
+import { OrderedMap } from "./ordered-map";
+import { performance } from "perf_hooks";
 
 /** Per-namespace TTL defaults (ms). `feed`/`feeds` 15s, channel lists 30s, popular 60s. */
 export const DEFAULT_NAMESPACE_TTLS: Record<string, number> = {
@@ -36,7 +36,7 @@ export const DEFAULT_NAMESPACE_TTLS: Record<string, number> = {
   presence: 30_000,
   typing: 10_000,
   ratelimit: 60_000,
-  'rate-limit': 60_000,
+  "rate-limit": 60_000,
   unread: 30_000,
 };
 
@@ -100,8 +100,11 @@ interface CacheState {
 
 /** Return the UTF-8 byte length used by the cache's byte accounting model. */
 function utf8ByteLength(value: string): number {
-  if (typeof Buffer !== 'undefined' && typeof Buffer.byteLength === 'function') {
-    return Buffer.byteLength(value, 'utf8');
+  if (
+    typeof Buffer !== "undefined" &&
+    typeof Buffer.byteLength === "function"
+  ) {
+    return Buffer.byteLength(value, "utf8");
   }
   return new TextEncoder().encode(value).length;
 }
@@ -109,55 +112,75 @@ function utf8ByteLength(value: string): number {
 /** Size model: UTF-8 bytes in the key plus UTF-8 bytes in JSON.stringify(value). */
 function valueByteLength(value: Value): number {
   const json = JSON.stringify(value);
-  if (json === undefined) throw new Error('value is not JSON-serializable');
+  if (json === undefined) throw new Error("value is not JSON-serializable");
   return utf8ByteLength(json);
 }
 
 // Shared with the network client so invalid values cannot be normalized away.
-import { cloneJsonValue } from './json';
-import { DatabaseError } from './errors';
+import { cloneJsonValue } from "./json";
+import { DatabaseError } from "./errors";
 
 function validateTTL(ttlMs: number, what: string): number {
   const ttl = validateNonNegativeNumber(ttlMs, what);
-  if (ttl > Number.MAX_SAFE_INTEGER - Date.now()) throw new DatabaseError(`${what} deadline exceeds safe epoch range`, 'INVALID_VALUE');
+  if (ttl > Number.MAX_SAFE_INTEGER - Date.now())
+    throw new DatabaseError(
+      `${what} deadline exceeds safe epoch range`,
+      "INVALID_VALUE",
+    );
   return ttl;
 }
 
 export function validateKVOptions(options: KVOptions = {}): KVOptions {
-  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
-    throw new Error('cache options must be an object');
+  if (
+    options === null ||
+    typeof options !== "object" ||
+    Array.isArray(options)
+  ) {
+    throw new Error("cache options must be an object");
   }
-  const maxEntries = options.maxEntries === undefined
-    ? 10_000
-    : validatePositiveSafeInteger(options.maxEntries, 'maxEntries');
-  const maxBytes = options.maxBytes === undefined
-    ? 64 * 1024 * 1024
-    : validatePositiveSafeInteger(options.maxBytes, 'maxBytes');
-  const maxKeyBytes = options.maxKeyBytes === undefined
-    ? DEFAULT_MAX_KEY_BYTES
-    : validatePositiveSafeInteger(options.maxKeyBytes, 'maxKeyBytes');
-  const maxValueBytes = options.maxValueBytes === undefined
-    ? DEFAULT_MAX_VALUE_BYTES
-    : validatePositiveSafeInteger(options.maxValueBytes, 'maxValueBytes');
-  const defaultTTLMs = options.defaultTTLMs === undefined
-    ? undefined
-    : validateTTL(options.defaultTTLMs, 'defaultTTLMs');
-  const sweepIntervalMs = options.sweepIntervalMs === undefined
-    ? 1000
-    : validateTimeout(options.sweepIntervalMs, 'sweepIntervalMs');
-  const namespaceTTLMs: Record<string, number> = Object.assign(Object.create(null), DEFAULT_NAMESPACE_TTLS);
+  const maxEntries =
+    options.maxEntries === undefined
+      ? 10_000
+      : validatePositiveSafeInteger(options.maxEntries, "maxEntries");
+  const maxBytes =
+    options.maxBytes === undefined
+      ? 64 * 1024 * 1024
+      : validatePositiveSafeInteger(options.maxBytes, "maxBytes");
+  const maxKeyBytes =
+    options.maxKeyBytes === undefined
+      ? DEFAULT_MAX_KEY_BYTES
+      : validatePositiveSafeInteger(options.maxKeyBytes, "maxKeyBytes");
+  const maxValueBytes =
+    options.maxValueBytes === undefined
+      ? DEFAULT_MAX_VALUE_BYTES
+      : validatePositiveSafeInteger(options.maxValueBytes, "maxValueBytes");
+  const defaultTTLMs =
+    options.defaultTTLMs === undefined
+      ? undefined
+      : validateTTL(options.defaultTTLMs, "defaultTTLMs");
+  const sweepIntervalMs =
+    options.sweepIntervalMs === undefined
+      ? 1000
+      : validateTimeout(options.sweepIntervalMs, "sweepIntervalMs");
+  const namespaceTTLMs: Record<string, number> = Object.assign(
+    Object.create(null),
+    DEFAULT_NAMESPACE_TTLS,
+  );
   if (options.namespaceTTLMs !== undefined) {
     if (
       options.namespaceTTLMs === null ||
-      typeof options.namespaceTTLMs !== 'object' ||
+      typeof options.namespaceTTLMs !== "object" ||
       Array.isArray(options.namespaceTTLMs)
     ) {
-      throw new Error('namespaceTTLMs must be an object of finite TTL values');
+      throw new Error("namespaceTTLMs must be an object of finite TTL values");
     }
     Object.assign(namespaceTTLMs, options.namespaceTTLMs);
   }
   for (const [namespace, ttlMs] of Object.entries(namespaceTTLMs)) {
-    namespaceTTLMs[namespace] = validateTTL(ttlMs, `namespaceTTLMs[${namespace}]`);
+    namespaceTTLMs[namespace] = validateTTL(
+      ttlMs,
+      `namespaceTTLMs[${namespace}]`,
+    );
   }
   return {
     maxEntries,
@@ -170,7 +193,7 @@ export function validateKVOptions(options: KVOptions = {}): KVOptions {
   };
 }
 
-export type KVExpiryListener = (key: string) => void
+export type KVExpiryListener = (key: string) => void;
 
 export class KVCache {
   private expiring = new OrderedMap<string, number>();
@@ -186,8 +209,9 @@ export class KVCache {
   private evictions = 0;
   private expiries = 0;
   private timer?: ReturnType<typeof setInterval>;
-  private expiryListener?: KVExpiryListener
-  private atomicFrames: Array<{ state: CacheState; expiredKeys: Set<string> }> = []
+  private expiryListener?: KVExpiryListener;
+  private atomicFrames: Array<{ state: CacheState; expiredKeys: Set<string> }> =
+    [];
   /**
    * Per-key mutation generation for optimistic transactions (WATCH).
    * Bumped on every state change (writes, deletes, TTL changes, expiry).
@@ -214,7 +238,7 @@ export class KVCache {
     this.defaultTTLMs = validated.defaultTTLMs;
     this.namespaceTTLMs = validated.namespaceTTLMs as Record<string, number>;
     this.sweepIntervalMs = validated.sweepIntervalMs as number;
-    this.expiryListener = expiryListener
+    this.expiryListener = expiryListener;
     if (this.sweepIntervalMs > 0) {
       this.startSweeper(this.sweepIntervalMs);
     }
@@ -222,20 +246,20 @@ export class KVCache {
 
   /** Namespace = text before the first ':' (Echo `cacheKey(ns, v)` => `ns:v`). */
   private namespaceOf(key: string): string {
-    const i = key.indexOf(':');
-    return i > 0 ? key.slice(0, i) : '';
+    const i = key.indexOf(":");
+    return i > 0 ? key.slice(0, i) : "";
   }
 
   private resolveTTLMs(key: string, ttlMs?: number): number | undefined {
     if (ttlMs !== undefined) {
-      return validateTTL(ttlMs, 'ttlMs');
+      return validateTTL(ttlMs, "ttlMs");
     }
     const ns = this.namespaceOf(key);
     if (ns && this.namespaceTTLMs[ns] !== undefined) {
       return validateTTL(this.namespaceTTLMs[ns], `namespaceTTLMs[${ns}]`);
     }
     if (this.defaultTTLMs !== undefined) {
-      return validateTTL(this.defaultTTLMs, 'defaultTTLMs');
+      return validateTTL(this.defaultTTLMs, "defaultTTLMs");
     }
     return undefined; // persist
   }
@@ -245,23 +269,23 @@ export class KVCache {
   }
 
   private notifyExpired(key: string): void {
-    const frame = this.atomicFrames[this.atomicFrames.length - 1]
+    const frame = this.atomicFrames[this.atomicFrames.length - 1];
     if (frame) {
-      frame.expiredKeys.add(key)
-      return
+      frame.expiredKeys.add(key);
+      return;
     }
     try {
-      this.expiryListener?.(key)
+      this.expiryListener?.(key);
     } catch {
       // Expiry observers must not break cache mutation.
     }
   }
 
   private flushExpiryEvents(keys: Set<string>): void {
-    if (!this.expiryListener) return
+    if (!this.expiryListener) return;
     for (const key of keys) {
       try {
-        this.expiryListener(key)
+        this.expiryListener(key);
       } catch {
         // Expiry observers must not break cache mutation.
       }
@@ -273,11 +297,13 @@ export class KVCache {
     this.bytes -= entry.size;
     this.expiries++;
     this.bumpVersion(key);
-    this.notifyExpired(key)
+    this.notifyExpired(key);
   }
 
   private captureState(): CacheState {
-    this.map.begin(); this.keyVersions.begin(); this.expiring.begin();
+    this.map.begin();
+    this.keyVersions.begin();
+    this.expiring.begin();
     return {
       bytes: this.bytes,
       hits: this.hits,
@@ -289,7 +315,9 @@ export class KVCache {
   }
 
   private restoreState(state: CacheState): void {
-    this.map.rollback(); this.keyVersions.rollback(); this.expiring.rollback();
+    this.map.rollback();
+    this.keyVersions.rollback();
+    this.expiring.rollback();
     this.sweepCursor = undefined;
     this.bytes = state.bytes;
     this.hits = state.hits;
@@ -301,22 +329,27 @@ export class KVCache {
 
   /** Run synchronous work atomically, restoring all cache state on failure. */
   atomic<T>(fn: () => T): T {
-    const frame = { state: this.captureState(), expiredKeys: new Set<string>() }
-    this.atomicFrames.push(frame)
+    const frame = {
+      state: this.captureState(),
+      expiredKeys: new Set<string>(),
+    };
+    this.atomicFrames.push(frame);
     try {
-      const result = fn()
-      this.map.commit(); this.keyVersions.commit(); this.expiring.commit();
-      this.atomicFrames.pop()
-      const parent = this.atomicFrames[this.atomicFrames.length - 1]
+      const result = fn();
+      this.map.commit();
+      this.keyVersions.commit();
+      this.expiring.commit();
+      this.atomicFrames.pop();
+      const parent = this.atomicFrames[this.atomicFrames.length - 1];
       if (parent) {
-        for (const key of frame.expiredKeys) parent.expiredKeys.add(key)
+        for (const key of frame.expiredKeys) parent.expiredKeys.add(key);
       } else {
-        this.flushExpiryEvents(frame.expiredKeys)
+        this.flushExpiryEvents(frame.expiredKeys);
       }
-      return result
+      return result;
     } catch (err) {
-      this.atomicFrames.pop()
-      this.restoreState(frame.state)
+      this.atomicFrames.pop();
+      this.restoreState(frame.state);
       throw err;
     }
   }
@@ -329,7 +362,8 @@ export class KVCache {
   getVersion(key: string): number {
     this.assertKeyFits(key);
     const entry = this.map.get(key);
-    if (entry && this.isExpired(entry, Date.now())) this.removeExpired(key, entry);
+    if (entry && this.isExpired(entry, Date.now()))
+      this.removeExpired(key, entry);
     return this.keyVersions.get(key) ?? this.absentEpoch;
   }
 
@@ -338,7 +372,10 @@ export class KVCache {
   private changeFrames: Set<string>[] = [];
 
   /** Final write effects, including evictions. The callback must durably commit or throw. */
-  atomicChanges<T>(fn: () => T, commit: (entries: SnapshotEntry[], deleted: string[]) => void): T {
+  atomicChanges<T>(
+    fn: () => T,
+    commit: (entries: SnapshotEntry[], deleted: string[]) => void,
+  ): T {
     const changed = new Set<string>();
     this.changeFrames.push(changed);
     try {
@@ -349,8 +386,14 @@ export class KVCache {
         for (const key of changed) {
           const entry = this.map.get(key);
           if (!entry || this.isExpired(entry, Date.now())) deleted.push(key);
-          else entries.push({ key, value: cloneJsonValue(entry.value, 'AOF value'),
-            ...(entry.expiresAt === undefined ? {} : { expiresAt: entry.expiresAt }) });
+          else
+            entries.push({
+              key,
+              value: cloneJsonValue(entry.value, "AOF value"),
+              ...(entry.expiresAt === undefined
+                ? {}
+                : { expiresAt: entry.expiresAt }),
+            });
         }
         commit(entries, deleted);
         return result;
@@ -361,7 +404,8 @@ export class KVCache {
   }
 
   private bumpVersion(key: string): void {
-    if (this.generation >= Number.MAX_SAFE_INTEGER) throw new DatabaseError('cache generation exhausted', 'LIMIT_EXCEEDED');
+    if (this.generation >= Number.MAX_SAFE_INTEGER)
+      throw new DatabaseError("cache generation exhausted", "LIMIT_EXCEEDED");
     this.keyVersions.set(key, ++this.generation);
     for (const frame of this.changeFrames) frame.add(key);
     // Bound tombstones. A monotonic absent-key epoch makes pruning conservative:
@@ -396,7 +440,7 @@ export class KVCache {
     this.map.delete(key);
     this.map.set(key, entry);
     this.hits++;
-    return cloneJsonValue(entry.value, 'cached value');
+    return cloneJsonValue(entry.value, "cached value");
   }
 
   /**
@@ -406,7 +450,11 @@ export class KVCache {
    */
   set(key: string, value: Value, ttlMs?: number): Value {
     this.assertKeyFits(key);
-    const ownedValue = cloneJsonValue(value, 'cache value (maxValueBytes)', this.maxValueBytes);
+    const ownedValue = cloneJsonValue(
+      value,
+      "cache value (maxValueBytes)",
+      this.maxValueBytes,
+    );
     const ttl = this.resolveTTLMs(key, ttlMs);
     const expiresAt = ttl === undefined ? undefined : Date.now() + ttl;
     return this.setOwned(key, ownedValue, expiresAt, value);
@@ -416,13 +464,24 @@ export class KVCache {
   setAt(key: string, value: Value, expiresAt?: number): Value {
     this.assertKeyFits(key);
     if (expiresAt !== undefined && !Number.isFinite(expiresAt)) {
-      throw new Error(`expiresAt must be a finite epoch ms, got ${String(expiresAt)}`);
+      throw new Error(
+        `expiresAt must be a finite epoch ms, got ${String(expiresAt)}`,
+      );
     }
-    const ownedValue = cloneJsonValue(value, 'cache value (maxValueBytes)', this.maxValueBytes);
+    const ownedValue = cloneJsonValue(
+      value,
+      "cache value (maxValueBytes)",
+      this.maxValueBytes,
+    );
     return this.setOwned(key, ownedValue, expiresAt, value);
   }
 
-  private setOwned(key: string, ownedValue: Value, expiresAt: number | undefined, returned: Value): Value {
+  private setOwned(
+    key: string,
+    ownedValue: Value,
+    expiresAt: number | undefined,
+    returned: Value,
+  ): Value {
     const size = this.assertValueFits(key, ownedValue);
     // Immediate expiry (ttl 0): behave like a write-through miss.
     if (expiresAt !== undefined && expiresAt <= Date.now()) {
@@ -452,11 +511,15 @@ export class KVCache {
     this.assertKeyFits(key);
     const keyBytes = utf8ByteLength(key);
     if (keyBytes > this.maxKeyBytes) {
-      throw new Error(`cache key exceeds maxKeyBytes (${keyBytes} > ${this.maxKeyBytes})`);
+      throw new Error(
+        `cache key exceeds maxKeyBytes (${keyBytes} > ${this.maxKeyBytes})`,
+      );
     }
     const valueBytes = valueByteLength(value);
     if (valueBytes > this.maxValueBytes) {
-      throw new Error(`cache value exceeds maxValueBytes (${valueBytes} > ${this.maxValueBytes})`);
+      throw new Error(
+        `cache value exceeds maxValueBytes (${valueBytes} > ${this.maxValueBytes})`,
+      );
     }
     const size = keyBytes + valueBytes;
     this.assertEntryFits(key, size);
@@ -464,23 +527,30 @@ export class KVCache {
   }
 
   private assertKeyFits(key: string): void {
-    if (typeof key !== 'string') {
+    if (typeof key !== "string") {
       throw new Error(`cache key must be a string, got ${String(key)}`);
     }
     const keyBytes = utf8ByteLength(key);
     if (keyBytes > this.maxKeyBytes) {
-      throw new Error(`cache key exceeds maxKeyBytes (${keyBytes} > ${this.maxKeyBytes})`);
+      throw new Error(
+        `cache key exceeds maxKeyBytes (${keyBytes} > ${this.maxKeyBytes})`,
+      );
     }
   }
 
   private assertEntryFits(key: string, size: number): void {
     if (size > this.maxBytes) {
-      throw new Error(`cache entry exceeds maxBytes (${size} > ${this.maxBytes})`);
+      throw new Error(
+        `cache entry exceeds maxBytes (${size} > ${this.maxBytes})`,
+      );
     }
   }
 
   private evictIfNeeded(): void {
-    while ((this.map.size > this.maxEntries || this.bytes > this.maxBytes) && this.map.size > 0) {
+    while (
+      (this.map.size > this.maxEntries || this.bytes > this.maxBytes) &&
+      this.map.size > 0
+    ) {
       const oldest = this.map.keys().next();
       if (oldest.done) break;
       const oldestKey = oldest.value as string;
@@ -519,7 +589,7 @@ export class KVCache {
    */
   clearPrefix(prefix: string): number {
     this.assertKeyFits(prefix);
-    const needle = prefix + ':';
+    const needle = prefix + ":";
     let count = 0;
     for (const key of this.map.keys()) {
       if (key === prefix || key.startsWith(needle)) {
@@ -534,18 +604,33 @@ export class KVCache {
   }
 
   /** Weakly consistent, bounded scan batches for embedded maintenance. Not one atomic CLEAR. */
-  *clearPrefixBatches(prefix: string, maxKeys = 1000): IterableIterator<{ scanned: number; removed: number }> {
-    this.assertKeyFits(prefix); validatePositiveSafeInteger(maxKeys, 'clear maxKeys');
-    const iterator = this.map.keys(); let done = false;
+  *clearPrefixBatches(
+    prefix: string,
+    maxKeys = 1000,
+  ): IterableIterator<{ scanned: number; removed: number }> {
+    this.assertKeyFits(prefix);
+    validatePositiveSafeInteger(maxKeys, "clear maxKeys");
+    const iterator = this.map.keys();
+    let done = false;
     while (!done) {
-      let scanned = 0; let removed = 0;
+      let scanned = 0;
+      let removed = 0;
       this.atomic(() => {
         while (scanned < maxKeys) {
-          const next = iterator.next(); if (next.done) { done = true; break; }
+          const next = iterator.next();
+          if (next.done) {
+            done = true;
+            break;
+          }
           scanned++;
-          if (next.value === prefix || next.value.startsWith(prefix + ':')) {
+          if (next.value === prefix || next.value.startsWith(prefix + ":")) {
             const entry = this.map.get(next.value);
-            if (entry) { this.map.delete(next.value); this.bytes -= entry.size; this.bumpVersion(next.value); removed++; }
+            if (entry) {
+              this.map.delete(next.value);
+              this.bytes -= entry.size;
+              this.bumpVersion(next.value);
+              removed++;
+            }
           }
         }
       });
@@ -564,7 +649,7 @@ export class KVCache {
    * + LRU touch per key). Returns values in key order (`undefined` on miss).
    */
   mget(keys: string[]): Array<Value | undefined> {
-    return keys.map(k => this.get(k));
+    return keys.map((k) => this.get(k));
   }
 
   /**
@@ -573,13 +658,14 @@ export class KVCache {
    * Returns the number of entries written.
    */
   mset(entries: KVBatchEntry[]): number {
-    if (!Array.isArray(entries)) throw new Error('mset entries must be an array');
-    const validated = entries.map(e => {
-      if (!e || typeof e.key !== 'string') {
-        throw new Error('mset entries must be { key: string, value, ttlMs? }');
+    if (!Array.isArray(entries))
+      throw new Error("mset entries must be an array");
+    const validated = entries.map((e) => {
+      if (!e || typeof e.key !== "string") {
+        throw new Error("mset entries must be { key: string, value, ttlMs? }");
       }
       const key = e.key;
-      const value = cloneJsonValue(e.value, 'mset value');
+      const value = cloneJsonValue(e.value, "mset value");
       const ttl = this.resolveTTLMs(key, e.ttlMs);
       const expiresAt = ttl === undefined ? undefined : Date.now() + ttl;
       this.assertValueFits(key, value);
@@ -598,7 +684,7 @@ export class KVCache {
    */
   incr(key: string, by = 1): number {
     this.assertKeyFits(key);
-    if (typeof by !== 'number' || !Number.isFinite(by)) {
+    if (typeof by !== "number" || !Number.isFinite(by)) {
       throw new Error(`incr delta must be a finite number, got ${String(by)}`);
     }
     const now = Date.now();
@@ -609,7 +695,7 @@ export class KVCache {
       if (this.isExpired(entry, now)) {
         this.removeExpired(key, entry);
       } else {
-        if (typeof entry.value !== 'number' || !Number.isFinite(entry.value)) {
+        if (typeof entry.value !== "number" || !Number.isFinite(entry.value)) {
           throw new Error(`INCR requires a numeric value at '${key}'`);
         }
         base = entry.value;
@@ -638,7 +724,10 @@ export class KVCache {
     return this.incr(key, -by);
   }
 
-  private static valuesEqual(a: Value | undefined, b: Value | undefined): boolean {
+  private static valuesEqual(
+    a: Value | undefined,
+    b: Value | undefined,
+  ): boolean {
     return structuralEqual(a, b);
   }
 
@@ -653,10 +742,18 @@ export class KVCache {
    * TTL: an explicit `ttlMs` wins; otherwise the key's existing TTL is
    * preserved; new keys fall back to namespace/default resolution (as `set`).
    */
-  cas(key: string, expected: Value | undefined, value: Value, ttlMs?: number): boolean {
+  cas(
+    key: string,
+    expected: Value | undefined,
+    value: Value,
+    ttlMs?: number,
+  ): boolean {
     this.assertKeyFits(key);
-    const ownedExpected = expected === undefined ? undefined : cloneJsonValue(expected, 'cas expected');
-    const ownedValue = cloneJsonValue(value, 'cas value');
+    const ownedExpected =
+      expected === undefined
+        ? undefined
+        : cloneJsonValue(expected, "cas expected");
+    const ownedValue = cloneJsonValue(value, "cas value");
     const size = this.assertValueFits(key, ownedValue);
     const now = Date.now();
     const entry = this.map.get(key);
@@ -673,10 +770,13 @@ export class KVCache {
     }
     if (!KVCache.valuesEqual(current, ownedExpected)) return false;
     const exists = current !== undefined;
-    const resolvedDefault = ttlMs !== undefined || exists ? undefined : this.resolveTTLMs(key, undefined);
+    const resolvedDefault =
+      ttlMs !== undefined || exists
+        ? undefined
+        : this.resolveTTLMs(key, undefined);
     const expiresAt =
       ttlMs !== undefined
-        ? now + validateTTL(ttlMs, 'ttlMs')
+        ? now + validateTTL(ttlMs, "ttlMs")
         : keepExpiresAt !== undefined
           ? keepExpiresAt
           : resolvedDefault === undefined
@@ -715,8 +815,12 @@ export class KVCache {
       if (entry.value === undefined) continue;
       out.push(
         entry.expiresAt === undefined
-          ? { key, value: cloneJsonValue(entry.value, 'snapshot value') }
-          : { key, value: cloneJsonValue(entry.value, 'snapshot value'), expiresAt: entry.expiresAt }
+          ? { key, value: cloneJsonValue(entry.value, "snapshot value") }
+          : {
+              key,
+              value: cloneJsonValue(entry.value, "snapshot value"),
+              expiresAt: entry.expiresAt,
+            },
       );
     }
     return out;
@@ -734,21 +838,34 @@ export class KVCache {
   }
 
   restore(entries: SnapshotEntry[]): number {
-    if (!Array.isArray(entries)) throw new DatabaseError('snapshot entries must be an array', 'INVALID_VALUE');
+    if (!Array.isArray(entries))
+      throw new DatabaseError(
+        "snapshot entries must be an array",
+        "INVALID_VALUE",
+      );
     const now = Date.now();
     const pending: Array<{ entry: SnapshotEntry; value: Value }> = [];
     const seen = new Set<string>();
     for (const raw of entries) {
-      if (!raw || typeof raw.key !== 'string' || raw.value === undefined) {
-        throw new DatabaseError('invalid snapshot entry', 'INVALID_VALUE');
+      if (!raw || typeof raw.key !== "string" || raw.value === undefined) {
+        throw new DatabaseError("invalid snapshot entry", "INVALID_VALUE");
       }
       const e = { key: raw.key, value: raw.value, expiresAt: raw.expiresAt };
-      if (seen.has(e.key)) throw new DatabaseError('duplicate snapshot key', 'INVALID_VALUE');
+      if (seen.has(e.key))
+        throw new DatabaseError("duplicate snapshot key", "INVALID_VALUE");
       seen.add(e.key);
-      if (e.expiresAt !== undefined && (typeof e.expiresAt !== 'number' || !Number.isFinite(e.expiresAt) || Math.abs(e.expiresAt) > Number.MAX_SAFE_INTEGER)) {
-        throw new DatabaseError('snapshot expiresAt must be a finite epoch ms', 'INVALID_VALUE');
+      if (
+        e.expiresAt !== undefined &&
+        (typeof e.expiresAt !== "number" ||
+          !Number.isFinite(e.expiresAt) ||
+          Math.abs(e.expiresAt) > Number.MAX_SAFE_INTEGER)
+      ) {
+        throw new DatabaseError(
+          "snapshot expiresAt must be a finite epoch ms",
+          "INVALID_VALUE",
+        );
       }
-      const value = cloneJsonValue(e.value, 'snapshot value');
+      const value = cloneJsonValue(e.value, "snapshot value");
       this.assertValueFits(e.key, value);
       if (e.expiresAt !== undefined && e.expiresAt <= now) continue;
       pending.push({ entry: e, value });
@@ -766,7 +883,10 @@ export class KVCache {
       this.bumpVersion(e.key);
       count++;
     }
-    while ((this.map.size > this.maxEntries || this.bytes > this.maxBytes) && this.map.size > 0) {
+    while (
+      (this.map.size > this.maxEntries || this.bytes > this.maxBytes) &&
+      this.map.size > 0
+    ) {
       const oldest = this.map.keys().next();
       if (oldest.done) break;
       const k = oldest.value as string;
@@ -813,7 +933,9 @@ export class KVCache {
   expireAt(key: string, expiresAt: number): boolean {
     this.assertKeyFits(key);
     if (!Number.isFinite(expiresAt)) {
-      throw new Error(`expiresAt must be a finite epoch ms, got ${String(expiresAt)}`);
+      throw new Error(
+        `expiresAt must be a finite epoch ms, got ${String(expiresAt)}`,
+      );
     }
     const entry = this.map.get(key);
     if (!entry) return false;
@@ -826,7 +948,7 @@ export class KVCache {
       this.bytes -= entry.size;
       this.expiries++;
       this.bumpVersion(key);
-      this.notifyExpired(key)
+      this.notifyExpired(key);
       return true;
     }
     this.map.delete(key);
@@ -838,7 +960,7 @@ export class KVCache {
   /** Replace a key's TTL. Returns false if missing/expired. */
   expire(key: string, ttlMs: number): boolean {
     this.assertKeyFits(key);
-    const ttl = validateTTL(ttlMs, 'ttlMs');
+    const ttl = validateTTL(ttlMs, "ttlMs");
     const entry = this.map.get(key);
     if (!entry) return false;
     if (this.isExpired(entry, Date.now())) {
@@ -873,39 +995,63 @@ export class KVCache {
     let count = 0;
     for (const [key] of this.expiring) {
       const entry = this.map.get(key);
-      if (entry && this.isExpired(entry, now)) { this.removeExpired(key, entry); count++; }
+      if (entry && this.isExpired(entry, now)) {
+        this.removeExpired(key, entry);
+        count++;
+      }
     }
     return count;
   }
 
   /** Visit at most maxKeys expiring keys and spend at most maxMs per tick. */
   sweepBudget(maxKeys = 1000, maxMs = 2): number {
-    validatePositiveSafeInteger(maxKeys, 'sweep maxKeys');
-    validateNonNegativeNumber(maxMs, 'sweep maxMs');
-    const started = performance.now(); const now = Date.now(); let removed = 0;
+    validatePositiveSafeInteger(maxKeys, "sweep maxKeys");
+    validateNonNegativeNumber(maxMs, "sweep maxMs");
+    const started = performance.now();
+    const now = Date.now();
+    let removed = 0;
     this.sweepCursor ??= this.expiring.entries();
     for (let seen = 0; seen < maxKeys; seen++) {
       if (seen > 0 && performance.now() - started >= maxMs) break;
       const next = this.sweepCursor.next();
-      if (next.done) { this.sweepCursor = undefined; break; }
-      const [key] = next.value; const entry = this.map.get(key);
+      if (next.done) {
+        this.sweepCursor = undefined;
+        break;
+      }
+      const [key] = next.value;
+      const entry = this.map.get(key);
       if (entry && this.isExpired(entry, now)) {
-        this.sweepMaxLagMs = Math.max(this.sweepMaxLagMs, now - (entry.expiresAt as number));
-        this.removeExpired(key, entry); removed++;
+        this.sweepMaxLagMs = Math.max(
+          this.sweepMaxLagMs,
+          now - (entry.expiresAt as number),
+        );
+        this.removeExpired(key, entry);
+        removed++;
       }
     }
     return removed;
   }
 
-  maintenanceStats(): { expiringKeys: number; maxObservedExpiryLagMs: number; undoEntries: number } {
-    return { expiringKeys: this.expiring.size, maxObservedExpiryLagMs: this.sweepMaxLagMs,
-      undoEntries: this.map.journalSize + this.keyVersions.journalSize + this.expiring.journalSize };
+  maintenanceStats(): {
+    expiringKeys: number;
+    maxObservedExpiryLagMs: number;
+    undoEntries: number;
+  } {
+    return {
+      expiringKeys: this.expiring.size,
+      maxObservedExpiryLagMs: this.sweepMaxLagMs,
+      undoEntries:
+        this.map.journalSize +
+        this.keyVersions.journalSize +
+        this.expiring.journalSize,
+    };
   }
 
   startSweeper(intervalMs?: number): void {
-    const ms = intervalMs === undefined
-      ? this.sweepIntervalMs
-      : validateTimeout(intervalMs, 'sweepIntervalMs');
+    const ms =
+      intervalMs === undefined
+        ? this.sweepIntervalMs
+        : validateTimeout(intervalMs, "sweepIntervalMs");
     if (!(ms > 0)) return;
     this.stopSweeper();
     this.timer = setInterval(() => {
@@ -913,7 +1059,7 @@ export class KVCache {
     }, ms);
     // Don't hold the process open for a cache sweeper.
     const t = this.timer as unknown as { unref?: () => void };
-    if (typeof t.unref === 'function') t.unref();
+    if (typeof t.unref === "function") t.unref();
   }
 
   stopSweeper(): void {
@@ -949,9 +1095,14 @@ export class KVCache {
   async runTransaction<T>(
     keys: string[],
     fn: (tx: KVTransaction) => T | Promise<T>,
-    maxRetries = 3
-  ): Promise<{ committed: boolean; attempts: number; results: TxResult[] | null; value: T | undefined }> {
-    validateNonNegativeSafeInteger(maxRetries, 'maxRetries');
+    maxRetries = 3,
+  ): Promise<{
+    committed: boolean;
+    attempts: number;
+    results: TxResult[] | null;
+    value: T | undefined;
+  }> {
+    validateNonNegativeSafeInteger(maxRetries, "maxRetries");
     let attempts = 0;
     let value: T | undefined;
     for (;;) {
@@ -1012,20 +1163,26 @@ export class KVCache {
 export type TxResult = Value | boolean | number;
 
 type TxQueuedOp =
-  | { op: 'set'; key: string; value: Value; ttlMs?: number }
-  | { op: 'mset'; entries: KVBatchEntry[] }
-  | { op: 'del'; key: string }
-  | { op: 'clearPrefix'; prefix: string }
-  | { op: 'expire'; key: string; ttlMs: number }
-  | { op: 'persist'; key: string }
-  | { op: 'incr'; key: string; by: number }
-  | { op: 'decr'; key: string; by: number }
-  | { op: 'cas'; key: string; expected: Value | undefined; value: Value; ttlMs?: number };
+  | { op: "set"; key: string; value: Value; ttlMs?: number }
+  | { op: "mset"; entries: KVBatchEntry[] }
+  | { op: "del"; key: string }
+  | { op: "clearPrefix"; prefix: string }
+  | { op: "expire"; key: string; ttlMs: number }
+  | { op: "persist"; key: string }
+  | { op: "incr"; key: string; by: number }
+  | { op: "decr"; key: string; by: number }
+  | {
+      op: "cas";
+      key: string;
+      expected: Value | undefined;
+      value: Value;
+      ttlMs?: number;
+    };
 
 export class TransactionError extends DatabaseError {
   constructor(message: string) {
-    super(message, 'TRANSACTION_ERROR');
-    this.name = 'TransactionError';
+    super(message, "TRANSACTION_ERROR");
+    this.name = "TransactionError";
   }
 }
 
@@ -1065,9 +1222,10 @@ export class KVTransaction {
 
   /** Snapshot versions of `keys`; aborts `exec()` if any change since. */
   watch(...keys: string[]): this {
-    this.assertOpen('watch');
+    this.assertOpen("watch");
     for (const key of keys) {
-      if (typeof key !== 'string') throw new TransactionError('watch keys must be strings');
+      if (typeof key !== "string")
+        throw new TransactionError("watch keys must be strings");
       this.watched.set(key, this.cache.getVersion(key));
     }
     return this;
@@ -1075,7 +1233,7 @@ export class KVTransaction {
 
   /** Forget all watched versions (EXEC still commits queued writes). */
   unwatch(): this {
-    this.assertOpen('unwatch');
+    this.assertOpen("unwatch");
     this.watched.clear();
     return this;
   }
@@ -1085,95 +1243,113 @@ export class KVTransaction {
    * Call after `watch(key)` for the classic read-modify-write pattern.
    */
   get(key: string): Value | undefined {
-    this.assertOpen('get');
+    this.assertOpen("get");
     return this.cache.get(key);
   }
 
   /** Queue a SET (same TTL resolution/validation as `KVCache.set`). */
   set(key: string, value: Value, ttlMs?: number): this {
-    this.assertOpen('set');
-    const ownedValue = KVTransaction.checkValue(value, 'set');
+    this.assertOpen("set");
+    const ownedValue = KVTransaction.checkValue(value, "set");
     KVTransaction.checkTtl(ttlMs);
-    this.queue.push({ op: 'set', key, value: ownedValue, ttlMs });
+    this.queue.push({ op: "set", key, value: ownedValue, ttlMs });
     return this;
   }
 
   /** Queue an MSET batch. */
   mset(entries: KVBatchEntry[]): this {
-    this.assertOpen('mset');
-    if (!Array.isArray(entries)) throw new TransactionError('mset entries must be an array');
+    this.assertOpen("mset");
+    if (!Array.isArray(entries))
+      throw new TransactionError("mset entries must be an array");
     const ownedEntries: KVBatchEntry[] = [];
     for (const e of entries) {
-      if (!e || typeof e.key !== 'string') {
-        throw new TransactionError('mset entries must be { key: string, value, ttlMs? }');
+      if (!e || typeof e.key !== "string") {
+        throw new TransactionError(
+          "mset entries must be { key: string, value, ttlMs? }",
+        );
       }
-      const value = KVTransaction.checkValue(e.value, 'mset');
+      const value = KVTransaction.checkValue(e.value, "mset");
       KVTransaction.checkTtl(e.ttlMs);
       ownedEntries.push({ key: e.key, value, ttlMs: e.ttlMs });
     }
-    this.queue.push({ op: 'mset', entries: ownedEntries });
+    this.queue.push({ op: "mset", entries: ownedEntries });
     return this;
   }
 
   /** Queue a DEL. Result at commit: true when a live key was removed. */
   del(key: string): this {
-    this.assertOpen('del');
-    this.queue.push({ op: 'del', key });
+    this.assertOpen("del");
+    this.queue.push({ op: "del", key });
     return this;
   }
 
   /** Queue a namespace clear. Result at commit: number of keys removed. */
   clearPrefix(prefix: string): this {
-    this.assertOpen('clearPrefix');
-    if (typeof prefix !== 'string') throw new TransactionError('clearPrefix prefix must be a string');
-    this.queue.push({ op: 'clearPrefix', prefix });
+    this.assertOpen("clearPrefix");
+    if (typeof prefix !== "string")
+      throw new TransactionError("clearPrefix prefix must be a string");
+    this.queue.push({ op: "clearPrefix", prefix });
     return this;
   }
 
   /** Queue an EXPIRE. Result at commit: false when missing/expired. */
   expire(key: string, ttlMs: number): this {
-    this.assertOpen('expire');
+    this.assertOpen("expire");
     KVTransaction.checkTtl(ttlMs, true);
-    this.queue.push({ op: 'expire', key, ttlMs });
+    this.queue.push({ op: "expire", key, ttlMs });
     return this;
   }
 
   /** Queue a PERSIST. Result at commit: false when missing/expired. */
   persist(key: string): this {
-    this.assertOpen('persist');
-    this.queue.push({ op: 'persist', key });
+    this.assertOpen("persist");
+    this.queue.push({ op: "persist", key });
     return this;
   }
 
   /** Queue an INCR. Fails the commit when the live value is non-numeric. */
   incr(key: string, by = 1): this {
-    this.assertOpen('incr');
+    this.assertOpen("incr");
     KVTransaction.checkDelta(by);
-    this.queue.push({ op: 'incr', key, by });
+    this.queue.push({ op: "incr", key, by });
     return this;
   }
 
   /** Queue a DECR. */
   decr(key: string, by = 1): this {
-    this.assertOpen('decr');
+    this.assertOpen("decr");
     KVTransaction.checkDelta(by);
-    this.queue.push({ op: 'decr', key, by });
+    this.queue.push({ op: "decr", key, by });
     return this;
   }
 
   /** Queue a CAS. Result at commit: true on compare success. */
-  cas(key: string, expected: Value | undefined, value: Value, ttlMs?: number): this {
-    this.assertOpen('cas');
-    const ownedExpected = expected === undefined ? undefined : KVTransaction.checkValue(expected, 'cas expected');
-    const ownedValue = KVTransaction.checkValue(value, 'cas');
+  cas(
+    key: string,
+    expected: Value | undefined,
+    value: Value,
+    ttlMs?: number,
+  ): this {
+    this.assertOpen("cas");
+    const ownedExpected =
+      expected === undefined
+        ? undefined
+        : KVTransaction.checkValue(expected, "cas expected");
+    const ownedValue = KVTransaction.checkValue(value, "cas");
     KVTransaction.checkTtl(ttlMs);
-    this.queue.push({ op: 'cas', key, expected: ownedExpected, value: ownedValue, ttlMs });
+    this.queue.push({
+      op: "cas",
+      key,
+      expected: ownedExpected,
+      value: ownedValue,
+      ttlMs,
+    });
     return this;
   }
 
   /** Drop queued writes and watches; the transaction is finished. */
   discard(): void {
-    this.assertOpen('discard');
+    this.assertOpen("discard");
     this.queue = [];
     this.watched.clear();
     this.done = true;
@@ -1187,7 +1363,7 @@ export class KVTransaction {
    * already finished.
    */
   exec(): TxResult[] | null {
-    this.assertOpen('exec');
+    this.assertOpen("exec");
     this.done = true;
     for (const [key, version] of this.watched) {
       if (this.cache.getVersion(key) !== version) {
@@ -1210,55 +1386,65 @@ export class KVTransaction {
   // ---- internals ----
 
   private assertOpen(what: string): void {
-    if (this.done) throw new TransactionError(`cannot ${what}: transaction already finished (exec/discard)`);
+    if (this.done)
+      throw new TransactionError(
+        `cannot ${what}: transaction already finished (exec/discard)`,
+      );
   }
 
   private static checkValue(value: Value | undefined, what: string): Value {
-    if (value === undefined) throw new TransactionError(`${what} value cannot be undefined (use null)`);
+    if (value === undefined)
+      throw new TransactionError(
+        `${what} value cannot be undefined (use null)`,
+      );
     try {
       return cloneJsonValue(value, `${what} value`);
     } catch (err) {
-      throw new TransactionError(err instanceof Error ? err.message : String(err));
+      throw new TransactionError(
+        err instanceof Error ? err.message : String(err),
+      );
     }
   }
 
   private static checkTtl(ttlMs: number | undefined, required = false): void {
     if (ttlMs === undefined) {
-      if (required) throw new TransactionError('ttlMs is required');
+      if (required) throw new TransactionError("ttlMs is required");
       return;
     }
     try {
-      validateNonNegativeNumber(ttlMs, 'ttlMs');
+      validateNonNegativeNumber(ttlMs, "ttlMs");
     } catch (err) {
       throw new TransactionError((err as Error).message);
     }
   }
 
   private static checkDelta(by: number): void {
-    if (typeof by !== 'number' || !Number.isFinite(by)) {
-      throw new TransactionError(`delta must be a finite number, got ${String(by)}`);
+    if (typeof by !== "number" || !Number.isFinite(by)) {
+      throw new TransactionError(
+        `delta must be a finite number, got ${String(by)}`,
+      );
     }
   }
 
   private apply(op: TxQueuedOp): TxResult {
     switch (op.op) {
-      case 'set':
+      case "set":
         return this.cache.set(op.key, op.value, op.ttlMs);
-      case 'mset':
+      case "mset":
         return this.cache.mset(op.entries);
-      case 'del':
+      case "del":
         return this.cache.del(op.key);
-      case 'clearPrefix':
+      case "clearPrefix":
         return this.cache.clearPrefix(op.prefix);
-      case 'expire':
+      case "expire":
         return this.cache.expire(op.key, op.ttlMs);
-      case 'persist':
+      case "persist":
         return this.cache.persist(op.key);
-      case 'incr':
+      case "incr":
         return this.cache.incr(op.key, op.by);
-      case 'decr':
+      case "decr":
         return this.cache.decr(op.key, op.by);
-      case 'cas':
+      case "cas":
         return this.cache.cas(op.key, op.expected, op.value, op.ttlMs);
     }
   }

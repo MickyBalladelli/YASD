@@ -25,14 +25,14 @@
 //   DISCARD       drop the queue (and the watches) without committing
 // EXEC always clears watches, committed or not. DISCARD clears them too.
 
-import * as net from 'net';
-import { Deque } from './deque';
-import * as tls from 'tls';
-import * as fs from 'fs';
-import * as path from 'path';
-import { DatabaseError, wireError } from './errors';
-import { performance } from 'perf_hooks';
-import { SlowLog, SlowEntry, checkSlowThreshold } from './metrics';
+import * as net from "net";
+import { Deque } from "./deque";
+import * as tls from "tls";
+import * as fs from "fs";
+import * as path from "path";
+import { DatabaseError, wireError } from "./errors";
+import { performance } from "perf_hooks";
+import { SlowLog, SlowEntry, checkSlowThreshold } from "./metrics";
 import {
   KVCache,
   KVOptions,
@@ -40,8 +40,14 @@ import {
   KVStats,
   SnapshotEntry,
   validateKVOptions,
-} from './cache';
-import { PubSubHub, PubSubListener, INVALIDATE_CHANNEL, invalidateMessage, InvalidationEvent } from './pubsub';
+} from "./cache";
+import {
+  PubSubHub,
+  PubSubListener,
+  INVALIDATE_CHANNEL,
+  invalidateMessage,
+  InvalidationEvent,
+} from "./pubsub";
 import {
   saveSnapshot,
   loadSnapshot,
@@ -51,7 +57,7 @@ import {
   AofBatchEntry,
   SnapshotLoadMetadata,
   AofRecoveryState,
-} from './persistence';
+} from "./persistence";
 import {
   RespDecoder,
   RespReply,
@@ -59,7 +65,7 @@ import {
   replyByteLength,
   encodeCommand,
   requestArgv,
-} from './protocol';
+} from "./protocol";
 import {
   parsePort,
   parseStrictInteger,
@@ -71,10 +77,10 @@ import {
   validatePositiveSafeInteger,
   validateTimeout,
   validateToken,
-} from './validation';
-import { YASD_VERSION } from './version';
+} from "./validation";
+import { YASD_VERSION } from "./version";
 
-export const DEFAULT_HOST = '127.0.0.1'
+export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 7379;
 
 /** TLS identity plus optional client-certificate and protocol settings. */
@@ -85,32 +91,32 @@ export type YasdServerTlsOptions = tls.TlsOptions & {
 
 /** Commands that may be queued between MULTI and EXEC (KV ops + PING). */
 const TX_QUEUEABLE = new Set([
-  'PING',
-  'GET',
-  'MGET',
-  'SET',
-  'MSET',
-  'DEL',
-  'CLEAR',
-  'TTL',
-  'EXPIRE',
-  'PERSIST',
-  'INCR',
-  'DECR',
-  'CAS',
+  "PING",
+  "GET",
+  "MGET",
+  "SET",
+  "MSET",
+  "DEL",
+  "CLEAR",
+  "TTL",
+  "EXPIRE",
+  "PERSIST",
+  "INCR",
+  "DECR",
+  "CAS",
 ]);
 
 /** Commands whose cache mutation must be covered by AOF persistence. */
 const AOF_COMMANDS = new Set([
-  'SET',
-  'MSET',
-  'DEL',
-  'CLEAR',
-  'EXPIRE',
-  'PERSIST',
-  'INCR',
-  'DECR',
-  'CAS',
+  "SET",
+  "MSET",
+  "DEL",
+  "CLEAR",
+  "EXPIRE",
+  "PERSIST",
+  "INCR",
+  "DECR",
+  "CAS",
 ]);
 
 /** Maximum queued output per connection after socket backpressure. */
@@ -173,7 +179,7 @@ export interface YasdHealthOptions {
 }
 
 export interface ServerInfo {
-  status: 'ok';
+  status: "ok";
   version: string;
   uptimeMs: number;
   connections: number;
@@ -188,8 +194,8 @@ export interface ServerInfo {
   aofEnabled: boolean;
   aofDegraded: boolean;
   aofLastError?: string;
-  aofRecoveryState: AofRecoveryState
-  aofRecoveryError?: string
+  aofRecoveryState: AofRecoveryState;
+  aofRecoveryError?: string;
   persistence: PersistenceStatus;
   maxKeyBytes: number;
   maxValueBytes: number;
@@ -202,17 +208,17 @@ export interface ServerInfo {
   slowCommandMs: number;
   /** Newest-first slow-command ring (capped at 100). */
   slowLog: SlowEntry[];
-  resources: ReturnType<YasdServer['resourceStats']>;
+  resources: ReturnType<YasdServer["resourceStats"]>;
 }
 
 export interface HealthStatus {
-  status: 'ok' | 'not_ready';
+  status: "ok" | "not_ready";
 }
 
 export type HealthResponse = HealthStatus | ServerInfo;
 
-export type PersistenceErrorComponent = 'aof' | 'snapshot';
-export type PersistenceErrorOperation = 'write' | 'recovery' | 'save' | 'load';
+export type PersistenceErrorComponent = "aof" | "snapshot";
+export type PersistenceErrorOperation = "write" | "recovery" | "save" | "load";
 
 /** Safe persistence failure metadata; no paths, keys, values, or raw messages. */
 export interface PersistenceErrorStatus {
@@ -234,7 +240,7 @@ interface ConnState {
   socket: net.Socket;
   decoder: RespDecoder;
   httpBuf: Buffer | null;
-  protocol: 'undecided' | 'resp' | 'http';
+  protocol: "undecided" | "resp" | "http";
   requestQueue: Deque<RespReply>;
   requestQueueBytes: number;
   processing: boolean;
@@ -271,15 +277,15 @@ interface ParsedHttpRequest {
 
 function isHttpMethodStart(chunk: Buffer): boolean {
   const first = chunk[0] as number | undefined;
-  return first !== undefined && (
-    (first >= 0x41 && first <= 0x5a) ||
-    (first >= 0x61 && first <= 0x7a)
+  return (
+    first !== undefined &&
+    ((first >= 0x41 && first <= 0x5a) || (first >= 0x61 && first <= 0x7a))
   );
 }
 
 function validHttpEncoding(value: string, plusAsSpace = false): boolean {
   try {
-    decodeURIComponent(plusAsSpace ? value.replace(/\+/g, ' ') : value);
+    decodeURIComponent(plusAsSpace ? value.replace(/\+/g, " ") : value);
     return true;
   } catch {
     return false;
@@ -290,30 +296,39 @@ function parseHttpRequest(head: Buffer): ParsedHttpRequest | undefined {
   for (const byte of head) {
     if (byte > 0x7f) return undefined;
   }
-  const text = head.toString('ascii');
-  const lines = text.split('\r\n');
-  const requestLine = lines.shift() ?? '';
-  const match = /^([^\s]+) (\/[^\s?#]*)(?:\?([^\s#]*))? (HTTP\/\d+\.\d+)$/.exec(requestLine);
+  const text = head.toString("ascii");
+  const lines = text.split("\r\n");
+  const requestLine = lines.shift() ?? "";
+  const match = /^([^\s]+) (\/[^\s?#]*)(?:\?([^\s#]*))? (HTTP\/\d+\.\d+)$/.exec(
+    requestLine,
+  );
   if (!match || !HTTP_METHOD.test(match[1] as string)) return undefined;
   const headers = new Map<string, string>();
   for (const line of lines) {
-    const colon = line.indexOf(':');
-    if (colon <= 0 || !HTTP_HEADER_NAME.test(line.slice(0, colon))) return undefined;
-    if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(line.slice(colon + 1))) {
+    const colon = line.indexOf(":");
+    if (colon <= 0 || !HTTP_HEADER_NAME.test(line.slice(0, colon)))
+      return undefined;
+    if (
+      /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(
+        line.slice(colon + 1),
+      )
+    ) {
       return undefined;
     }
     const name = line.slice(0, colon).toLowerCase();
-    if (name === 'authorization' && headers.has(name)) return undefined;
+    if (name === "authorization" && headers.has(name)) return undefined;
     headers.set(name, line.slice(colon + 1).trim());
   }
   const path = match[2] as string;
-  const query = match[3] ?? '';
-  if (!validHttpEncoding(path) || !validHttpEncoding(query, true)) return undefined;
-  for (const part of query.split('&')) {
-    const equals = part.indexOf('=');
+  const query = match[3] ?? "";
+  if (!validHttpEncoding(path) || !validHttpEncoding(query, true))
+    return undefined;
+  for (const part of query.split("&")) {
+    const equals = part.indexOf("=");
     const key = equals === -1 ? part : part.slice(0, equals);
-    const value = equals === -1 ? '' : part.slice(equals + 1);
-    if (!validHttpEncoding(key, true) || !validHttpEncoding(value, true)) return undefined;
+    const value = equals === -1 ? "" : part.slice(equals + 1);
+    if (!validHttpEncoding(key, true) || !validHttpEncoding(value, true))
+      return undefined;
   }
   return {
     method: match[1] as string,
@@ -330,22 +345,26 @@ interface TransactionEffects {
 }
 
 function isLoopbackHost(host: string): boolean {
-  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, '')
-  if (normalized === 'localhost' || normalized === '::1') return true
-  if (net.isIP(normalized) !== 4) return false
-  const firstOctet = Number.parseInt(normalized.split('.')[0] as string, 10)
-  return firstOctet === 127
+  const normalized = host
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "");
+  if (normalized === "localhost" || normalized === "::1") return true;
+  if (net.isIP(normalized) !== 4) return false;
+  const firstOctet = Number.parseInt(normalized.split(".")[0] as string, 10);
+  return firstOctet === 127;
 }
 
 function parseBoolean(value: string, name: string): boolean {
-  if (value === '1' || value.toLowerCase() === 'true') return true;
-  if (value === '0' || value.toLowerCase() === 'false') return false;
+  if (value === "1" || value.toLowerCase() === "true") return true;
+  if (value === "0" || value.toLowerCase() === "false") return false;
   throw new Error(`${name} must be true/false or 1/0`);
 }
 
 function parseTlsVersion(value: string): tls.SecureVersion {
-  const allowed = new Set(['TLSv1', 'TLSv1.1', 'TLSv1.2', 'TLSv1.3']);
-  if (!allowed.has(value)) throw new Error(`invalid YASD_TLS_MIN_VERSION: ${value}`);
+  const allowed = new Set(["TLSv1", "TLSv1.1", "TLSv1.2", "TLSv1.3"]);
+  if (!allowed.has(value))
+    throw new Error(`invalid YASD_TLS_MIN_VERSION: ${value}`);
   return value as tls.SecureVersion;
 }
 
@@ -355,117 +374,178 @@ interface ResolvedHealthOptions {
 }
 
 function persistenceErrorCode(error: unknown): string {
-  if (error && typeof error === 'object') {
+  if (error && typeof error === "object") {
     const code = (error as { code?: unknown }).code;
-    if (typeof code === 'string' && /^[A-Z][A-Z0-9_]*$/.test(code)) return code;
+    if (typeof code === "string" && /^[A-Z][A-Z0-9_]*$/.test(code)) return code;
   }
-  return 'UNKNOWN';
+  return "UNKNOWN";
 }
 
 function resolveHealthOptions(value: unknown): ResolvedHealthOptions {
   if (value === undefined) return { exposeDetails: false };
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('health options must be an object');
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("health options must be an object");
   }
   const options = value as YasdHealthOptions;
-  const token = validateToken(options.token, 'health.token');
-  const exposeDetails = options.exposeDetails === undefined ? token !== undefined : options.exposeDetails;
-  if (typeof exposeDetails !== 'boolean') {
-    throw new Error(`health.exposeDetails must be true or false, got ${String(options.exposeDetails)}`);
+  const token = validateToken(options.token, "health.token");
+  const exposeDetails =
+    options.exposeDetails === undefined
+      ? token !== undefined
+      : options.exposeDetails;
+  if (typeof exposeDetails !== "boolean") {
+    throw new Error(
+      `health.exposeDetails must be true or false, got ${String(options.exposeDetails)}`,
+    );
   }
   if (token !== undefined && !exposeDetails) {
-    throw new Error('health.token requires health.exposeDetails=true');
+    throw new Error("health.token requires health.exposeDetails=true");
   }
   return { exposeDetails, ...(token === undefined ? {} : { token }) };
 }
 
-export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): YasdServerOptions {
+export function serverOptionsFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): YasdServerOptions {
   const cache: KVOptions = {};
   if (env.CACHE_MAX_ENTRIES !== undefined) {
-    cache.maxEntries = parseStrictInteger(env.CACHE_MAX_ENTRIES, 'CACHE_MAX_ENTRIES', 1);
+    cache.maxEntries = parseStrictInteger(
+      env.CACHE_MAX_ENTRIES,
+      "CACHE_MAX_ENTRIES",
+      1,
+    );
   }
   if (env.CACHE_MAX_BYTES !== undefined) {
-    cache.maxBytes = parseStrictInteger(env.CACHE_MAX_BYTES, 'CACHE_MAX_BYTES', 1);
+    cache.maxBytes = parseStrictInteger(
+      env.CACHE_MAX_BYTES,
+      "CACHE_MAX_BYTES",
+      1,
+    );
   }
   if (env.CACHE_MAX_KEY_BYTES !== undefined) {
-    cache.maxKeyBytes = parseStrictInteger(env.CACHE_MAX_KEY_BYTES, 'CACHE_MAX_KEY_BYTES', 1);
+    cache.maxKeyBytes = parseStrictInteger(
+      env.CACHE_MAX_KEY_BYTES,
+      "CACHE_MAX_KEY_BYTES",
+      1,
+    );
   }
   if (env.CACHE_MAX_VALUE_BYTES !== undefined) {
-    cache.maxValueBytes = parseStrictInteger(env.CACHE_MAX_VALUE_BYTES, 'CACHE_MAX_VALUE_BYTES', 1);
+    cache.maxValueBytes = parseStrictInteger(
+      env.CACHE_MAX_VALUE_BYTES,
+      "CACHE_MAX_VALUE_BYTES",
+      1,
+    );
   }
   if (env.CACHE_DEFAULT_TTL_MS !== undefined) {
-    cache.defaultTTLMs = parseStrictNonNegativeNumber(env.CACHE_DEFAULT_TTL_MS, 'CACHE_DEFAULT_TTL_MS');
+    cache.defaultTTLMs = parseStrictNonNegativeNumber(
+      env.CACHE_DEFAULT_TTL_MS,
+      "CACHE_DEFAULT_TTL_MS",
+    );
   }
   if (env.CACHE_NAMESPACE_TTLS !== undefined) {
     try {
-      cache.namespaceTTLMs = JSON.parse(env.CACHE_NAMESPACE_TTLS) as Record<string, number>;
+      cache.namespaceTTLMs = JSON.parse(env.CACHE_NAMESPACE_TTLS) as Record<
+        string,
+        number
+      >;
     } catch {
-      throw new Error('CACHE_NAMESPACE_TTLS must be JSON, e.g. {"feeds":15000}');
+      throw new Error(
+        'CACHE_NAMESPACE_TTLS must be JSON, e.g. {"feeds":15000}',
+      );
     }
   }
   validateKVOptions(cache);
   const opts: YasdServerOptions = {
-    host: env.YASD_HOST === undefined ? DEFAULT_HOST : validateHost(env.YASD_HOST, 'YASD_HOST'),
-    port: env.YASD_PORT === undefined ? DEFAULT_PORT : parsePort(env.YASD_PORT, 'YASD_PORT'),
+    host:
+      env.YASD_HOST === undefined
+        ? DEFAULT_HOST
+        : validateHost(env.YASD_HOST, "YASD_HOST"),
+    port:
+      env.YASD_PORT === undefined
+        ? DEFAULT_PORT
+        : parsePort(env.YASD_PORT, "YASD_PORT"),
     cache,
   };
   const budgets = {
-    YASD_MAX_INFLIGHT_BYTES: 'maxInflightBytes', YASD_MAX_CONNECTIONS: 'maxConnections', YASD_MAX_QUEUED_REQUESTS: 'maxQueuedRequests',
-    YASD_MAX_TRANSACTION_COMMANDS: 'maxTransactionCommands', YASD_MAX_TRANSACTION_BYTES: 'maxTransactionBytes',
-    YASD_MAX_WATCHED_KEYS: 'maxWatchedKeys', YASD_MAX_SUBSCRIPTIONS: 'maxSubscriptions',
+    YASD_MAX_INFLIGHT_BYTES: "maxInflightBytes",
+    YASD_MAX_CONNECTIONS: "maxConnections",
+    YASD_MAX_QUEUED_REQUESTS: "maxQueuedRequests",
+    YASD_MAX_TRANSACTION_COMMANDS: "maxTransactionCommands",
+    YASD_MAX_TRANSACTION_BYTES: "maxTransactionBytes",
+    YASD_MAX_WATCHED_KEYS: "maxWatchedKeys",
+    YASD_MAX_SUBSCRIPTIONS: "maxSubscriptions",
   } as const;
   for (const [name, key] of Object.entries(budgets)) {
-    if (env[name] !== undefined) opts[key] = parseStrictInteger(env[name] as string, name, 1);
+    if (env[name] !== undefined)
+      opts[key] = parseStrictInteger(env[name] as string, name, 1);
   }
   if (env.YASD_SNAPSHOT !== undefined) opts.snapshotPath = env.YASD_SNAPSHOT;
   if (env.YASD_AOF !== undefined) opts.aofPath = env.YASD_AOF;
   if (env.YASD_AUTO_SAVE_MS !== undefined) {
-    opts.autoSaveMs = parseStrictNonNegativeNumber(env.YASD_AUTO_SAVE_MS, 'YASD_AUTO_SAVE_MS');
+    opts.autoSaveMs = parseStrictNonNegativeNumber(
+      env.YASD_AUTO_SAVE_MS,
+      "YASD_AUTO_SAVE_MS",
+    );
   }
   if (env.YASD_SLOW_COMMAND_MS !== undefined) {
-    opts.slowCommandMs = parseStrictNonNegativeNumber(env.YASD_SLOW_COMMAND_MS, 'YASD_SLOW_COMMAND_MS');
+    opts.slowCommandMs = parseStrictNonNegativeNumber(
+      env.YASD_SLOW_COMMAND_MS,
+      "YASD_SLOW_COMMAND_MS",
+    );
   }
   if (env.YASD_MAX_PENDING_OUTPUT_BYTES !== undefined) {
     opts.maxPendingOutputBytes = parseStrictInteger(
       env.YASD_MAX_PENDING_OUTPUT_BYTES,
-      'YASD_MAX_PENDING_OUTPUT_BYTES',
-      1
+      "YASD_MAX_PENDING_OUTPUT_BYTES",
+      1,
     );
   }
   if (env.YASD_MAX_COMMAND_MS !== undefined) {
     opts.maxCommandMs = validateTimeout(
-      parseStrictNonNegativeNumber(env.YASD_MAX_COMMAND_MS, 'YASD_MAX_COMMAND_MS'),
-      'YASD_MAX_COMMAND_MS'
+      parseStrictNonNegativeNumber(
+        env.YASD_MAX_COMMAND_MS,
+        "YASD_MAX_COMMAND_MS",
+      ),
+      "YASD_MAX_COMMAND_MS",
     );
   }
   if (env.YASD_IDLE_CONNECTION_TIMEOUT_MS !== undefined) {
     opts.idleConnectionTimeoutMs = validateTimeout(
       parseStrictNonNegativeNumber(
         env.YASD_IDLE_CONNECTION_TIMEOUT_MS,
-        'YASD_IDLE_CONNECTION_TIMEOUT_MS'
+        "YASD_IDLE_CONNECTION_TIMEOUT_MS",
       ),
-      'YASD_IDLE_CONNECTION_TIMEOUT_MS'
+      "YASD_IDLE_CONNECTION_TIMEOUT_MS",
     );
   }
   if (env.YASD_SHUTDOWN_DEADLINE_MS !== undefined) {
     opts.shutdownDeadlineMs = validateTimeout(
       parseStrictNonNegativeNumber(
         env.YASD_SHUTDOWN_DEADLINE_MS,
-        'YASD_SHUTDOWN_DEADLINE_MS'
+        "YASD_SHUTDOWN_DEADLINE_MS",
       ),
-      'YASD_SHUTDOWN_DEADLINE_MS'
+      "YASD_SHUTDOWN_DEADLINE_MS",
     );
   }
-  if (env.YASD_LOAD_ON_START !== undefined) opts.loadOnStart = parseBoolean(env.YASD_LOAD_ON_START, 'YASD_LOAD_ON_START');
-  if (env.YASD_SAVE_ON_SHUTDOWN !== undefined) opts.saveOnShutdown = parseBoolean(env.YASD_SAVE_ON_SHUTDOWN, 'YASD_SAVE_ON_SHUTDOWN');
-  const healthToken = env.YASD_HEALTH_TOKEN === undefined
-    ? undefined
-    : validateToken(env.YASD_HEALTH_TOKEN, 'YASD_HEALTH_TOKEN');
+  if (env.YASD_LOAD_ON_START !== undefined)
+    opts.loadOnStart = parseBoolean(
+      env.YASD_LOAD_ON_START,
+      "YASD_LOAD_ON_START",
+    );
+  if (env.YASD_SAVE_ON_SHUTDOWN !== undefined)
+    opts.saveOnShutdown = parseBoolean(
+      env.YASD_SAVE_ON_SHUTDOWN,
+      "YASD_SAVE_ON_SHUTDOWN",
+    );
+  const healthToken =
+    env.YASD_HEALTH_TOKEN === undefined
+      ? undefined
+      : validateToken(env.YASD_HEALTH_TOKEN, "YASD_HEALTH_TOKEN");
   if (healthToken !== undefined || env.YASD_HEALTH_DETAILS !== undefined) {
     opts.health = resolveHealthOptions({
-      exposeDetails: env.YASD_HEALTH_DETAILS === undefined
-        ? undefined
-        : parseBoolean(env.YASD_HEALTH_DETAILS, 'YASD_HEALTH_DETAILS'),
+      exposeDetails:
+        env.YASD_HEALTH_DETAILS === undefined
+          ? undefined
+          : parseBoolean(env.YASD_HEALTH_DETAILS, "YASD_HEALTH_DETAILS"),
       ...(healthToken === undefined ? {} : { token: healthToken }),
     });
   }
@@ -475,26 +555,32 @@ export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Yasd
   const tlsCertPath = env.YASD_TLS_CERT;
   const tlsCaPath = env.YASD_TLS_CA;
   const hasTlsOptions =
-    Boolean(tlsKeyPath || tlsCertPath || tlsCaPath || env.YASD_TLS_MIN_VERSION) ||
+    Boolean(
+      tlsKeyPath || tlsCertPath || tlsCaPath || env.YASD_TLS_MIN_VERSION,
+    ) ||
     env.YASD_TLS_REQUEST_CERT !== undefined ||
     env.YASD_TLS_REJECT_UNAUTHORIZED !== undefined;
   if (hasTlsOptions) {
     if (!tlsKeyPath || !tlsCertPath) {
-      throw new Error('YASD_TLS_KEY and YASD_TLS_CERT must both be set');
+      throw new Error("YASD_TLS_KEY and YASD_TLS_CERT must both be set");
     }
     const tlsOptions: YasdServerTlsOptions = {
-      key: fs.readFileSync(tlsKeyPath, 'utf8'),
-      cert: fs.readFileSync(tlsCertPath, 'utf8'),
+      key: fs.readFileSync(tlsKeyPath, "utf8"),
+      cert: fs.readFileSync(tlsCertPath, "utf8"),
     };
-    if (tlsCaPath) tlsOptions.ca = fs.readFileSync(tlsCaPath, 'utf8');
-    if (env.YASD_TLS_MIN_VERSION) tlsOptions.minVersion = parseTlsVersion(env.YASD_TLS_MIN_VERSION);
+    if (tlsCaPath) tlsOptions.ca = fs.readFileSync(tlsCaPath, "utf8");
+    if (env.YASD_TLS_MIN_VERSION)
+      tlsOptions.minVersion = parseTlsVersion(env.YASD_TLS_MIN_VERSION);
     if (env.YASD_TLS_REQUEST_CERT !== undefined) {
-      tlsOptions.requestCert = parseBoolean(env.YASD_TLS_REQUEST_CERT, 'YASD_TLS_REQUEST_CERT');
+      tlsOptions.requestCert = parseBoolean(
+        env.YASD_TLS_REQUEST_CERT,
+        "YASD_TLS_REQUEST_CERT",
+      );
     }
     if (env.YASD_TLS_REJECT_UNAUTHORIZED !== undefined) {
       tlsOptions.rejectUnauthorized = parseBoolean(
         env.YASD_TLS_REJECT_UNAUTHORIZED,
-        'YASD_TLS_REJECT_UNAUTHORIZED'
+        "YASD_TLS_REJECT_UNAUTHORIZED",
       );
     }
     opts.tls = tlsOptions;
@@ -511,20 +597,24 @@ export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Yasd
 export interface YasdServerCache {
   readonly size: number;
   readonly bytesUsed: number;
-  get(key: string): SnapshotEntry['value'] | undefined;
-  set(key: string, value: SnapshotEntry['value'], ttlMs?: number): SnapshotEntry['value'];
+  get(key: string): SnapshotEntry["value"] | undefined;
+  set(
+    key: string,
+    value: SnapshotEntry["value"],
+    ttlMs?: number,
+  ): SnapshotEntry["value"];
   del(key: string): boolean;
   clearPrefix(prefix: string): number;
   clear(): void;
-  mget(keys: string[]): Array<SnapshotEntry['value'] | undefined>;
+  mget(keys: string[]): Array<SnapshotEntry["value"] | undefined>;
   mset(entries: KVBatchEntry[]): number;
   incr(key: string, by?: number): number;
   decr(key: string, by?: number): number;
   cas(
     key: string,
-    expected: SnapshotEntry['value'] | undefined,
-    value: SnapshotEntry['value'],
-    ttlMs?: number
+    expected: SnapshotEntry["value"] | undefined,
+    value: SnapshotEntry["value"],
+    ttlMs?: number,
   ): boolean;
   ttl(key: string): number;
   expiration(key: string): number | undefined | null;
@@ -538,7 +628,11 @@ export interface YasdServerCache {
 }
 
 interface YasdServerCacheHooks {
-  set(key: string, value: SnapshotEntry['value'], ttlMs?: number): SnapshotEntry['value'];
+  set(
+    key: string,
+    value: SnapshotEntry["value"],
+    ttlMs?: number,
+  ): SnapshotEntry["value"];
   del(key: string): boolean;
   clearPrefix(prefix: string): number;
   clear(): void;
@@ -547,36 +641,40 @@ interface YasdServerCacheHooks {
   decr(key: string, by?: number): number;
   cas(
     key: string,
-    expected: SnapshotEntry['value'] | undefined,
-    value: SnapshotEntry['value'],
-    ttlMs?: number
+    expected: SnapshotEntry["value"] | undefined,
+    value: SnapshotEntry["value"],
+    ttlMs?: number,
   ): boolean;
   expire(key: string, ttlMs: number): boolean;
   persist(key: string): boolean;
 }
 
 /** Build a facade whose closure keeps the raw KVCache out of the public API. */
-function createYasdServerCacheFacade(cache: KVCache, hooks: YasdServerCacheHooks): YasdServerCache {
+function createYasdServerCacheFacade(
+  cache: KVCache,
+  hooks: YasdServerCacheHooks,
+): YasdServerCache {
   const facade: YasdServerCache = {
-    get: key => cache.get(key),
+    get: (key) => cache.get(key),
     set: (key, value, ttlMs) => hooks.set(key, value, ttlMs),
-    del: key => hooks.del(key),
-    clearPrefix: prefix => hooks.clearPrefix(prefix),
+    del: (key) => hooks.del(key),
+    clearPrefix: (prefix) => hooks.clearPrefix(prefix),
     clear: () => hooks.clear(),
-    mget: keys => cache.mget(keys),
-    mset: entries => hooks.mset(entries),
+    mget: (keys) => cache.mget(keys),
+    mset: (entries) => hooks.mset(entries),
     incr: (key, by) => hooks.incr(key, by),
     decr: (key, by) => hooks.decr(key, by),
-    cas: (key, expected, value, ttlMs) => hooks.cas(key, expected, value, ttlMs),
-    ttl: key => cache.ttl(key),
-    expiration: key => cache.expiration(key),
+    cas: (key, expected, value, ttlMs) =>
+      hooks.cas(key, expected, value, ttlMs),
+    ttl: (key) => cache.ttl(key),
+    expiration: (key) => cache.expiration(key),
     expire: (key, ttlMs) => hooks.expire(key, ttlMs),
-    persist: key => hooks.persist(key),
+    persist: (key) => hooks.persist(key),
     dump: () => cache.dump(),
     sweep: () => cache.sweep(),
     stats: () => cache.stats(),
     resetStats: () => cache.resetStats(),
-    getVersion: key => cache.getVersion(key),
+    getVersion: (key) => cache.getVersion(key),
     get size() {
       return cache.size;
     },
@@ -623,25 +721,43 @@ export class YasdServer {
   private connectionStates = new Set<ConnState>();
 
   resourceStats() {
-    return { inflightBytes: this.inflightBytes, peakInflightBytes: this.inflightPeak,
-      maxInflightBytes: this.maxInflightBytes, process: process.memoryUsage(),
-      activeTransactions: [...this.connectionStates].filter(s => s.txQueue !== null).length,
-      persistenceDepth: this.persistenceDepth, maintenance: this.kv.maintenanceStats() };
+    return {
+      inflightBytes: this.inflightBytes,
+      peakInflightBytes: this.inflightPeak,
+      maxInflightBytes: this.maxInflightBytes,
+      process: process.memoryUsage(),
+      activeTransactions: [...this.connectionStates].filter(
+        (s) => s.txQueue !== null,
+      ).length,
+      persistenceDepth: this.persistenceDepth,
+      maintenance: this.kv.maintenanceStats(),
+    };
   }
 
   private account(state: ConnState, extra = 0): boolean {
     if (state.socket.destroyed) return false;
     let names = 0;
-    for (const key of state.watchVersions?.keys() ?? []) names += Buffer.byteLength(key) * 2 + 64;
-    for (const key of state.subs.keys()) names += Buffer.byteLength(key) * 2 + 64;
-    const next = state.decoder.retainedBytes * 2 + (state.httpBuf?.length ?? 0)
-      + (state.requestQueueBytes + state.activeRequestBytes + state.txBytes) * 2
-      + (state.requestQueue.length + (state.txQueue?.length ?? 0)) * 128
-      + state.outputQueueBytes + state.socket.writableLength + names;
-    if (this.inflightBytes - state.accountedBytes + next + extra > this.maxInflightBytes) {
-      this.disconnectSocket(state); return false;
+    for (const key of state.watchVersions?.keys() ?? [])
+      names += Buffer.byteLength(key) * 2 + 64;
+    for (const key of state.subs.keys())
+      names += Buffer.byteLength(key) * 2 + 64;
+    const next =
+      state.decoder.retainedBytes * 2 +
+      (state.httpBuf?.length ?? 0) +
+      (state.requestQueueBytes + state.activeRequestBytes + state.txBytes) * 2 +
+      (state.requestQueue.length + (state.txQueue?.length ?? 0)) * 128 +
+      state.outputQueueBytes +
+      state.socket.writableLength +
+      names;
+    if (
+      this.inflightBytes - state.accountedBytes + next + extra >
+      this.maxInflightBytes
+    ) {
+      this.disconnectSocket(state);
+      return false;
     }
-    this.inflightBytes += next - state.accountedBytes; state.accountedBytes = next;
+    this.inflightBytes += next - state.accountedBytes;
+    state.accountedBytes = next;
     this.inflightPeak = Math.max(this.inflightPeak, this.inflightBytes + extra);
     return true;
   }
@@ -660,85 +776,158 @@ export class YasdServer {
   private recovered = false;
 
   constructor(options: YasdServerOptions = {}) {
-    if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error('server options must be an object');
-    for (const key of ['loadOnStart', 'saveOnShutdown'] as const) {
-      if (options[key] !== undefined && typeof options[key] !== 'boolean') throw new Error(`${key} must be true or false`);
+    if (!options || typeof options !== "object" || Array.isArray(options))
+      throw new Error("server options must be an object");
+    for (const key of ["loadOnStart", "saveOnShutdown"] as const) {
+      if (options[key] !== undefined && typeof options[key] !== "boolean")
+        throw new Error(`${key} must be true or false`);
     }
-    for (const key of ['snapshotPath', 'aofPath'] as const) {
-      if (options[key] !== undefined && (typeof options[key] !== 'string' || !options[key]?.trim() || options[key]?.includes('\0'))) {
+    for (const key of ["snapshotPath", "aofPath"] as const) {
+      if (
+        options[key] !== undefined &&
+        (typeof options[key] !== "string" ||
+          !options[key]?.trim() ||
+          options[key]?.includes("\0"))
+      ) {
         throw new Error(`${key} must be a non-empty file path`);
       }
     }
-    if (options.snapshotPath && options.aofPath && path.resolve(options.snapshotPath) === path.resolve(options.aofPath)) {
-      throw new Error('snapshotPath and aofPath must be different files');
+    if (
+      options.snapshotPath &&
+      options.aofPath &&
+      path.resolve(options.snapshotPath) === path.resolve(options.aofPath)
+    ) {
+      throw new Error("snapshotPath and aofPath must be different files");
     }
-    if (options.password !== undefined && typeof options.password !== 'string') throw new Error('password must be a string');
+    if (options.password !== undefined && typeof options.password !== "string")
+      throw new Error("password must be a string");
     const cacheOptions = validateKVOptions(options.cache);
-    if ((cacheOptions.maxValueBytes as number) > 4 * 1024 * 1024 || (cacheOptions.maxKeyBytes as number) > 1024 * 1024) {
-      throw new Error('server cache limits exceed the RESP wire limits (4 MiB values, 1 MiB keys)');
+    if (
+      (cacheOptions.maxValueBytes as number) > 4 * 1024 * 1024 ||
+      (cacheOptions.maxKeyBytes as number) > 1024 * 1024
+    ) {
+      throw new Error(
+        "server cache limits exceed the RESP wire limits (4 MiB values, 1 MiB keys)",
+      );
     }
-    this.maxConnections = validatePositiveSafeInteger(options.maxConnections ?? 1024, 'maxConnections');
-    this.maxInflightBytes = validatePositiveSafeInteger(options.maxInflightBytes ?? 64 * 1024 * 1024, 'maxInflightBytes');
-    this.maxQueuedRequests = validatePositiveSafeInteger(options.maxQueuedRequests ?? 1024, 'maxQueuedRequests');
-    this.maxTransactionCommands = validatePositiveSafeInteger(options.maxTransactionCommands ?? 1024, 'maxTransactionCommands', 1024);
-    this.maxTransactionBytes = validatePositiveSafeInteger(options.maxTransactionBytes ?? 8 * 1024 * 1024, 'maxTransactionBytes');
-    this.maxWatchedKeys = validatePositiveSafeInteger(options.maxWatchedKeys ?? 1024, 'maxWatchedKeys');
-    this.maxSubscriptions = validatePositiveSafeInteger(options.maxSubscriptions ?? 1024, 'maxSubscriptions');
+    this.maxConnections = validatePositiveSafeInteger(
+      options.maxConnections ?? 1024,
+      "maxConnections",
+    );
+    this.maxInflightBytes = validatePositiveSafeInteger(
+      options.maxInflightBytes ?? 64 * 1024 * 1024,
+      "maxInflightBytes",
+    );
+    this.maxQueuedRequests = validatePositiveSafeInteger(
+      options.maxQueuedRequests ?? 1024,
+      "maxQueuedRequests",
+    );
+    this.maxTransactionCommands = validatePositiveSafeInteger(
+      options.maxTransactionCommands ?? 1024,
+      "maxTransactionCommands",
+      1024,
+    );
+    this.maxTransactionBytes = validatePositiveSafeInteger(
+      options.maxTransactionBytes ?? 8 * 1024 * 1024,
+      "maxTransactionBytes",
+    );
+    this.maxWatchedKeys = validatePositiveSafeInteger(
+      options.maxWatchedKeys ?? 1024,
+      "maxWatchedKeys",
+    );
+    this.maxSubscriptions = validatePositiveSafeInteger(
+      options.maxSubscriptions ?? 1024,
+      "maxSubscriptions",
+    );
     const health = resolveHealthOptions(options.health);
-    this.host = options.host === undefined ? DEFAULT_HOST : validateHost(options.host, 'host');
-    this.port = options.port === undefined ? DEFAULT_PORT : validatePort(options.port, 'port');
+    this.host =
+      options.host === undefined
+        ? DEFAULT_HOST
+        : validateHost(options.host, "host");
+    this.port =
+      options.port === undefined
+        ? DEFAULT_PORT
+        : validatePort(options.port, "port");
     this.snapshotPath = options.snapshotPath;
     this.aofPath = options.aofPath;
     this.loadOnStart = options.loadOnStart ?? true;
-    this.saveOnShutdown = options.saveOnShutdown ?? options.snapshotPath !== undefined;
-    this.autoSaveMs = options.autoSaveMs === undefined
-      ? 0
-      : validateTimeout(options.autoSaveMs, 'autoSaveMs');
-    this.maxPendingOutputBytes = options.maxPendingOutputBytes === undefined
-      ? DEFAULT_MAX_PENDING_OUTPUT_BYTES
-      : validatePositiveSafeInteger(options.maxPendingOutputBytes, 'maxPendingOutputBytes');
-    this.maxCommandMs = options.maxCommandMs === undefined
-      ? DEFAULT_MAX_COMMAND_MS
-      : validateTimeout(options.maxCommandMs, 'maxCommandMs');
-    this.idleConnectionTimeoutMs = options.idleConnectionTimeoutMs === undefined
-      ? DEFAULT_IDLE_CONNECTION_TIMEOUT_MS
-      : validateTimeout(options.idleConnectionTimeoutMs, 'idleConnectionTimeoutMs');
-    this.shutdownDeadlineMs = options.shutdownDeadlineMs === undefined
-      ? DEFAULT_SHUTDOWN_DEADLINE_MS
-      : validateTimeout(options.shutdownDeadlineMs, 'shutdownDeadlineMs');
+    this.saveOnShutdown =
+      options.saveOnShutdown ?? options.snapshotPath !== undefined;
+    this.autoSaveMs =
+      options.autoSaveMs === undefined
+        ? 0
+        : validateTimeout(options.autoSaveMs, "autoSaveMs");
+    this.maxPendingOutputBytes =
+      options.maxPendingOutputBytes === undefined
+        ? DEFAULT_MAX_PENDING_OUTPUT_BYTES
+        : validatePositiveSafeInteger(
+            options.maxPendingOutputBytes,
+            "maxPendingOutputBytes",
+          );
+    this.maxCommandMs =
+      options.maxCommandMs === undefined
+        ? DEFAULT_MAX_COMMAND_MS
+        : validateTimeout(options.maxCommandMs, "maxCommandMs");
+    this.idleConnectionTimeoutMs =
+      options.idleConnectionTimeoutMs === undefined
+        ? DEFAULT_IDLE_CONNECTION_TIMEOUT_MS
+        : validateTimeout(
+            options.idleConnectionTimeoutMs,
+            "idleConnectionTimeoutMs",
+          );
+    this.shutdownDeadlineMs =
+      options.shutdownDeadlineMs === undefined
+        ? DEFAULT_SHUTDOWN_DEADLINE_MS
+        : validateTimeout(options.shutdownDeadlineMs, "shutdownDeadlineMs");
     this.healthExposeDetails = health.exposeDetails;
     this.healthToken = health.token;
-    this.password = options.password && options.password.length > 0 ? options.password : undefined;
+    this.password =
+      options.password && options.password.length > 0
+        ? options.password
+        : undefined;
     this.authRequired = this.password !== undefined;
     if (options.tls && (!options.tls.key || !options.tls.cert)) {
-      throw new Error('TLS requires both key and cert');
+      throw new Error("TLS requires both key and cert");
     }
     if (options.tls !== undefined) {
-      if (!options.tls || typeof options.tls !== 'object' || Array.isArray(options.tls)) throw new Error('TLS options must be an object');
-      for (const flag of ['requestCert', 'rejectUnauthorized'] as const) {
-        if (options.tls[flag] !== undefined && typeof options.tls[flag] !== 'boolean') throw new Error(`TLS ${flag} must be boolean`);
+      if (
+        !options.tls ||
+        typeof options.tls !== "object" ||
+        Array.isArray(options.tls)
+      )
+        throw new Error("TLS options must be an object");
+      for (const flag of ["requestCert", "rejectUnauthorized"] as const) {
+        if (
+          options.tls[flag] !== undefined &&
+          typeof options.tls[flag] !== "boolean"
+        )
+          throw new Error(`TLS ${flag} must be boolean`);
       }
       tls.createSecureContext(options.tls);
     }
-    this.tlsOptions = options.tls === undefined ? undefined : { ...options.tls };
+    this.tlsOptions =
+      options.tls === undefined ? undefined : { ...options.tls };
     this.tlsEnabled = options.tls !== undefined;
     if (options.slowCommandMs !== undefined) {
-      this.slow.setThreshold(checkSlowThreshold(options.slowCommandMs, 'slowCommandMs'));
+      this.slow.setThreshold(
+        checkSlowThreshold(options.slowCommandMs, "slowCommandMs"),
+      );
     }
-    this.kv = new KVCache(cacheOptions, key => this.onCacheExpiry(key));
+    this.kv = new KVCache(cacheOptions, (key) => this.onCacheExpiry(key));
     this.aof = new AofLog(options.aofPath);
     this.syncAofRecoveryStatus();
     this.cacheFacade = createYasdServerCacheFacade(this.kv, {
       set: (key, value, ttlMs) => this.cacheSet(key, value, ttlMs),
-      del: key => this.cacheDel(key),
-      clearPrefix: prefix => this.cacheClearPrefix(prefix),
+      del: (key) => this.cacheDel(key),
+      clearPrefix: (prefix) => this.cacheClearPrefix(prefix),
       clear: () => this.cacheClear(),
-      mset: entries => this.cacheMset(entries),
+      mset: (entries) => this.cacheMset(entries),
       incr: (key, by) => this.cacheIncr(key, by),
       decr: (key, by) => this.cacheDecr(key, by),
-      cas: (key, expected, value, ttlMs) => this.cacheCas(key, expected, value, ttlMs),
+      cas: (key, expected, value, ttlMs) =>
+        this.cacheCas(key, expected, value, ttlMs),
       expire: (key, ttlMs) => this.cacheExpire(key, ttlMs),
-      persist: key => this.cachePersist(key),
+      persist: (key) => this.cachePersist(key),
     });
   }
 
@@ -758,19 +947,21 @@ export class YasdServer {
       aofDegraded: this.aofDegraded,
       aofRecoveryState: this.aof.recoveryState,
       snapshotConfigured: this.snapshotPath !== undefined,
-      errors: Array.from(this.persistenceErrors.values(), error => ({ ...error })),
+      errors: Array.from(this.persistenceErrors.values(), (error) => ({
+        ...error,
+      })),
     };
   }
 
   info(): ServerInfo {
     const s = this.kv.stats();
     return {
-      status: 'ok',
+      status: "ok",
       version: YASD_VERSION,
       uptimeMs: Date.now() - this.startedAt,
       connections: this.sockets.size,
-    tls: this.tlsEnabled,
-    auth: this.authRequired,
+      tls: this.tlsEnabled,
+      auth: this.authRequired,
       entries: s.entries,
       bytes: s.bytes,
       hits: s.hits,
@@ -779,9 +970,13 @@ export class YasdServer {
       expiries: s.expiries,
       aofEnabled: this.aof.enabled,
       aofDegraded: this.aofDegraded,
-      ...(this.aofLastError === undefined ? {} : { aofLastError: this.aofLastError }),
+      ...(this.aofLastError === undefined
+        ? {}
+        : { aofLastError: this.aofLastError }),
       aofRecoveryState: this.aof.recoveryState,
-      ...(this.aof.recoveryState === 'clean' ? {} : { aofRecoveryError: this.safeAofRecoveryError() }),
+      ...(this.aof.recoveryState === "clean"
+        ? {}
+        : { aofRecoveryError: this.safeAofRecoveryError() }),
       persistence: this.persistenceStatus(),
       maxKeyBytes: this.kv.maxKeyBytes,
       maxValueBytes: this.kv.maxValueBytes,
@@ -798,7 +993,7 @@ export class YasdServer {
 
   /** Log commands slower than this (ms); 0 disables. */
   setSlowCommandThreshold(ms: number): void {
-    this.slow.setThreshold(checkSlowThreshold(ms, 'slowCommandMs'));
+    this.slow.setThreshold(checkSlowThreshold(ms, "slowCommandMs"));
   }
 
   /** Newest-first slow-command ring (capped at 100). */
@@ -812,21 +1007,31 @@ export class YasdServer {
 
   address(): { host: string; port: number } {
     const addr = this.netServer?.address();
-    if (addr && typeof addr === 'object') {
+    if (addr && typeof addr === "object") {
       return { host: addr.address, port: addr.port };
     }
     return { host: this.host, port: this.port };
   }
 
   start(): Promise<void> {
-    if (this.closing) return Promise.reject(new DatabaseError('closed server cannot be restarted; create a new server', 'CONNECTION_CLOSED'));
+    if (this.closing)
+      return Promise.reject(
+        new DatabaseError(
+          "closed server cannot be restarted; create a new server",
+          "CONNECTION_CLOSED",
+        ),
+      );
     if (this.starting) return this.starting;
     if (this.netServer?.listening) return Promise.resolve();
-    this.starting = this.startUnlocked().catch(error => {
-      this.netServer?.close();
-      this.netServer = undefined;
-      throw error;
-    }).finally(() => { this.starting = undefined; });
+    this.starting = this.startUnlocked()
+      .catch((error) => {
+        this.netServer?.close();
+        this.netServer = undefined;
+        throw error;
+      })
+      .finally(() => {
+        this.starting = undefined;
+      });
     return this.starting;
   }
 
@@ -840,62 +1045,70 @@ export class YasdServer {
             missingOk: true,
             metadata: snapshotMetadata,
           });
-          this.forgetPersistenceError('snapshot', 'load');
+          this.forgetPersistenceError("snapshot", "load");
         } catch (err) {
-          this.rememberPersistenceError('snapshot', 'load', err);
-          throw this.safePersistenceError('snapshot load', err);
+          this.rememberPersistenceError("snapshot", "load", err);
+          throw this.safePersistenceError("snapshot load", err);
         }
       }
       try {
         await this.aof.replay(this.kv, snapshotMetadata.aofSeq);
       } catch (err) {
-        this.rememberPersistenceError('aof', 'recovery', err);
-        throw this.safePersistenceError('AOF recovery', err);
+        this.rememberPersistenceError("aof", "recovery", err);
+        throw this.safePersistenceError("AOF recovery", err);
       }
       this.syncAofRecoveryStatus();
     }
     this.recovered = true;
-    if (this.closing) throw new DatabaseError('server closed during start', 'CONNECTION_CLOSED');
-    if (this.aof.recoveryState !== 'clean') {
-      console.error(`yasd: WARNING: ${this.safeAofRecoveryError() ?? 'AOF recovery required'}`)
+    if (this.closing)
+      throw new DatabaseError(
+        "server closed during start",
+        "CONNECTION_CLOSED",
+      );
+    if (this.aof.recoveryState !== "clean") {
+      console.error(
+        `yasd: WARNING: ${this.safeAofRecoveryError() ?? "AOF recovery required"}`,
+      );
     }
     this.netServer = this.tlsOptions
-      ? tls.createServer(this.tlsOptions, socket => this.onConnection(socket))
-      : net.createServer(socket => this.onConnection(socket));
+      ? tls.createServer(this.tlsOptions, (socket) => this.onConnection(socket))
+      : net.createServer((socket) => this.onConnection(socket));
     this.netServer.maxConnections = this.maxConnections;
     if (!isLoopbackHost(this.host) && !this.authRequired && !this.tlsEnabled) {
       console.warn(
         `yasd: WARNING: listening on ${this.host}:${this.port} without authentication or TLS. ` +
-          'This exposes the cache to the network; use 127.0.0.1 or configure a password/TLS.'
-      )
+          "This exposes the cache to the network; use 127.0.0.1 or configure a password/TLS.",
+      );
     }
     await new Promise<void>((resolve, reject) => {
       const onError = (err: Error): void => {
-        this.netServer?.off('listening', onListening);
+        this.netServer?.off("listening", onListening);
         reject(err);
       };
       const onListening = (): void => {
-        this.netServer?.off('error', onError);
+        this.netServer?.off("error", onError);
         resolve();
       };
-      this.netServer?.once('error', onError);
-      this.netServer?.once('listening', onListening);
+      this.netServer?.once("error", onError);
+      this.netServer?.once("listening", onListening);
       this.netServer?.listen(this.port, this.host);
     });
     if (this.autoSaveMs > 0) {
       this.autoSaveTimer = setInterval(() => {
-        if (this.persistenceDepth === 0 && !this.closing) this.save().catch(() => undefined);
+        if (this.persistenceDepth === 0 && !this.closing)
+          this.save().catch(() => undefined);
       }, this.autoSaveMs);
       const t = this.autoSaveTimer as unknown as { unref?: () => void };
-      if (typeof t.unref === 'function') t.unref();
+      if (typeof t.unref === "function") t.unref();
     }
   }
 
   /** Snapshot now (and truncate the AOF, which the snapshot supersedes). */
   async save(snapshotPath?: string): Promise<number> {
-    if (this.closing) throw new DatabaseError('server is closing', 'CONNECTION_CLOSED');
+    if (this.closing)
+      throw new DatabaseError("server is closing", "CONNECTION_CLOSED");
     const target = snapshotPath ?? this.snapshotPath;
-    if (!target) throw new Error('SAVE requires a snapshot path');
+    if (!target) throw new Error("SAVE requires a snapshot path");
     return this.enqueuePersistence(() => this.saveUnlocked(target));
   }
 
@@ -905,18 +1118,21 @@ export class YasdServer {
     try {
       n = await saveSnapshot(this.kv, target, { aofSeq: snapshotSeq });
     } catch (err) {
-      this.rememberPersistenceError('snapshot', 'save', err);
-      throw this.safePersistenceError('snapshot save', err);
+      this.rememberPersistenceError("snapshot", "save", err);
+      throw this.safePersistenceError("snapshot save", err);
     }
     try {
       // An alternate target is an export, not the authoritative startup checkpoint.
-      if (this.snapshotPath && path.resolve(target) === path.resolve(this.snapshotPath)) {
+      if (
+        this.snapshotPath &&
+        path.resolve(target) === path.resolve(this.snapshotPath)
+      ) {
         this.aof.rotateAfter(snapshotSeq);
         this.aofDegraded = false;
         this.aofLastError = undefined;
-        this.forgetPersistenceError('aof', 'write');
+        this.forgetPersistenceError("aof", "write");
       }
-      this.forgetPersistenceError('snapshot', 'save');
+      this.forgetPersistenceError("snapshot", "save");
       this.syncAofRecoveryStatus();
     } catch (err) {
       throw this.aofWriteError(err);
@@ -925,26 +1141,37 @@ export class YasdServer {
   }
 
   async load(snapshotPath?: string): Promise<number> {
-    if (this.closing) throw new DatabaseError('server is closing', 'CONNECTION_CLOSED');
+    if (this.closing)
+      throw new DatabaseError("server is closing", "CONNECTION_CLOSED");
     const target = snapshotPath ?? this.snapshotPath;
-    if (!target) throw new Error('LOAD requires a snapshot path');
+    if (!target) throw new Error("LOAD requires a snapshot path");
     return this.enqueuePersistence(async () => {
       try {
-        const count = await loadSnapshot({
-          dump: () => this.kv.dump(), clear: () => this.kv.clear(),
-          restore: entries => this.kv.restore(entries),
-          replace: entries => this.kv.atomicChanges(() => this.kv.replace(entries), (changed, deleted) => {
-            if (changed.length || deleted.length) this.appendAof({ op: 'patch', entries: changed, deleted });
-          }),
-        }, target, { clearFirst: true, missingOk: false })
-        this.forgetPersistenceError('snapshot', 'load');
-        this.publishInvalidate({ event: 'load' })
-        return count
+        const count = await loadSnapshot(
+          {
+            dump: () => this.kv.dump(),
+            clear: () => this.kv.clear(),
+            restore: (entries) => this.kv.restore(entries),
+            replace: (entries) =>
+              this.kv.atomicChanges(
+                () => this.kv.replace(entries),
+                (changed, deleted) => {
+                  if (changed.length || deleted.length)
+                    this.appendAof({ op: "patch", entries: changed, deleted });
+                },
+              ),
+          },
+          target,
+          { clearFirst: true, missingOk: false },
+        );
+        this.forgetPersistenceError("snapshot", "load");
+        this.publishInvalidate({ event: "load" });
+        return count;
       } catch (err) {
-        this.rememberPersistenceError('snapshot', 'load', err);
-        throw this.safePersistenceError('snapshot load', err);
+        this.rememberPersistenceError("snapshot", "load", err);
+        throw this.safePersistenceError("snapshot load", err);
       }
-    })
+    });
   }
 
   /** Graceful shutdown with a bounded socket drain and persistence deadline. */
@@ -965,15 +1192,16 @@ export class YasdServer {
 
     const netServer = this.netServer;
     this.netServer = undefined;
-    const serverClosed = netServer === undefined
-      ? Promise.resolve()
-      : new Promise<void>(resolve => {
-        try {
-          netServer.close(() => resolve());
-        } catch {
-          resolve();
-        }
-      });
+    const serverClosed =
+      netServer === undefined
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => {
+            try {
+              netServer.close(() => resolve());
+            } catch {
+              resolve();
+            }
+          });
 
     // Stop accepting first, then give existing clients the configured grace
     // period. Idle or stuck clients are destroyed at the deadline.
@@ -986,7 +1214,9 @@ export class YasdServer {
     }
     while (this.sockets.size > 0 && Date.now() < deadline) {
       const remaining = deadline - Date.now();
-      await new Promise(resolve => setTimeout(resolve, Math.min(10, remaining)));
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(10, remaining)),
+      );
     }
     for (const socket of Array.from(this.sockets)) {
       try {
@@ -998,7 +1228,12 @@ export class YasdServer {
     await this.waitForDeadline(serverClosed, deadline).catch(() => undefined);
     try {
       if (this.saveOnShutdown && this.snapshotPath) {
-        await this.waitForDeadline(this.enqueuePersistence(() => this.saveUnlocked(this.snapshotPath as string)), deadline);
+        await this.waitForDeadline(
+          this.enqueuePersistence(() =>
+            this.saveUnlocked(this.snapshotPath as string),
+          ),
+          deadline,
+        );
       } else {
         await this.waitForDeadline(this.persistenceQueue, deadline);
       }
@@ -1014,7 +1249,7 @@ export class YasdServer {
     component: PersistenceErrorComponent,
     operation: PersistenceErrorOperation,
     error: unknown,
-    code?: string
+    code?: string,
   ): void {
     const status: PersistenceErrorStatus = {
       component,
@@ -1027,43 +1262,59 @@ export class YasdServer {
 
   private forgetPersistenceError(
     component: PersistenceErrorComponent,
-    operation: PersistenceErrorOperation
+    operation: PersistenceErrorOperation,
   ): void {
     this.persistenceErrors.delete(`${component}:${operation}`);
   }
 
   private syncAofRecoveryStatus(): void {
-    if (this.aof.recoveryState === 'clean') {
-      this.forgetPersistenceError('aof', 'recovery');
+    if (this.aof.recoveryState === "clean") {
+      this.forgetPersistenceError("aof", "recovery");
       return;
     }
     this.rememberPersistenceError(
-      'aof',
-      'recovery',
+      "aof",
+      "recovery",
       undefined,
-      this.aof.recoveryState === 'corrupt' ? 'AOF_CORRUPT' : 'AOF_TORN_TAIL'
+      this.aof.recoveryState === "corrupt" ? "AOF_CORRUPT" : "AOF_TORN_TAIL",
     );
   }
 
   private safeAofRecoveryError(): string | undefined {
-    if (this.aof.recoveryState === 'clean') return undefined;
+    if (this.aof.recoveryState === "clean") return undefined;
     const line = this.aof.recoveryError?.match(/\bline\s+(\d+)\b/i)?.[1];
-    return line === undefined ? 'AOF recovery failed' : `AOF recovery failed at line ${line}`;
+    return line === undefined
+      ? "AOF recovery failed"
+      : `AOF recovery failed at line ${line}`;
   }
 
   private safePersistenceError(prefix: string, error: unknown): Error {
-    return new DatabaseError(`${prefix} failed (${persistenceErrorCode(error)}); inspect persistenceStatus()`, 'PERSISTENCE_ERROR', { cause: error });
+    return new DatabaseError(
+      `${prefix} failed (${persistenceErrorCode(error)}); inspect persistenceStatus()`,
+      "PERSISTENCE_ERROR",
+      { cause: error },
+    );
   }
 
-  private async waitForDeadline(promise: Promise<unknown>, deadline: number): Promise<void> {
+  private async waitForDeadline(
+    promise: Promise<unknown>,
+    deadline: number,
+  ): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
         promise,
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new DatabaseError(
-            'shutdown deadline exceeded; persistence completion is unknown', 'TIMEOUT'
-          )), Math.max(0, deadline - Date.now()));
+          timer = setTimeout(
+            () =>
+              reject(
+                new DatabaseError(
+                  "shutdown deadline exceeded; persistence completion is unknown",
+                  "TIMEOUT",
+                ),
+              ),
+            Math.max(0, deadline - Date.now()),
+          );
         }),
       ]);
     } finally {
@@ -1072,31 +1323,46 @@ export class YasdServer {
   }
 
   private enqueuePersistence<T>(operation: () => Promise<T>): Promise<T> {
-    if (this.persistenceDepth >= 64) return Promise.reject(new DatabaseError('persistence queue limit exceeded', 'LIMIT_EXCEEDED'));
+    if (this.persistenceDepth >= 64)
+      return Promise.reject(
+        new DatabaseError("persistence queue limit exceeded", "LIMIT_EXCEEDED"),
+      );
     this.persistenceDepth++;
-    const result = this.persistenceQueue.then(operation, operation).finally(() => { this.persistenceDepth--; });
+    const result = this.persistenceQueue
+      .then(operation, operation)
+      .finally(() => {
+        this.persistenceDepth--;
+      });
     this.persistenceQueue = result.then(
       () => undefined,
-      () => undefined
+      () => undefined,
     );
     return result;
   }
 
   private onConnection(socket: net.Socket): void {
-    if (this.closing || this.sockets.size >= this.maxConnections) { socket.destroy(); return; }
+    if (this.closing || this.sockets.size >= this.maxConnections) {
+      socket.destroy();
+      return;
+    }
     this.sockets.add(socket);
     const state: ConnState = {
       socket,
       decoder: new RespDecoder(),
       httpBuf: null,
-      protocol: 'undecided',
-      requestQueue: new Deque<RespReply>(), requestQueueBytes: 0, processing: false,
-      accountedBytes: 0, activeRequestBytes: 0,
+      protocol: "undecided",
+      requestQueue: new Deque<RespReply>(),
+      requestQueueBytes: 0,
+      processing: false,
+      accountedBytes: 0,
+      activeRequestBytes: 0,
       subs: new Map(),
       subMode: false,
       authed: !this.authRequired,
       watchVersions: null,
-      txQueue: null, txBytes: 0, txFailed: false,
+      txQueue: null,
+      txBytes: 0,
+      txFailed: false,
       outputQueue: new Deque<Buffer>(),
       outputQueueBytes: 0,
       outputBackpressured: false,
@@ -1104,22 +1370,32 @@ export class YasdServer {
       outputClosed: false,
     };
     this.connectionStates.add(state);
-    socket.on('data', chunk => {
+    socket.on("data", (chunk) => {
       try {
         this.onData(state, chunk);
       } catch {
-        this.writeReply(state, { kind: 'error', message: wireError(new DatabaseError('protocol error', 'PROTOCOL_ERROR')) });
+        this.writeReply(state, {
+          kind: "error",
+          message: wireError(
+            new DatabaseError("protocol error", "PROTOCOL_ERROR"),
+          ),
+        });
         this.endSocket(state);
       }
     });
-    socket.on('drain', () => this.flushOutput(state));
+    socket.on("drain", () => this.flushOutput(state));
     if (this.idleConnectionTimeoutMs > 0) {
-      socket.setTimeout(this.idleConnectionTimeoutMs, () => this.disconnectSocket(state));
+      socket.setTimeout(this.idleConnectionTimeoutMs, () =>
+        this.disconnectSocket(state),
+      );
     }
     const cleanup = (): void => {
-      this.sockets.delete(socket); this.connectionStates.delete(state);
-      this.inflightBytes -= state.accountedBytes; state.accountedBytes = 0;
-      state.decoder.reset(); state.httpBuf = null;
+      this.sockets.delete(socket);
+      this.connectionStates.delete(state);
+      this.inflightBytes -= state.accountedBytes;
+      state.accountedBytes = 0;
+      state.decoder.reset();
+      state.httpBuf = null;
       state.outputClosed = true;
       state.outputQueue.length = 0;
       state.outputQueueBytes = 0;
@@ -1127,23 +1403,33 @@ export class YasdServer {
         this.hub.unsubscribe(channel, listener);
       }
       state.subs.clear();
-      state.requestQueue.length = 0; state.requestQueueBytes = 0;
-      state.txQueue = null; state.txBytes = 0; state.watchVersions = null;
+      state.requestQueue.length = 0;
+      state.requestQueueBytes = 0;
+      state.txQueue = null;
+      state.txBytes = 0;
+      state.watchVersions = null;
     };
-    socket.on('close', cleanup);
-    socket.on('error', () => undefined);
+    socket.on("close", cleanup);
+    socket.on("error", () => undefined);
   }
 
   /** Write immediately until Node signals backpressure, then queue bounded output. */
   private writeSocket(state: ConnState, data: Buffer): boolean {
-    if (state.outputClosed || state.closeWhenDrained || state.socket.destroyed) return false;
+    if (state.outputClosed || state.closeWhenDrained || state.socket.destroyed)
+      return false;
     if (!this.account(state, data.length)) return false;
-    if (state.outputQueueBytes + state.socket.writableLength + data.length > this.maxPendingOutputBytes) {
+    if (
+      state.outputQueueBytes + state.socket.writableLength + data.length >
+      this.maxPendingOutputBytes
+    ) {
       this.disconnectSlowConsumer(state);
       return false;
     }
     if (state.outputBackpressured || state.outputQueue.length > 0) {
-      if (state.outputQueueBytes + state.socket.writableLength + data.length > this.maxPendingOutputBytes) {
+      if (
+        state.outputQueueBytes + state.socket.writableLength + data.length >
+        this.maxPendingOutputBytes
+      ) {
         this.disconnectSlowConsumer(state);
         return false;
       }
@@ -1152,7 +1438,9 @@ export class YasdServer {
       return this.account(state);
     }
     try {
-      state.outputBackpressured = !state.socket.write(data, () => { this.account(state); });
+      state.outputBackpressured = !state.socket.write(data, () => {
+        this.account(state);
+      });
       return this.account(state);
     } catch {
       this.disconnectSocket(state);
@@ -1161,14 +1449,24 @@ export class YasdServer {
   }
 
   private writeReply(state: ConnState, reply: RespReply | null): boolean {
-    if (state.outputClosed || state.closeWhenDrained || state.socket.destroyed) return false;
+    if (state.outputClosed || state.closeWhenDrained || state.socket.destroyed)
+      return false;
     let bytes: number;
-    try { bytes = replyByteLength(reply); }
-    catch {
-      reply = { kind: 'error', message: wireError(new DatabaseError('response exceeds RESP limits', 'LIMIT_EXCEEDED')) };
+    try {
+      bytes = replyByteLength(reply);
+    } catch {
+      reply = {
+        kind: "error",
+        message: wireError(
+          new DatabaseError("response exceeds RESP limits", "LIMIT_EXCEEDED"),
+        ),
+      };
       bytes = replyByteLength(reply);
     }
-    if (state.outputQueueBytes + state.socket.writableLength + bytes > this.maxPendingOutputBytes) {
+    if (
+      state.outputQueueBytes + state.socket.writableLength + bytes >
+      this.maxPendingOutputBytes
+    ) {
       this.disconnectSlowConsumer(state);
       return false;
     }
@@ -1183,7 +1481,11 @@ export class YasdServer {
       const data = state.outputQueue.shift() as Buffer;
       state.outputQueueBytes -= data.length;
       try {
-        if (!state.socket.write(data, () => { this.account(state); })) {
+        if (
+          !state.socket.write(data, () => {
+            this.account(state);
+          })
+        ) {
           state.outputBackpressured = true;
           return;
         }
@@ -1221,31 +1523,38 @@ export class YasdServer {
   }
 
   private isReady(): boolean {
-    return !this.closing &&
+    return (
+      !this.closing &&
       this.netServer?.listening === true &&
       !this.aofDegraded &&
-      this.aof.recoveryState !== 'corrupt';
+      this.aof.recoveryState !== "corrupt"
+    );
   }
 
   private healthAuthorized(request: ParsedHttpRequest): boolean {
-    return this.healthToken === undefined ||
-      request.headers.get('authorization') === `Bearer ${this.healthToken}`;
+    return (
+      this.healthToken === undefined ||
+      request.headers.get("authorization") === `Bearer ${this.healthToken}`
+    );
   }
 
   private onData(state: ConnState, chunk: Buffer): void {
     if (chunk.length === 0 || state.outputClosed || this.closing) return;
     if (!this.account(state, chunk.length * 2)) return;
-    if (state.protocol === 'undecided') {
-      state.protocol = isHttpMethodStart(chunk) ? 'http' : 'resp';
-      if (state.protocol === 'http') state.httpBuf = Buffer.alloc(0);
+    if (state.protocol === "undecided") {
+      state.protocol = isHttpMethodStart(chunk) ? "http" : "resp";
+      if (state.protocol === "http") state.httpBuf = Buffer.alloc(0);
     }
-    if (state.protocol === 'http') {
+    if (state.protocol === "http") {
       this.onHttpData(state, chunk);
       return;
     }
     for (const request of state.decoder.push(chunk)) {
       const bytes = replyByteLength(request);
-      if (state.requestQueue.length >= this.maxQueuedRequests || state.requestQueueBytes + bytes > 8 * 1024 * 1024) {
+      if (
+        state.requestQueue.length >= this.maxQueuedRequests ||
+        state.requestQueueBytes + bytes > 8 * 1024 * 1024
+      ) {
         this.disconnectSocket(state);
         return;
       }
@@ -1259,82 +1568,100 @@ export class YasdServer {
   private async drainRequests(state: ConnState): Promise<void> {
     state.processing = true;
     try {
-      while (state.requestQueue.length && !state.outputClosed && !this.closing) {
+      while (
+        state.requestQueue.length &&
+        !state.outputClosed &&
+        !this.closing
+      ) {
         const request = state.requestQueue.shift() as RespReply;
         state.activeRequestBytes = replyByteLength(request);
         state.requestQueueBytes -= state.activeRequestBytes;
         if (!this.account(state)) break;
         const outcome = await this.onRequest(state, request);
         state.activeRequestBytes = 0;
-        if (!this.account(state) || outcome === 'close') break;
+        if (!this.account(state) || outcome === "close") break;
       }
     } catch (error) {
-      this.writeReply(state, { kind: 'error', message: wireError(error) });
+      this.writeReply(state, { kind: "error", message: wireError(error) });
       this.endSocket(state);
     } finally {
-      state.processing = false; state.activeRequestBytes = 0;
+      state.processing = false;
+      state.activeRequestBytes = 0;
       this.account(state);
     }
   }
 
   private onHttpData(state: ConnState, chunk: Buffer): void {
     if ((state.httpBuf?.length ?? 0) + chunk.length > MAX_HTTP_HEADER_BYTES) {
-      this.writeHttpResponse(state, 431, 'Request Header Fields Too Large', { error: 'header too large' });
+      this.writeHttpResponse(state, 431, "Request Header Fields Too Large", {
+        error: "header too large",
+      });
       return;
     }
     state.httpBuf = Buffer.concat([state.httpBuf ?? Buffer.alloc(0), chunk]);
     if (!this.account(state)) return;
-    const end = state.httpBuf.indexOf('\r\n\r\n');
+    const end = state.httpBuf.indexOf("\r\n\r\n");
     if (end === -1) {
-      if (state.httpBuf.length > MAX_HTTP_HEADER_BYTES) this.disconnectSocket(state);
+      if (state.httpBuf.length > MAX_HTTP_HEADER_BYTES)
+        this.disconnectSocket(state);
       return; // wait for full headers
     }
     const request = parseHttpRequest(state.httpBuf.subarray(0, end));
     if (!request) {
-      this.writeHttpResponse(state, 400, 'Bad Request', { error: 'bad request' });
+      this.writeHttpResponse(state, 400, "Bad Request", {
+        error: "bad request",
+      });
       return;
     }
-    if (request.version !== 'HTTP/1.1') {
-      this.writeHttpResponse(state, 505, 'HTTP Version Not Supported', { error: 'unsupported HTTP version' });
+    if (request.version !== "HTTP/1.1") {
+      this.writeHttpResponse(state, 505, "HTTP Version Not Supported", {
+        error: "unsupported HTTP version",
+      });
       return;
     }
-    if (request.method !== 'GET') {
-      this.writeHttpResponse(state, 405, 'Method Not Allowed', { error: 'method not allowed' }, 'Allow: GET\r\n');
+    if (request.method !== "GET") {
+      this.writeHttpResponse(
+        state,
+        405,
+        "Method Not Allowed",
+        { error: "method not allowed" },
+        "Allow: GET\r\n",
+      );
       return;
     }
-    if (request.path === '/livez') {
-      this.writeHttpResponse(state, 200, 'OK', { status: 'ok' });
+    if (request.path === "/livez") {
+      this.writeHttpResponse(state, 200, "OK", { status: "ok" });
       return;
     }
-    if (request.path === '/readyz') {
+    if (request.path === "/readyz") {
       const ready = this.isReady();
       this.writeHttpResponse(
         state,
         ready ? 200 : 503,
-        ready ? 'OK' : 'Service Unavailable',
-        { status: ready ? 'ok' : 'not_ready' }
+        ready ? "OK" : "Service Unavailable",
+        { status: ready ? "ok" : "not_ready" },
       );
       return;
     }
-    if (request.path === '/healthz' || request.path === '/health') {
+    if (request.path === "/healthz" || request.path === "/health") {
       if (!this.healthExposeDetails) {
-        this.writeHttpResponse(state, 200, 'OK', { status: 'ok' });
+        this.writeHttpResponse(state, 200, "OK", { status: "ok" });
         return;
       }
       if (!this.healthAuthorized(request)) {
         this.writeHttpResponse(
           state,
           401,
-          'Unauthorized',
-          { error: 'health details require authorization' },
-          'WWW-Authenticate: Bearer\r\n'
+          "Unauthorized",
+          { error: "health details require authorization" },
+          "WWW-Authenticate: Bearer\r\n",
         );
         return;
       }
-      this.writeHttpResponse(state, 200, 'OK', this.info());
+      this.writeHttpResponse(state, 200, "OK", this.info());
       return;
     }
-    this.writeHttpResponse(state, 404, 'Not Found', { error: 'not found' });
+    this.writeHttpResponse(state, 404, "Not Found", { error: "not found" });
   }
 
   private writeHttpResponse(
@@ -1342,77 +1669,113 @@ export class YasdServer {
     status: number,
     statusText: string,
     value: unknown,
-    extraHeaders = ''
+    extraHeaders = "",
   ): void {
-    const body = Buffer.from(JSON.stringify(value), 'utf8');
-    this.writeSocket(state,
+    const body = Buffer.from(JSON.stringify(value), "utf8");
+    this.writeSocket(
+      state,
       Buffer.concat([
         Buffer.from(
           `HTTP/1.1 ${status} ${statusText}\r\nContent-Type: application/json\r\n` +
             `Content-Length: ${body.length}\r\n${extraHeaders}Connection: close\r\n\r\n`,
-          'utf8'
+          "utf8",
         ),
         body,
-      ]));
+      ]),
+    );
     this.endSocket(state);
   }
 
   /** Returns 'close' when the connection was ended (QUIT). */
-  private async onRequest(state: ConnState, request: RespReply): Promise<'ok' | 'close'> {
+  private async onRequest(
+    state: ConnState,
+    request: RespReply,
+  ): Promise<"ok" | "close"> {
     let argv: string[];
     try {
       argv = requestArgv(request);
     } catch (err) {
-      this.writeReply(state, { kind: 'error', message: wireError(err) });
-      return 'ok';
+      this.writeReply(state, { kind: "error", message: wireError(err) });
+      return "ok";
     }
-    const cmd = (argv[0] ?? '').toUpperCase();
-    if (!state.authed && cmd !== 'AUTH' && cmd !== 'QUIT') {
-      this.writeReply(state, { kind: 'error', message: 'NOAUTH Authentication required (send AUTH first)' });
-      return 'ok';
+    const cmd = (argv[0] ?? "").toUpperCase();
+    if (!state.authed && cmd !== "AUTH" && cmd !== "QUIT") {
+      this.writeReply(state, {
+        kind: "error",
+        message: "NOAUTH Authentication required (send AUTH first)",
+      });
+      return "ok";
     }
-    if (state.subMode && cmd !== 'SUBSCRIBE' && cmd !== 'UNSUBSCRIBE' && cmd !== 'PING' && cmd !== 'QUIT' && cmd !== 'AUTH') {
-      this.writeReply(state, { kind: 'error', message: 'ERR only AUTH/SUBSCRIBE/UNSUBSCRIBE/PING/QUIT allowed in subscriber mode' });
-      return 'ok';
+    if (
+      state.subMode &&
+      cmd !== "SUBSCRIBE" &&
+      cmd !== "UNSUBSCRIBE" &&
+      cmd !== "PING" &&
+      cmd !== "QUIT" &&
+      cmd !== "AUTH"
+    ) {
+      this.writeReply(state, {
+        kind: "error",
+        message:
+          "ERR only AUTH/SUBSCRIBE/UNSUBSCRIBE/PING/QUIT allowed in subscriber mode",
+      });
+      return "ok";
     }
     const started = performance.now();
     let durationMs: number | undefined;
     try {
-      let reply: RespReply | 'silent' | 'close';
-      if ((cmd === 'SAVE' || cmd === 'LOAD') && state.txQueue === null) {
+      let reply: RespReply | "silent" | "close";
+      if ((cmd === "SAVE" || cmd === "LOAD") && state.txQueue === null) {
         this.requireArgs(cmd, argv.slice(1), 0, 1);
         const requested = argv[1];
-        if (requested !== undefined && (!this.snapshotPath || path.resolve(requested) !== path.resolve(this.snapshotPath))) {
-          throw new DatabaseError('remote SAVE/LOAD may only use the configured snapshot path', 'AUTH_ERROR');
+        if (
+          requested !== undefined &&
+          (!this.snapshotPath ||
+            path.resolve(requested) !== path.resolve(this.snapshotPath))
+        ) {
+          throw new DatabaseError(
+            "remote SAVE/LOAD may only use the configured snapshot path",
+            "AUTH_ERROR",
+          );
         }
-        if (cmd === 'SAVE') { await this.save(); reply = { kind: 'simple', value: 'OK' }; }
-        else { const count = await this.load(); reply = { kind: 'simple', value: `OK ${count}` }; }
+        if (cmd === "SAVE") {
+          await this.save();
+          reply = { kind: "simple", value: "OK" };
+        } else {
+          const count = await this.load();
+          reply = { kind: "simple", value: `OK ${count}` };
+        }
       } else {
         reply = this.dispatch(state, cmd, argv.slice(1));
       }
       durationMs = performance.now() - started;
       // Synchronous work cannot be cancelled after commit. Return its real outcome,
       // then close after draining if it exceeded the configured command budget.
-      const overBudget = this.maxCommandMs > 0 && durationMs > this.maxCommandMs;
-      if (reply === 'close') {
-        this.writeReply(state, { kind: 'simple', value: 'OK' });
+      const overBudget =
+        this.maxCommandMs > 0 && durationMs > this.maxCommandMs;
+      if (reply === "close") {
+        this.writeReply(state, { kind: "simple", value: "OK" });
         this.endSocket(state);
-        return 'close';
+        return "close";
       }
-      if (reply !== 'silent') {
+      if (reply !== "silent") {
         this.writeReply(state, reply);
       }
       if (overBudget) {
         this.endSocket(state);
-        return 'close';
+        return "close";
       }
     } catch (err) {
-      this.writeReply(state, { kind: 'error', message: wireError(err) });
+      this.writeReply(state, { kind: "error", message: wireError(err) });
     } finally {
       // SAVE/LOAD finish asynchronously; the synchronous dispatch portion is timed.
-      this.slow.record(cmd, durationMs ?? performance.now() - started, argv.length - 1);
+      this.slow.record(
+        cmd,
+        durationMs ?? performance.now() - started,
+        argv.length - 1,
+      );
     }
-    return 'ok';
+    return "ok";
   }
 
   private appendAof(op: AofOp): void {
@@ -1421,7 +1784,7 @@ export class YasdServer {
       this.aof.append(op);
       this.aofDegraded = false;
       this.aofLastError = undefined;
-      this.forgetPersistenceError('aof', 'write');
+      this.forgetPersistenceError("aof", "write");
       this.syncAofRecoveryStatus();
     } catch (err) {
       throw this.aofWriteError(err);
@@ -1430,9 +1793,13 @@ export class YasdServer {
 
   private aofWriteError(err: unknown): Error {
     this.aofDegraded = true;
-    this.aofLastError = 'AOF_WRITE_FAILED';
-    this.rememberPersistenceError('aof', 'write', err);
-    return new DatabaseError('AOF write failed; inspect persistenceStatus()', 'PERSISTENCE_ERROR', { cause: err });
+    this.aofLastError = "AOF_WRITE_FAILED";
+    this.rememberPersistenceError("aof", "write", err);
+    return new DatabaseError(
+      "AOF write failed; inspect persistenceStatus()",
+      "PERSISTENCE_ERROR",
+      { cause: err },
+    );
   }
 
   private logAof(op: AofMutation, effects?: TransactionEffects): void {
@@ -1443,7 +1810,10 @@ export class YasdServer {
     this.appendAof(op);
   }
 
-  private publishInvalidate(event: InvalidationEvent, effects?: TransactionEffects): void {
+  private publishInvalidate(
+    event: InvalidationEvent,
+    effects?: TransactionEffects,
+  ): void {
     if (effects) {
       effects.invalidations.push(event);
       return;
@@ -1456,25 +1826,32 @@ export class YasdServer {
   }
 
   private onCacheExpiry(key: string): void {
-    this.publishInvalidate({ event: 'expire', key })
+    this.publishInvalidate({ event: "expire", key });
   }
 
-  private runCacheMutation<T>(operation: (effects: TransactionEffects) => T): T {
-    if (this.closing) throw new DatabaseError('server is closing', 'CONNECTION_CLOSED');
+  private runCacheMutation<T>(
+    operation: (effects: TransactionEffects) => T,
+  ): T {
+    if (this.closing)
+      throw new DatabaseError("server is closing", "CONNECTION_CLOSED");
     const effects: TransactionEffects = { aof: [], invalidations: [] };
     const commit = (): T => {
       const result = operation(effects);
       if (effects.aof.length === 1) {
         this.appendAof(effects.aof[0] as AofOp);
       } else if (effects.aof.length > 1) {
-        this.appendAof({ op: 'transaction', ops: effects.aof });
+        this.appendAof({ op: "transaction", ops: effects.aof });
       }
       return result;
     };
     const result = this.aof.enabled
-      ? this.kv.atomicChanges(() => operation(effects), (entries, deleted) => {
-          if (entries.length || deleted.length) this.appendAof({ op: 'patch', entries, deleted });
-        })
+      ? this.kv.atomicChanges(
+          () => operation(effects),
+          (entries, deleted) => {
+            if (entries.length || deleted.length)
+              this.appendAof({ op: "patch", entries, deleted });
+          },
+        )
       : commit();
     for (const event of effects.invalidations) {
       this.publishInvalidate(event);
@@ -1484,128 +1861,137 @@ export class YasdServer {
 
   private cacheSet(
     key: string,
-    value: SnapshotEntry['value'],
-    ttlMs?: number
-  ): SnapshotEntry['value'] {
-    return this.runCacheMutation(effects => {
+    value: SnapshotEntry["value"],
+    ttlMs?: number,
+  ): SnapshotEntry["value"] {
+    return this.runCacheMutation((effects) => {
       const result = this.kv.set(key, value, ttlMs);
-      this.logAof({ op: 'set', key, value, expiresAt: this.aofExpiry(key) }, effects);
-      this.publishInvalidate({ event: 'set', key }, effects);
+      this.logAof(
+        { op: "set", key, value, expiresAt: this.aofExpiry(key) },
+        effects,
+      );
+      this.publishInvalidate({ event: "set", key }, effects);
       return result;
     });
   }
 
   private cacheDel(key: string): boolean {
-    return this.runCacheMutation(effects => {
+    return this.runCacheMutation((effects) => {
       const deleted = this.kv.del(key);
       if (deleted) {
-        this.logAof({ op: 'del', keys: [key] }, effects);
-        this.publishInvalidate({ event: 'del', key }, effects);
+        this.logAof({ op: "del", keys: [key] }, effects);
+        this.publishInvalidate({ event: "del", key }, effects);
       }
       return deleted;
     });
   }
 
   private cacheClearPrefix(prefix: string): number {
-    return this.runCacheMutation(effects => {
+    return this.runCacheMutation((effects) => {
       const count = this.kv.clearPrefix(prefix);
-      this.logAof({ op: 'clear', prefix }, effects);
-      this.publishInvalidate({ event: 'clear', prefix }, effects);
+      this.logAof({ op: "clear", prefix }, effects);
+      this.publishInvalidate({ event: "clear", prefix }, effects);
       return count;
     });
   }
 
   private cacheClear(): void {
-    this.runCacheMutation(effects => {
-      const keys = this.kv.dump().map(entry => entry.key);
+    this.runCacheMutation((effects) => {
+      const keys = this.kv.dump().map((entry) => entry.key);
       this.kv.clear();
       if (keys.length > 0) {
-        this.logAof({ op: 'del', keys }, effects);
+        this.logAof({ op: "del", keys }, effects);
         for (const key of keys) {
-          this.publishInvalidate({ event: 'del', key }, effects);
+          this.publishInvalidate({ event: "del", key }, effects);
         }
       }
     });
   }
 
   private cacheMset(entries: KVBatchEntry[]): number {
-    return this.runCacheMutation(effects => {
+    return this.runCacheMutation((effects) => {
       const count = this.kv.mset(entries);
-      const aofEntries: AofBatchEntry[] = entries.map(entry => ({
+      const aofEntries: AofBatchEntry[] = entries.map((entry) => ({
         ...entry,
         expiresAt: this.aofExpiry(entry.key),
       }));
-      this.logAof({ op: 'mset', entries: aofEntries }, effects);
+      this.logAof({ op: "mset", entries: aofEntries }, effects);
       for (const entry of entries) {
-        this.publishInvalidate({ event: 'set', key: entry.key }, effects);
+        this.publishInvalidate({ event: "set", key: entry.key }, effects);
       }
       return count;
     });
   }
 
   private cacheIncr(key: string, by = 1): number {
-    return this.runCacheMutation(effects => {
+    return this.runCacheMutation((effects) => {
       const next = this.kv.incr(key, by);
-      this.logAof({ op: 'incr', key, by }, effects);
-      this.publishInvalidate({ event: 'set', key }, effects);
+      this.logAof({ op: "incr", key, by }, effects);
+      this.publishInvalidate({ event: "set", key }, effects);
       return next;
     });
   }
 
   private cacheDecr(key: string, by = 1): number {
-    return this.runCacheMutation(effects => {
+    return this.runCacheMutation((effects) => {
       const next = this.kv.decr(key, by);
-      this.logAof({ op: 'incr', key, by: -by }, effects);
-      this.publishInvalidate({ event: 'set', key }, effects);
+      this.logAof({ op: "incr", key, by: -by }, effects);
+      this.publishInvalidate({ event: "set", key }, effects);
       return next;
     });
   }
 
   private cacheCas(
     key: string,
-    expected: SnapshotEntry['value'] | undefined,
-    value: SnapshotEntry['value'],
-    ttlMs?: number
+    expected: SnapshotEntry["value"] | undefined,
+    value: SnapshotEntry["value"],
+    ttlMs?: number,
   ): boolean {
-    return this.runCacheMutation(effects => {
+    return this.runCacheMutation((effects) => {
       const ok = this.kv.cas(key, expected, value, ttlMs);
       if (ok) {
         const expiresAt = this.kv.expiration(key);
         if (expiresAt === null) {
-          this.logAof({ op: 'del', keys: [key] }, effects);
+          this.logAof({ op: "del", keys: [key] }, effects);
         } else {
-          this.logAof({ op: 'set', key, value, expiresAt: expiresAt ?? null }, effects);
+          this.logAof(
+            { op: "set", key, value, expiresAt: expiresAt ?? null },
+            effects,
+          );
         }
-        this.publishInvalidate({ event: 'set', key }, effects);
+        this.publishInvalidate({ event: "set", key }, effects);
       }
       return ok;
     });
   }
 
   private cacheExpire(key: string, ttlMs: number): boolean {
-    return this.runCacheMutation(effects => {
+    return this.runCacheMutation((effects) => {
       const ok = this.kv.expire(key, ttlMs);
       if (ok) {
-        this.logAof({ op: 'expire', key, expiresAt: this.aofExpiry(key) ?? 0 }, effects);
-        this.publishInvalidate({ event: 'expire', key }, effects);
+        this.logAof(
+          { op: "expire", key, expiresAt: this.aofExpiry(key) ?? 0 },
+          effects,
+        );
+        this.publishInvalidate({ event: "expire", key }, effects);
       }
       return ok;
     });
   }
 
   private cachePersist(key: string): boolean {
-    return this.runCacheMutation(effects => {
+    return this.runCacheMutation((effects) => {
       const ok = this.kv.persist(key);
       if (ok) {
-        this.logAof({ op: 'persist', key }, effects);
-        this.publishInvalidate({ event: 'persist', key }, effects);
+        this.logAof({ op: "persist", key }, effects);
+        this.publishInvalidate({ event: "persist", key }, effects);
       }
       return ok;
     });
   }
 
-  private parseValue(json: string): SnapshotEntry['value'] {
-    return JSON.parse(json) as SnapshotEntry['value'];
+  private parseValue(json: string): SnapshotEntry["value"] {
+    return JSON.parse(json) as SnapshotEntry["value"];
   }
 
   /** AOF TTL marker: null persists, 0 means the key was already gone. */
@@ -1618,43 +2004,56 @@ export class YasdServer {
    * Transaction entry point: WATCH/UNWATCH/MULTI/EXEC/DISCARD plus queueing
    * while in MULTI. Everything else delegates to `executeCommand`.
    */
-  private dispatch(state: ConnState, cmd: string, args: string[]): RespReply | 'silent' | 'close' {
+  private dispatch(
+    state: ConnState,
+    cmd: string,
+    args: string[],
+  ): RespReply | "silent" | "close" {
     switch (cmd) {
-      case 'WATCH': {
-        if (state.subMode) throw new Error('WATCH not allowed in subscriber mode');
-        if (state.txQueue !== null) throw new Error('WATCH inside MULTI is not allowed');
+      case "WATCH": {
+        if (state.subMode)
+          throw new Error("WATCH not allowed in subscriber mode");
+        if (state.txQueue !== null)
+          throw new Error("WATCH inside MULTI is not allowed");
         this.requireArgs(cmd, args, 1, Infinity);
         if (state.watchVersions === null) state.watchVersions = new Map();
-        if (new Set([...state.watchVersions.keys(), ...args]).size > this.maxWatchedKeys) {
-          throw new DatabaseError('WATCH key limit exceeded', 'LIMIT_EXCEEDED');
+        if (
+          new Set([...state.watchVersions.keys(), ...args]).size >
+          this.maxWatchedKeys
+        ) {
+          throw new DatabaseError("WATCH key limit exceeded", "LIMIT_EXCEEDED");
         }
         for (const key of args) {
-          if (!state.watchVersions.has(key)) state.watchVersions.set(key, this.kv.getVersion(key));
+          if (!state.watchVersions.has(key))
+            state.watchVersions.set(key, this.kv.getVersion(key));
         }
-        return { kind: 'simple', value: 'OK' };
+        return { kind: "simple", value: "OK" };
       }
-      case 'UNWATCH': {
-        if (args.length > 0) throw new Error('UNWATCH takes no arguments');
+      case "UNWATCH": {
+        if (args.length > 0) throw new Error("UNWATCH takes no arguments");
         state.watchVersions = null;
-        return { kind: 'simple', value: 'OK' };
+        return { kind: "simple", value: "OK" };
       }
-      case 'MULTI': {
-        if (args.length > 0) throw new Error('MULTI takes no arguments');
-        if (state.subMode) throw new Error('MULTI not allowed in subscriber mode');
-        if (state.txQueue !== null) throw new Error('MULTI calls cannot nest');
-        state.txQueue = []; state.txBytes = 0; state.txFailed = false;
-        return { kind: 'simple', value: 'OK' };
+      case "MULTI": {
+        if (args.length > 0) throw new Error("MULTI takes no arguments");
+        if (state.subMode)
+          throw new Error("MULTI not allowed in subscriber mode");
+        if (state.txQueue !== null) throw new Error("MULTI calls cannot nest");
+        state.txQueue = [];
+        state.txBytes = 0;
+        state.txFailed = false;
+        return { kind: "simple", value: "OK" };
       }
-      case 'DISCARD': {
-        if (args.length > 0) throw new Error('DISCARD takes no arguments');
-        if (state.txQueue === null) throw new Error('DISCARD without MULTI');
+      case "DISCARD": {
+        if (args.length > 0) throw new Error("DISCARD takes no arguments");
+        if (state.txQueue === null) throw new Error("DISCARD without MULTI");
         state.txQueue = null;
         state.watchVersions = null;
-        return { kind: 'simple', value: 'OK' };
+        return { kind: "simple", value: "OK" };
       }
-      case 'EXEC': {
-        if (args.length > 0) throw new Error('EXEC takes no arguments');
-        if (state.txQueue === null) throw new Error('EXEC without MULTI');
+      case "EXEC": {
+        if (args.length > 0) throw new Error("EXEC takes no arguments");
+        if (state.txQueue === null) throw new Error("EXEC without MULTI");
         return this.execTransaction(state);
       }
       default: {
@@ -1665,17 +2064,28 @@ export class YasdServer {
           if (!TX_QUEUEABLE.has(cmd)) {
             throw new Error(`${cmd} not allowed inside MULTI`);
           }
-          const bytes = Buffer.byteLength(cmd) + args.reduce((sum, arg) => sum + Buffer.byteLength(arg) + 16, 16);
-          if (state.txFailed || state.txQueue.length >= this.maxTransactionCommands || state.txBytes + bytes > this.maxTransactionBytes) {
+          const bytes =
+            Buffer.byteLength(cmd) +
+            args.reduce((sum, arg) => sum + Buffer.byteLength(arg) + 16, 16);
+          if (
+            state.txFailed ||
+            state.txQueue.length >= this.maxTransactionCommands ||
+            state.txBytes + bytes > this.maxTransactionBytes
+          ) {
             state.txFailed = true;
-            throw new DatabaseError('transaction queue limit exceeded; DISCARD required', 'LIMIT_EXCEEDED');
+            throw new DatabaseError(
+              "transaction queue limit exceeded; DISCARD required",
+              "LIMIT_EXCEEDED",
+            );
           }
           state.txBytes += bytes;
           state.txQueue.push({ cmd, args });
-          return { kind: 'simple', value: 'QUEUED' };
+          return { kind: "simple", value: "QUEUED" };
         }
         if (AOF_COMMANDS.has(cmd)) {
-          return this.runCacheMutation(effects => this.executeCommand(state, cmd, args, effects));
+          return this.runCacheMutation((effects) =>
+            this.executeCommand(state, cmd, args, effects),
+          );
         }
         return this.executeCommand(state, cmd, args);
       }
@@ -1692,151 +2102,193 @@ export class YasdServer {
     const queue = state.txQueue ?? [];
     const watched = state.watchVersions;
     const failed = state.txFailed;
-    state.txQueue = null; state.txBytes = 0; state.txFailed = false;
+    state.txQueue = null;
+    state.txBytes = 0;
+    state.txFailed = false;
     state.watchVersions = null;
-    if (failed) throw new DatabaseError('transaction aborted after queue limit', 'TRANSACTION_ERROR');
+    if (failed)
+      throw new DatabaseError(
+        "transaction aborted after queue limit",
+        "TRANSACTION_ERROR",
+      );
     if (watched !== null) {
       for (const [key, version] of watched) {
         if (this.kv.getVersion(key) !== version) {
-          return { kind: 'nil' };
+          return { kind: "nil" };
         }
       }
     }
     const items: Array<RespReply | null> = [];
     const effects: TransactionEffects = { aof: [], invalidations: [] };
-    const abort = Symbol('transaction aborted');
+    const abort = Symbol("transaction aborted");
     try {
-      this.kv.atomicChanges(() => {
-        let failed = false;
-        let responseBytes = String(queue.length).length + 3;
-        for (const op of queue) {
-          try {
-            const reply = this.executeCommand(state, op.cmd, op.args, effects);
-            if (reply === 'silent' || reply === 'close') {
+      this.kv.atomicChanges(
+        () => {
+          let failed = false;
+          let responseBytes = String(queue.length).length + 3;
+          for (const op of queue) {
+            try {
+              const reply = this.executeCommand(
+                state,
+                op.cmd,
+                op.args,
+                effects,
+              );
+              if (reply === "silent" || reply === "close") {
+                failed = true;
+                items.push({
+                  kind: "error",
+                  message: `${op.cmd} cannot run inside MULTI`,
+                });
+              } else {
+                responseBytes += replyByteLength(reply);
+                if (responseBytes > 8 * 1024 * 1024)
+                  throw new DatabaseError(
+                    "EXEC response exceeds RESP limit",
+                    "LIMIT_EXCEEDED",
+                  );
+                items.push(reply);
+              }
+            } catch (err) {
               failed = true;
-              items.push({ kind: 'error', message: `${op.cmd} cannot run inside MULTI` });
-            } else {
-              responseBytes += replyByteLength(reply);
-              if (responseBytes > 8 * 1024 * 1024) throw new DatabaseError('EXEC response exceeds RESP limit', 'LIMIT_EXCEEDED');
-              items.push(reply);
+              items.push({ kind: "error", message: wireError(err) });
             }
-          } catch (err) {
-            failed = true;
-            items.push({ kind: 'error', message: wireError(err) });
           }
-        }
-        if (failed) throw abort;
-      }, (entries, deleted) => {
-        if (entries.length || deleted.length) this.appendAof({ op: 'patch', entries, deleted });
-      });
+          if (failed) throw abort;
+        },
+        (entries, deleted) => {
+          if (entries.length || deleted.length)
+            this.appendAof({ op: "patch", entries, deleted });
+        },
+      );
     } catch (err) {
       if (err !== abort) throw err;
-      return { kind: 'array', items };
+      return { kind: "array", items };
     }
     for (const event of effects.invalidations) {
       this.publishInvalidate(event);
     }
-    return { kind: 'array', items };
+    return { kind: "array", items };
   }
 
   private executeCommand(
     state: ConnState,
     cmd: string,
     args: string[],
-    effects?: TransactionEffects
-  ): RespReply | 'silent' | 'close' {
+    effects?: TransactionEffects,
+  ): RespReply | "silent" | "close" {
     switch (cmd) {
-      case 'PING':
+      case "PING":
         return args.length > 0
-          ? { kind: 'bulk', value: args.join(' ') }
-          : { kind: 'simple', value: 'PONG' };
+          ? { kind: "bulk", value: args.join(" ") }
+          : { kind: "simple", value: "PONG" };
 
-      case 'QUIT':
-        return 'close';
+      case "QUIT":
+        return "close";
 
-      case 'AUTH': {
-        if (args.length !== 1) throw new Error('AUTH takes one password');
-        if (!this.authRequired) return { kind: 'simple', value: 'OK' };
+      case "AUTH": {
+        if (args.length !== 1) throw new Error("AUTH takes one password");
+        if (!this.authRequired) return { kind: "simple", value: "OK" };
         if (args[0] === this.password) {
           state.authed = true;
-          return { kind: 'simple', value: 'OK' };
+          return { kind: "simple", value: "OK" };
         }
-        throw new Error('invalid password');
+        throw new Error("invalid password");
       }
 
-      case 'CAS': {
+      case "CAS": {
         // CAS key <expectedJson|empty=assert-missing> <valueJson> [PX ms]
         if (args.length < 3 || args.length > 5) {
-          throw new Error('CAS syntax: CAS key expectedJson valueJson [PX ms]');
+          throw new Error("CAS syntax: CAS key expectedJson valueJson [PX ms]");
         }
         const key = args[0] as string;
         const expectedRaw = args[1] as string;
         const value = this.parseValue(args[2] as string);
         const ttlMs = this.parsePx(args.slice(3));
-        const expected = expectedRaw === '' ? undefined : (JSON.parse(expectedRaw) as SnapshotEntry['value']);
+        const expected =
+          expectedRaw === ""
+            ? undefined
+            : (JSON.parse(expectedRaw) as SnapshotEntry["value"]);
         const ok = this.kv.cas(key, expected, value, ttlMs);
         if (ok) {
           const expiresAt = this.kv.expiration(key);
           if (expiresAt === null) {
-            this.logAof({ op: 'del', keys: [key] }, effects);
+            this.logAof({ op: "del", keys: [key] }, effects);
           } else {
-            this.logAof({ op: 'set', key, value, expiresAt: expiresAt ?? null }, effects);
+            this.logAof(
+              { op: "set", key, value, expiresAt: expiresAt ?? null },
+              effects,
+            );
           }
-          this.publishInvalidate({ event: 'set', key }, effects);
+          this.publishInvalidate({ event: "set", key }, effects);
         }
-        return { kind: 'int', value: ok ? 1 : 0 };
+        return { kind: "int", value: ok ? 1 : 0 };
       }
 
-      case 'GET': {
+      case "GET": {
         this.requireArgs(cmd, args, 1);
         const value = this.kv.get(args[0] as string);
-        if (value === undefined) return { kind: 'bulk', value: null };
-        return { kind: 'bulk', value: JSON.stringify(value) ?? 'null' };
+        if (value === undefined) return { kind: "bulk", value: null };
+        return { kind: "bulk", value: JSON.stringify(value) ?? "null" };
       }
 
-      case 'SET': {
+      case "SET": {
         this.requireArgs(cmd, args, 2, 4);
         const key = args[0] as string;
         const value = this.parseValue(args[1] as string);
         const ttlMs = this.parsePx(args.slice(2));
         this.kv.set(key, value, ttlMs);
-        this.logAof({ op: 'set', key, value, expiresAt: this.aofExpiry(key) }, effects);
-        this.publishInvalidate({ event: 'set', key }, effects);
-        return { kind: 'simple', value: 'OK' };
+        this.logAof(
+          { op: "set", key, value, expiresAt: this.aofExpiry(key) },
+          effects,
+        );
+        this.publishInvalidate({ event: "set", key }, effects);
+        return { kind: "simple", value: "OK" };
       }
 
-      case 'MSET': {
+      case "MSET": {
         if (args.length === 0 || args.length % 2 !== 0) {
-          throw new Error('MSET requires key/value pairs');
+          throw new Error("MSET requires key/value pairs");
         }
         const entries: KVBatchEntry[] = [];
         for (let i = 0; i < args.length; i += 2) {
-          entries.push({ key: args[i] as string, value: this.parseValue(args[i + 1] as string) });
+          entries.push({
+            key: args[i] as string,
+            value: this.parseValue(args[i + 1] as string),
+          });
         }
         this.kv.mset(entries);
-        const aofEntries: AofBatchEntry[] = entries.map(entry => ({
+        const aofEntries: AofBatchEntry[] = entries.map((entry) => ({
           ...entry,
           expiresAt: this.aofExpiry(entry.key),
         }));
-        this.logAof({ op: 'mset', entries: aofEntries }, effects);
-        for (const e of entries) this.publishInvalidate({ event: 'set', key: e.key }, effects);
-        return { kind: 'simple', value: 'OK' };
+        this.logAof({ op: "mset", entries: aofEntries }, effects);
+        for (const e of entries)
+          this.publishInvalidate({ event: "set", key: e.key }, effects);
+        return { kind: "simple", value: "OK" };
       }
 
-      case 'MGET': {
+      case "MGET": {
         const items: RespReply[] = [];
         let bytes = String(args.length).length + 3;
         for (const key of args) {
           const value = this.kv.get(key);
-          const item: RespReply = { kind: 'bulk', value: value === undefined ? null : JSON.stringify(value) };
+          const item: RespReply = {
+            kind: "bulk",
+            value: value === undefined ? null : JSON.stringify(value),
+          };
           bytes += replyByteLength(item);
-          if (bytes > 8 * 1024 * 1024) throw new DatabaseError('MGET response exceeds RESP limit', 'LIMIT_EXCEEDED');
+          if (bytes > 8 * 1024 * 1024)
+            throw new DatabaseError(
+              "MGET response exceeds RESP limit",
+              "LIMIT_EXCEEDED",
+            );
           items.push(item);
         }
-        return { kind: 'array', items };
+        return { kind: "array", items };
       }
 
-      case 'DEL': {
+      case "DEL": {
         let count = 0;
         const deleted: string[] = [];
         for (const key of args) {
@@ -1845,68 +2297,103 @@ export class YasdServer {
             deleted.push(key);
           }
         }
-        if (deleted.length > 0) this.logAof({ op: 'del', keys: deleted }, effects);
-        for (const key of deleted) this.publishInvalidate({ event: 'del', key }, effects);
-        return { kind: 'int', value: count };
+        if (deleted.length > 0)
+          this.logAof({ op: "del", keys: deleted }, effects);
+        for (const key of deleted)
+          this.publishInvalidate({ event: "del", key }, effects);
+        return { kind: "int", value: count };
       }
 
-      case 'CLEAR': {
+      case "CLEAR": {
         this.requireArgs(cmd, args, 1);
         const prefix = args[0] as string;
         const count = this.kv.clearPrefix(prefix);
-        this.logAof({ op: 'clear', prefix }, effects);
-        this.publishInvalidate({ event: 'clear', prefix }, effects);
-        return { kind: 'int', value: count };
+        this.logAof({ op: "clear", prefix }, effects);
+        this.publishInvalidate({ event: "clear", prefix }, effects);
+        return { kind: "int", value: count };
       }
 
-      case 'TTL': {
+      case "TTL": {
         this.requireArgs(cmd, args, 1);
-        return { kind: 'int', value: this.kv.ttl(args[0] as string) };
+        return { kind: "int", value: this.kv.ttl(args[0] as string) };
       }
 
-      case 'EXPIRE': {
+      case "EXPIRE": {
         this.requireArgs(cmd, args, 2);
         const ttlMs = this.parseMs(args[1] as string);
         const ok = this.kv.expire(args[0] as string, ttlMs);
         if (ok) {
-          this.logAof({ op: 'expire', key: args[0] as string, expiresAt: this.aofExpiry(args[0] as string) ?? 0 }, effects);
-          this.publishInvalidate({ event: 'expire', key: args[0] as string }, effects);
+          this.logAof(
+            {
+              op: "expire",
+              key: args[0] as string,
+              expiresAt: this.aofExpiry(args[0] as string) ?? 0,
+            },
+            effects,
+          );
+          this.publishInvalidate(
+            { event: "expire", key: args[0] as string },
+            effects,
+          );
         }
-        return { kind: 'int', value: ok ? 1 : 0 };
+        return { kind: "int", value: ok ? 1 : 0 };
       }
 
-      case 'PERSIST': {
+      case "PERSIST": {
         this.requireArgs(cmd, args, 1);
         const ok = this.kv.persist(args[0] as string);
         if (ok) {
-          this.logAof({ op: 'persist', key: args[0] as string }, effects)
-          this.publishInvalidate({ event: 'persist', key: args[0] as string }, effects)
+          this.logAof({ op: "persist", key: args[0] as string }, effects);
+          this.publishInvalidate(
+            { event: "persist", key: args[0] as string },
+            effects,
+          );
         }
-        return { kind: 'int', value: ok ? 1 : 0 };
+        return { kind: "int", value: ok ? 1 : 0 };
       }
 
-      case 'INCR':
-      case 'DECR': {
-        if (args.length < 1 || args.length > 2) throw new Error(`${cmd} requires a key and optional delta`);
-        const rawBy = args[1] === undefined ? 1 : parseStrictNumber(args[1], 'delta');
-        const next = cmd === 'INCR' ? this.kv.incr(args[0] as string, rawBy) : this.kv.decr(args[0] as string, rawBy);
-        this.logAof({ op: 'incr', key: args[0] as string, by: cmd === 'INCR' ? rawBy : -rawBy }, effects);
-        this.publishInvalidate({ event: 'set', key: args[0] as string }, effects);
+      case "INCR":
+      case "DECR": {
+        if (args.length < 1 || args.length > 2)
+          throw new Error(`${cmd} requires a key and optional delta`);
+        const rawBy =
+          args[1] === undefined ? 1 : parseStrictNumber(args[1], "delta");
+        const next =
+          cmd === "INCR"
+            ? this.kv.incr(args[0] as string, rawBy)
+            : this.kv.decr(args[0] as string, rawBy);
+        this.logAof(
+          {
+            op: "incr",
+            key: args[0] as string,
+            by: cmd === "INCR" ? rawBy : -rawBy,
+          },
+          effects,
+        );
+        this.publishInvalidate(
+          { event: "set", key: args[0] as string },
+          effects,
+        );
         return Number.isSafeInteger(next)
-          ? { kind: 'int', value: next }
-          : { kind: 'bulk', value: JSON.stringify(next) };
+          ? { kind: "int", value: next }
+          : { kind: "bulk", value: JSON.stringify(next) };
       }
 
-      case 'PUBLISH': {
+      case "PUBLISH": {
         this.requireArgs(cmd, args, 2);
         const count = this.hub.publish(args[0] as string, args[1] as string);
-        return { kind: 'int', value: count };
+        return { kind: "int", value: count };
       }
 
-      case 'SUBSCRIBE': {
+      case "SUBSCRIBE": {
         this.requireArgs(cmd, args, 1, Infinity);
-        if (new Set([...state.subs.keys(), ...args]).size > this.maxSubscriptions) {
-          throw new DatabaseError('subscription limit exceeded', 'LIMIT_EXCEEDED');
+        if (
+          new Set([...state.subs.keys(), ...args]).size > this.maxSubscriptions
+        ) {
+          throw new DatabaseError(
+            "subscription limit exceeded",
+            "LIMIT_EXCEEDED",
+          );
         }
         state.subMode = true;
         const acks: Array<RespReply | null> = [];
@@ -1914,11 +2401,11 @@ export class YasdServer {
           if (!state.subs.has(channel)) {
             const listener: PubSubListener = (ch, message) => {
               this.writeReply(state, {
-                kind: 'array',
+                kind: "array",
                 items: [
-                  { kind: 'bulk', value: 'message' },
-                  { kind: 'bulk', value: ch },
-                  { kind: 'bulk', value: message },
+                  { kind: "bulk", value: "message" },
+                  { kind: "bulk", value: ch },
+                  { kind: "bulk", value: message },
                 ],
               });
             };
@@ -1926,11 +2413,11 @@ export class YasdServer {
             this.hub.subscribe(channel, listener);
           }
           acks.push({
-            kind: 'array',
+            kind: "array",
             items: [
-              { kind: 'bulk', value: 'subscribe' },
-              { kind: 'bulk', value: channel },
-              { kind: 'int', value: state.subs.size },
+              { kind: "bulk", value: "subscribe" },
+              { kind: "bulk", value: channel },
+              { kind: "int", value: state.subs.size },
             ],
           });
         }
@@ -1938,59 +2425,73 @@ export class YasdServer {
         for (const ack of acks) {
           if (!this.writeReply(state, ack)) break;
         }
-        return 'silent';
+        return "silent";
       }
 
-      case 'UNSUBSCRIBE': {
-        const channels = args.length === 0 ? Array.from(state.subs.keys()) : args;
+      case "UNSUBSCRIBE": {
+        const channels =
+          args.length === 0 ? Array.from(state.subs.keys()) : args;
         for (const channel of channels) {
           const listener = state.subs.get(channel);
           if (listener) {
             this.hub.unsubscribe(channel, listener);
             state.subs.delete(channel);
           }
-          if (!this.writeReply(state, {
-            kind: 'array',
-            items: [
-              { kind: 'bulk', value: 'unsubscribe' },
-              { kind: 'bulk', value: channel },
-              { kind: 'int', value: state.subs.size },
-            ],
-          })) break;
+          if (
+            !this.writeReply(state, {
+              kind: "array",
+              items: [
+                { kind: "bulk", value: "unsubscribe" },
+                { kind: "bulk", value: channel },
+                { kind: "int", value: state.subs.size },
+              ],
+            })
+          )
+            break;
         }
         if (state.subs.size === 0) state.subMode = false;
-        return 'silent';
+        return "silent";
       }
 
-      case 'INFO': {
-        return { kind: 'bulk', value: JSON.stringify(this.info()) };
+      case "INFO": {
+        return { kind: "bulk", value: JSON.stringify(this.info()) };
       }
 
-      case 'SAVE':
-      case 'LOAD':
-        throw new DatabaseError(`${cmd} requires asynchronous dispatch`, 'COMMAND_ERROR');
+      case "SAVE":
+      case "LOAD":
+        throw new DatabaseError(
+          `${cmd} requires asynchronous dispatch`,
+          "COMMAND_ERROR",
+        );
 
       default:
         throw new Error(`unknown command: ${cmd}`);
     }
   }
 
-  private requireArgs(cmd: string, args: string[], min: number, max: number = min): void {
+  private requireArgs(
+    cmd: string,
+    args: string[],
+    min: number,
+    max: number = min,
+  ): void {
     if (args.length < min || args.length > max) {
-      throw new Error(`${cmd} takes ${min === max ? min : `${min}..${max}`} argument(s), got ${args.length}`);
+      throw new Error(
+        `${cmd} takes ${min === max ? min : `${min}..${max}`} argument(s), got ${args.length}`,
+      );
     }
   }
 
   private parsePx(rest: string[]): number | undefined {
     if (rest.length === 0) return undefined;
-    if (rest.length !== 2 || rest[0]?.toUpperCase() !== 'PX') {
-      throw new Error('SET syntax: SET key value [PX ms]');
+    if (rest.length !== 2 || rest[0]?.toUpperCase() !== "PX") {
+      throw new Error("SET syntax: SET key value [PX ms]");
     }
     return this.parseMs(rest[1] as string);
   }
 
   private parseMs(raw: string): number {
-    return parseStrictNonNegativeNumber(raw, 'TTL');
+    return parseStrictNonNegativeNumber(raw, "TTL");
   }
 }
 

@@ -2,9 +2,11 @@
 // Used only on a malformed, unterminated final AOF record.
 export function isIncompleteJson(text: string): boolean {
   let at = 0;
-  const incomplete = Symbol('incomplete');
-  const invalid = Symbol('invalid');
-  const whitespace = (): void => { while (/[ \t\r\n]/.test(text[at] ?? '') && at < text.length) at++; };
+  const incomplete = Symbol("incomplete");
+  const invalid = Symbol("invalid");
+  const whitespace = (): void => {
+    while (/[ \t\r\n]/.test(text[at] ?? "") && at < text.length) at++;
+  };
   const need = (char: string): void => {
     whitespace();
     if (at === text.length) throw incomplete;
@@ -16,10 +18,10 @@ export function isIncompleteJson(text: string): boolean {
       const char = text[at++];
       if (char === '"') return;
       if (char.charCodeAt(0) < 32) throw invalid;
-      if (char === '\\') {
+      if (char === "\\") {
         if (at === text.length) throw incomplete;
         const escaped = text[at++];
-        if (escaped === 'u') {
+        if (escaped === "u") {
           for (let i = 0; i < 4; i++) {
             if (at === text.length) throw incomplete;
             if (!/[0-9a-fA-F]/.test(text[at++])) throw invalid;
@@ -35,21 +37,37 @@ export function isIncompleteJson(text: string): boolean {
     if (at === text.length) throw incomplete;
     const first = text[at];
     if (first === '"') return string();
-    if (first === '{' || first === '[') {
+    if (first === "{" || first === "[") {
       at++;
-      const end = first === '{' ? '}' : ']';
+      const end = first === "{" ? "}" : "]";
       whitespace();
-      if (text[at] === end) { at++; return; }
+      if (text[at] === end) {
+        at++;
+        return;
+      }
       for (;;) {
-        if (first === '{') { string(); need(':'); }
+        if (first === "{") {
+          string();
+          need(":");
+        }
         value(depth + 1);
         whitespace();
         if (at === text.length) throw incomplete;
-        if (text[at] === end) { at++; return; }
-        need(',');
+        if (text[at] === end) {
+          at++;
+          return;
+        }
+        need(",");
       }
     }
-    const literal = first === 't' ? 'true' : first === 'f' ? 'false' : first === 'n' ? 'null' : undefined;
+    const literal =
+      first === "t"
+        ? "true"
+        : first === "f"
+          ? "false"
+          : first === "n"
+            ? "null"
+            : undefined;
     if (literal) {
       for (const char of literal) {
         if (at === text.length) throw incomplete;
@@ -57,14 +75,20 @@ export function isIncompleteJson(text: string): boolean {
       }
       return;
     }
-    const match = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(text.slice(at));
+    const match = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(
+      text.slice(at),
+    );
     if (!match) {
-      if (text.slice(at) === '-') throw incomplete;
+      if (text.slice(at) === "-") throw incomplete;
       throw invalid;
     }
     at += match[0].length;
     const rest = text.slice(at);
-    if ((rest === '.' && !/[.eE]/.test(match[0])) || (/^[eE][+-]?$/.test(rest) && !/[eE]/.test(match[0]))) throw incomplete;
+    if (
+      (rest === "." && !/[.eE]/.test(match[0])) ||
+      (/^[eE][+-]?$/.test(rest) && !/[eE]/.test(match[0]))
+    )
+      throw incomplete;
   };
   try {
     value(0);

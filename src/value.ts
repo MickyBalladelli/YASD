@@ -18,8 +18,8 @@ export function structuralEqual(a: unknown, b: unknown): boolean {
       if (
         left === null ||
         right === null ||
-        typeof left !== 'object' ||
-        typeof right !== 'object'
+        typeof left !== "object" ||
+        typeof right !== "object"
       ) {
         return false;
       }
@@ -55,7 +55,8 @@ export function structuralEqual(a: unknown, b: unknown): boolean {
       if (leftKeys.length !== rightKeys.length) return false;
 
       for (const key of leftKeys) {
-        if (!Object.prototype.hasOwnProperty.call(rightObject, key)) return false;
+        if (!Object.prototype.hasOwnProperty.call(rightObject, key))
+          return false;
         pending.push([leftObject[key], rightObject[key]]);
       }
     }

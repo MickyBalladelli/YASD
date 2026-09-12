@@ -2,10 +2,28 @@
 // A SQL-like in-memory database for Node.js, plus an O(1) KV cache fast
 // path (for Echo hot feeds, channel lists, presence/typing, rate limits).
 
-import { Executor, SlowQueryEntry, QueryPlan, QueryProfile } from './executor';
-import { KVCache, KVOptions, KVExpiryListener, KVStats, KVBatchEntry, KVTransaction, TransactionError, TxResult, SnapshotEntry, DEFAULT_NAMESPACE_TTLS, DEFAULT_MAX_KEY_BYTES, DEFAULT_MAX_VALUE_BYTES } from './cache'
-import { PubSubHub, PubSubListener, INVALIDATE_CHANNEL, InvalidationEvent } from './pubsub';
-import { parse } from './parser';
+import { Executor, SlowQueryEntry, QueryPlan, QueryProfile } from "./executor";
+import {
+  KVCache,
+  KVOptions,
+  KVExpiryListener,
+  KVStats,
+  KVBatchEntry,
+  KVTransaction,
+  TransactionError,
+  TxResult,
+  SnapshotEntry,
+  DEFAULT_NAMESPACE_TTLS,
+  DEFAULT_MAX_KEY_BYTES,
+  DEFAULT_MAX_VALUE_BYTES,
+} from "./cache";
+import {
+  PubSubHub,
+  PubSubListener,
+  INVALIDATE_CHANNEL,
+  InvalidationEvent,
+} from "./pubsub";
+import { parse } from "./parser";
 import {
   QueryResult,
   Row,
@@ -18,10 +36,10 @@ import {
   LiteralExpression,
   ColumnReferenceExpression,
   IsNullClause,
-} from './types';
+} from "./types";
 
-export { DatabaseError, DATABASE_ERROR_CODES } from './errors';
-export type { DatabaseErrorCode } from './errors';
+export { DatabaseError, DATABASE_ERROR_CODES } from "./errors";
+export type { DatabaseErrorCode } from "./errors";
 
 // Re-export types
 export type {
@@ -43,7 +61,7 @@ export type {
   TxResult,
   SnapshotEntry,
   PubSubListener,
-  InvalidationEvent
+  InvalidationEvent,
 };
 
 export {
@@ -57,9 +75,14 @@ export {
   PubSubHub,
   INVALIDATE_CHANNEL,
 };
-export { SlowLog, SLOW_LOG_CAP, checkSlowThreshold } from './metrics';
-export type { SlowEntry } from './metrics';
-export { YasdServer, serverOptionsFromEnv, DEFAULT_HOST, DEFAULT_PORT } from './server'
+export { SlowLog, SLOW_LOG_CAP, checkSlowThreshold } from "./metrics";
+export type { SlowEntry } from "./metrics";
+export {
+  YasdServer,
+  serverOptionsFromEnv,
+  DEFAULT_HOST,
+  DEFAULT_PORT,
+} from "./server";
 export type {
   YasdServerOptions,
   YasdServerTlsOptions,
@@ -72,11 +95,17 @@ export type {
   PersistenceErrorOperation,
   PersistenceErrorStatus,
   PersistenceStatus,
-} from './server';
-export { YasdClient, parseCacheUrl } from './client';
-export type { YasdClientOptions, ParsedCacheUrl, SubscribeHandler, TxExecResult, YasdTransactionOptions } from './client';
-export { YasdTransaction } from './client';
-export { saveSnapshot, loadSnapshot, AofLog, applyAofOp } from './persistence';
+} from "./server";
+export { YasdClient, parseCacheUrl } from "./client";
+export type {
+  YasdClientOptions,
+  ParsedCacheUrl,
+  SubscribeHandler,
+  TxExecResult,
+  YasdTransactionOptions,
+} from "./client";
+export { YasdTransaction } from "./client";
+export { saveSnapshot, loadSnapshot, AofLog, applyAofOp } from "./persistence";
 export type {
   SnapshotFile,
   SnapshotStore,
@@ -87,7 +116,7 @@ export type {
   AofOp,
   AofMutation,
   AofRecoveryState,
-} from './persistence';
+} from "./persistence";
 export {
   RespDecoder,
   encodeCommand,
@@ -98,8 +127,8 @@ export {
   encodeBulk,
   encodeArray,
   requestArgv,
-} from './protocol';
-export type { RespReply, RespDecoderOptions } from './protocol';
+} from "./protocol";
+export type { RespReply, RespDecoderOptions } from "./protocol";
 
 /**
  * YASD constructor options: KV cache tuning plus SQL observability.
@@ -107,18 +136,14 @@ export type { RespReply, RespDecoderOptions } from './protocol';
  */
 export interface YasdOptions extends KVOptions {
   /** SQL storage/result budgets, independent of the KV cache budget. */
-  sql?: import('./executor').ExecutorOptions;
+  sql?: import("./executor").ExecutorOptions;
   /** Log SQL queries slower than this (ms) into the slow-query log. 0 = off. */
   slowQueryMs?: number;
   /** Columns automatically indexed on every table. Omit for all; [] for none. */
   indexColumns?: string[];
 }
 
-export type {
-  SlowQueryEntry,
-  QueryPlan,
-  QueryProfile,
-};
+export type { SlowQueryEntry, QueryPlan, QueryProfile };
 
 /**
  * YASD Database class
@@ -132,8 +157,11 @@ export class YASD {
   private hub: PubSubHub;
 
   constructor(cacheOptions?: YasdOptions) {
-    this.executor = new Executor({ ...cacheOptions?.sql,
-      indexColumns: cacheOptions?.indexColumns ?? cacheOptions?.sql?.indexColumns });
+    this.executor = new Executor({
+      ...cacheOptions?.sql,
+      indexColumns:
+        cacheOptions?.indexColumns ?? cacheOptions?.sql?.indexColumns,
+    });
     const opts = cacheOptions;
     this.cache = new KVCache(cacheOptions);
     if (opts?.slowQueryMs !== undefined) {
@@ -176,7 +204,9 @@ export class YASD {
   }
 
   /** SQL payload accounting and limits (separate from KV counters). */
-  sqlStats() { return this.executor.stats(); }
+  sqlStats() {
+    return this.executor.stats();
+  }
 
   /** Run a query and report timing + shape (plan, rows, duration). */
   profile(sql: string): QueryProfile {
@@ -282,7 +312,12 @@ export class YASD {
    * success, false leaving state untouched. Explicit `ttlMs` wins, else the
    * existing TTL is preserved.
    */
-  cas(key: string, expected: Value | undefined, value: Value, ttlMs?: number): boolean {
+  cas(
+    key: string,
+    expected: Value | undefined,
+    value: Value,
+    ttlMs?: number,
+  ): boolean {
     return this.cache.cas(key, expected, value, ttlMs);
   }
 
@@ -321,8 +356,13 @@ export class YASD {
   runTransaction<T>(
     keys: string[],
     fn: (tx: KVTransaction) => T | Promise<T>,
-    maxRetries = 3
-  ): Promise<{ committed: boolean; attempts: number; results: TxResult[] | null; value: T | undefined }> {
+    maxRetries = 3,
+  ): Promise<{
+    committed: boolean;
+    attempts: number;
+    results: TxResult[] | null;
+    value: T | undefined;
+  }> {
     return this.cache.runTransaction(keys, fn, maxRetries);
   }
 

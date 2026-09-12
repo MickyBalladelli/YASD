@@ -3,7 +3,10 @@
 // server slow-command log (`YasdServer`), so "slow" means the same thing
 // everywhere: entries slower than `thresholdMs`, newest-first, capped.
 
-import { validateNonNegativeNumber, validatePositiveSafeInteger } from './validation';
+import {
+  validateNonNegativeNumber,
+  validatePositiveSafeInteger,
+} from "./validation";
 
 /** One slow operation: SQL text or `CMD argc`, duration, wall-clock time. */
 export interface SlowEntry {
@@ -35,8 +38,8 @@ export class SlowLog {
   private readonly cap: number;
 
   constructor(thresholdMs = 0, cap: number = SLOW_LOG_CAP) {
-    this.thresholdMs = checkSlowThreshold(thresholdMs, 'slow threshold');
-    this.cap = validatePositiveSafeInteger(cap, 'slow log cap');
+    this.thresholdMs = checkSlowThreshold(thresholdMs, "slow threshold");
+    this.cap = validatePositiveSafeInteger(cap, "slow log cap");
   }
 
   get threshold(): number {
@@ -44,20 +47,25 @@ export class SlowLog {
   }
 
   setThreshold(ms: number): void {
-    this.thresholdMs = checkSlowThreshold(ms, 'slow threshold');
+    this.thresholdMs = checkSlowThreshold(ms, "slow threshold");
   }
 
   /**
    * Record `name` when enabled and `durationMs >= threshold`. Returns true
    * when the entry was logged. `at` defaults to now (epoch ms).
    */
-  record(name: string, durationMs: number, argc?: number, at?: number): boolean {
+  record(
+    name: string,
+    durationMs: number,
+    argc?: number,
+    at?: number,
+  ): boolean {
     if (!(this.thresholdMs > 0)) return false;
     if (!(durationMs >= this.thresholdMs)) return false;
     this.entries.unshift(
       argc === undefined
         ? { name, durationMs, at: at ?? Date.now() }
-        : { name, durationMs, at: at ?? Date.now(), argc }
+        : { name, durationMs, at: at ?? Date.now(), argc },
     );
     if (this.entries.length > this.cap) this.entries.length = this.cap;
     return true;

@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 // Test server for YASD database package
 
-const http = require('http');
-const url = require('url');
+const http = require("http");
+const url = require("url");
 
 // Import YASD - this will use the compiled version
 // First, let's try to use the source directly for testing
 let YASD;
 try {
   // Try to use the compiled version first
-  YASD = require('../dist/index.js').YASD;
+  YASD = require("../dist/index.js").YASD;
 } catch (e) {
-  console.error('YASD build missing: run npm run build');
+  console.error("YASD build missing: run npm run build");
   process.exit(1);
 }
 
@@ -19,7 +19,7 @@ try {
 let db;
 
 function initDatabase() {
-  if (!YASD) throw new Error('YASD build missing: run npm run build');
+  if (!YASD) throw new Error("YASD build missing: run npm run build");
   if (db) db.close();
   db = new YASD();
 
@@ -44,17 +44,23 @@ function initDatabase() {
     `);
 
     // Insert some test data
-    db.query("INSERT INTO users VALUES (1, 'John Doe', 'john@example.com', 30)");
-    db.query("INSERT INTO users VALUES (2, 'Jane Smith', 'jane@example.com', 25)");
-    db.query("INSERT INTO users VALUES (3, 'Bob Johnson', 'bob@example.com', 35)");
+    db.query(
+      "INSERT INTO users VALUES (1, 'John Doe', 'john@example.com', 30)",
+    );
+    db.query(
+      "INSERT INTO users VALUES (2, 'Jane Smith', 'jane@example.com', 25)",
+    );
+    db.query(
+      "INSERT INTO users VALUES (3, 'Bob Johnson', 'bob@example.com', 35)",
+    );
 
     db.query("INSERT INTO products VALUES (1, 'Laptop', 999.99, true)");
     db.query("INSERT INTO products VALUES (2, 'Phone', 699.99, true)");
     db.query("INSERT INTO products VALUES (3, 'Tablet', 399.99, false)");
 
-    console.log('Database initialized with test data');
+    console.log("Database initialized with test data");
   } catch (error) {
-    console.error('Error initializing database:', error.message);
+    console.error("Error initializing database:", error.message);
   }
 }
 
@@ -67,32 +73,36 @@ const server = http.createServer((req, res) => {
   const path = parsedUrl.pathname;
   const method = req.method.toUpperCase();
 
-  if (!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(req.headers.host || '')) {
+  if (!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(req.headers.host || "")) {
     res.writeHead(403);
-    res.end('Loopback Host required');
+    res.end("Loopback Host required");
     return;
   }
   // Same-origin, loopback-only development console. Reject cross-origin writes.
-  if (method === 'POST' && req.headers.origin && req.headers.origin !== `http://${req.headers.host}`) {
+  if (
+    method === "POST" &&
+    req.headers.origin &&
+    req.headers.origin !== `http://${req.headers.host}`
+  ) {
     res.writeHead(403);
-    res.end('Cross-origin writes are not allowed');
+    res.end("Cross-origin writes are not allowed");
     return;
   }
 
-  if (method === 'OPTIONS') {
+  if (method === "OPTIONS") {
     res.writeHead(200);
     res.end();
     return;
   }
 
   // Handle different endpoints
-  if (path === '/') {
+  if (path === "/") {
     handleHome(res);
-  } else if (path === '/api/tables') {
+  } else if (path === "/api/tables") {
     handleGetTables(req, res);
-  } else if (path.startsWith('/api/query')) {
+  } else if (path.startsWith("/api/query")) {
     handleQuery(req, res);
-  } else if (path === '/api/reset') {
+  } else if (path === "/api/reset") {
     handleReset(req, res);
   } else {
     handleNotFound(res);
@@ -100,7 +110,7 @@ const server = http.createServer((req, res) => {
 });
 
 function handleHome(res) {
-  res.writeHead(200, { 'Content-Type': 'text/html' });
+  res.writeHead(200, { "Content-Type": "text/html" });
   res.end(`
 <!DOCTYPE html>
 <html lang="en">
@@ -354,15 +364,15 @@ function handleHome(res) {
 }
 
 function handleGetTables(req, res) {
-  if (req.method !== 'GET') {
-    res.writeHead(405, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Method not allowed' }));
+  if (req.method !== "GET") {
+    res.writeHead(405, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Method not allowed" }));
     return;
   }
 
   try {
     const tableNames = db.getTableNames();
-    const tables = tableNames.map(name => {
+    const tables = tableNames.map((name) => {
       try {
         const result = db.query(`SELECT * FROM ${name}`);
         const rowCount = result.rows.length;
@@ -372,59 +382,59 @@ function handleGetTables(req, res) {
       }
     });
 
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ tables }));
   } catch (error) {
-    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.writeHead(500, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: error.message }));
   }
 }
 
 function handleQuery(req, res) {
-  if (req.method !== 'POST') {
-    res.writeHead(405, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Method not allowed' }));
+  if (req.method !== "POST") {
+    res.writeHead(405, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Method not allowed" }));
     return;
   }
 
-  let body = '';
+  let body = "";
   let bytes = 0;
-  req.on('data', chunk => {
+  req.on("data", (chunk) => {
     bytes += chunk.length;
     if (bytes > 1024 * 1024) {
       res.writeHead(413);
-      res.end('Request too large');
+      res.end("Request too large");
       req.destroy();
       return;
     }
     body += chunk.toString();
   });
 
-  req.on('end', () => {
+  req.on("end", () => {
     if (res.writableEnded) return;
     try {
       const { sql } = JSON.parse(body);
-      
+
       if (!sql) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'SQL query is required' }));
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "SQL query is required" }));
         return;
       }
 
       const result = db.query(sql);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
     } catch (error) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: error.message }));
     }
   });
 }
 
 function handleReset(req, res) {
-  if (req.method !== 'POST') {
-    res.writeHead(405, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Method not allowed' }));
+  if (req.method !== "POST") {
+    res.writeHead(405, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Method not allowed" }));
     return;
   }
 
@@ -432,30 +442,34 @@ function handleReset(req, res) {
     db.reset();
     // Re-initialize with test data
     initDatabase();
-    
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ 
-      success: true, 
-      message: 'Database reset and re-initialized with test data' 
-    }));
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        success: true,
+        message: "Database reset and re-initialized with test data",
+      }),
+    );
   } catch (error) {
-    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.writeHead(500, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: error.message }));
   }
 }
 
 function handleNotFound(res) {
-  res.writeHead(404, { 'Content-Type': 'text/plain' });
-  res.end('Not Found');
+  res.writeHead(404, { "Content-Type": "text/plain" });
+  res.end("Not Found");
 }
 
 // Start server
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, '127.0.0.1', () => {
-  console.warn('Development-only SQL console; do not expose through a public proxy.');
+server.listen(PORT, "127.0.0.1", () => {
+  console.warn(
+    "Development-only SQL console; do not expose through a public proxy.",
+  );
   console.log(`YASD Test Server running on http://localhost:${PORT}`);
-  console.log('Press Ctrl+C to stop the server');
+  console.log("Press Ctrl+C to stop the server");
 });
 
-server.on('close', () => db.close());
+server.on("close", () => db.close());
 module.exports = server;

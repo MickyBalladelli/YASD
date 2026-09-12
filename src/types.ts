@@ -26,7 +26,7 @@ export interface TableSchema {
 
 export interface ColumnDefinition {
   name: string;
-  type: 'string' | 'number' | 'boolean' | 'any';
+  type: "string" | "number" | "boolean" | "any";
   nullable?: boolean;
   default?: Value;
 }
@@ -46,31 +46,31 @@ export interface Database {
 }
 
 // SQL AST types
-export type SqlStatement = 
-  | CreateTableStatement 
-  | InsertStatement 
-  | SelectStatement 
-  | UpdateStatement 
-  | DeleteStatement 
+export type SqlStatement =
+  | CreateTableStatement
+  | InsertStatement
+  | SelectStatement
+  | UpdateStatement
+  | DeleteStatement
   | DropTableStatement;
 
 export interface CreateTableStatement {
-  type: 'create_table';
+  type: "create_table";
   tableName: string;
   columns: ColumnDefinition[];
   primaryKey?: string;
 }
 
 export interface InsertStatement {
-  type: 'insert';
+  type: "insert";
   tableName: string;
   columns: string[];
   values: Value[][];
 }
 
 export interface SelectStatement {
-  type: 'select';
-  columns: string[] | '*',
+  type: "select";
+  columns: string[] | "*";
   tableName: string;
   where?: WhereClause;
   orderBy?: OrderByClause;
@@ -79,69 +79,70 @@ export interface SelectStatement {
 }
 
 export interface UpdateStatement {
-  type: 'update';
+  type: "update";
   tableName: string;
   set: { column: string; value: Value }[];
   where?: WhereClause;
 }
 
 export interface DeleteStatement {
-  type: 'delete';
+  type: "delete";
   tableName: string;
   where?: WhereClause;
 }
 
 export interface DropTableStatement {
-  type: 'drop_table';
+  type: "drop_table";
   tableName: string;
 }
 
-export type WhereClause = AndClause | OrClause | ComparisonClause | IsNullClause | NotClause;
+export type WhereClause =
+  AndClause | OrClause | ComparisonClause | IsNullClause | NotClause;
 
 export interface AndClause {
-  type: 'and';
+  type: "and";
   left: WhereClause;
   right: WhereClause;
 }
 
 export interface OrClause {
-  type: 'or';
+  type: "or";
   left: WhereClause;
   right: WhereClause;
 }
 
 export interface NotClause {
-  type: 'not';
+  type: "not";
   clause: WhereClause;
 }
 
 export interface IsNullClause {
-  type: 'is_null' | 'is_not_null';
+  type: "is_null" | "is_not_null";
   expression: Expression;
 }
 
 export type Expression = LiteralExpression | ColumnReferenceExpression;
 
 export interface LiteralExpression {
-  type: 'literal';
+  type: "literal";
   value: Value;
 }
 
 export interface ColumnReferenceExpression {
-  type: 'column_ref';
+  type: "column_ref";
   name: string;
 }
 
 export interface ComparisonClause {
-  type: 'comparison';
+  type: "comparison";
   left: Expression;
-  operator: '=' | '!=' | '>' | '>=' | '<' | '<=' | 'like' | 'in' | 'between';
+  operator: "=" | "!=" | ">" | ">=" | "<" | "<=" | "like" | "in" | "between";
   right: Expression | Expression[];
 }
 
 export interface OrderByClause {
   column: string;
-  direction: 'asc' | 'desc';
+  direction: "asc" | "desc";
 }
 
 export interface QueryResult {
@@ -150,5 +151,5 @@ export interface QueryResult {
   affectedRows?: number;
 }
 
-export { DatabaseError } from './errors';
-export type { DatabaseErrorCode } from './errors';
+export { DatabaseError } from "./errors";
+export type { DatabaseErrorCode } from "./errors";

@@ -5,12 +5,12 @@
 // breaks delivery to the remaining listeners.
 
 /** Well-known channel the server publishes key invalidation events on. */
-export const INVALIDATE_CHANNEL = '__yasd__:invalidate';
+export const INVALIDATE_CHANNEL = "__yasd__:invalidate";
 
 export type PubSubListener = (channel: string, message: string) => void;
 
 export interface InvalidationEvent {
-  event: 'set' | 'del' | 'clear' | 'expire' | 'persist' | 'load'
+  event: "set" | "del" | "clear" | "expire" | "persist" | "load";
   key?: string;
   prefix?: string;
 }
@@ -24,11 +24,11 @@ export class PubSubHub {
 
   /** Subscribe; returns an unsubscribe function. */
   subscribe(channel: string, listener: PubSubListener): () => void {
-    if (typeof channel !== 'string' || channel.length === 0) {
-      throw new Error('subscribe requires a non-empty channel name');
+    if (typeof channel !== "string" || channel.length === 0) {
+      throw new Error("subscribe requires a non-empty channel name");
     }
-    if (typeof listener !== 'function') {
-      throw new Error('subscribe requires a listener function');
+    if (typeof listener !== "function") {
+      throw new Error("subscribe requires a listener function");
     }
     let set = this.channels.get(channel);
     if (!set) {
