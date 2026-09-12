@@ -478,7 +478,10 @@ export class YasdClient {
         const parts: Buffer[] = []; let bytes = 0;
         res.on("data", (chunk: Buffer) => {
           bytes += chunk.length;
-          if (bytes > 1024 * 1024) { req.destroy(new DatabaseError("health response exceeds 1 MiB", "LIMIT_EXCEEDED")); return; }
+          if (bytes > 1024 * 1024) {
+            const error = new DatabaseError("health response exceeds 1 MiB", "LIMIT_EXCEEDED");
+            reject(error); req.destroy(error); return;
+          }
           parts.push(chunk);
         });
         res.on("error", reject);
@@ -492,7 +495,10 @@ export class YasdClient {
       const req = this.tlsOptions === undefined ? http.get(requestOptions, onResponse)
         : https.get({ ...this.tlsOptions, ...requestOptions }, onResponse);
       this.healthRequests.add(req);
-      const timer = timeout > 0 ? setTimeout(() => req.destroy(new DatabaseError("healthcheck deadline exceeded", "TIMEOUT")), timeout) : undefined;
+      const timer = timeout > 0 ? setTimeout(() => {
+        const error = new DatabaseError("healthcheck deadline exceeded", "TIMEOUT");
+        reject(error); req.destroy(error);
+      }, timeout) : undefined;
       req.once("close", () => { if (timer) clearTimeout(timer); this.healthRequests.delete(req); });
       req.on("error", reject);
     });
