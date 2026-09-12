@@ -246,7 +246,7 @@ Numbers follow the order of checkbox entries in `TODO.md`. **Verified** means th
 
 ## Release-blocking corrections
 
-Priority P0 here means possible state loss or an unsafe recovery result; P1 means a serious protocol, correctness, or delivery defect. Every task is open; reproduced findings are distinguished from source-based recommendations.
+Priority P0 here means possible state loss or an unsafe recovery result; P1 means a serious protocol, correctness, or delivery defect. Descriptions preserve the original findings and acceptance criteria; checkboxes reflect current completion (29 completed, 10 open). See the current completion section above for evidence and outstanding verification.
 
 - [x] **R01 — P0 · Replay final state, not TTL-sensitive historical commands.** `src/server.ts:1350-1364,1400-1405,1673-1679`; `src/persistence.ts:227-268`. Confirmed with a server-written AOF and a controlled clock: SET an expiring counter to 10, INCR before expiry, then recover after the deadline. Recovery creates a persistent value of 1. SET a second expiring key and PERSIST it before the deadline: that key is lost during recovery. Replaying SET first drops the old value based on recovery time; later INCR/PERSIST/EXPIRE cannot reconstruct its original state. Log resulting value plus absolute deadline/tombstone, or use a replay model that correctly reconstructs historical state before expiry filtering. Acceptance: restart equivalence for INCR/DECR, PERSIST, TTL extension, TTL shortening, immediate expiry, and these operations inside transactions. Keep legacy relative-TTL records explicitly versioned rather than silently promising exact old-log recovery.
 

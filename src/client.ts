@@ -1628,7 +1628,7 @@ export class YasdTransaction {
       if (this.begun)
         throw new TransactionError("WATCH inside MULTI is not allowed");
       return this.expectOk(["WATCH", ...keys]);
-    });
+    }, commandByteLength(["WATCH", ...keys]));
   }
 
   /** Forget watched versions (queued writes are kept). */
@@ -1644,7 +1644,7 @@ export class YasdTransaction {
       if (this.begun) throw new TransactionError("GET must precede MULTI");
       await this.connect();
       return this.send(["GET", key]);
-    });
+    }, commandByteLength(["GET", key]));
     if (reply.kind === "bulk") {
       return reply.value === null
         ? undefined

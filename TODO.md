@@ -4,9 +4,10 @@ Review focus: SQL correctness, KV cache behavior, server safety, persistence,
 client reliability, tests, and docs. Line references point to the current
 source.
 
-Implementation verification update (2026-09-11): the original 103 tests plus
-30 new regression cases pass locally on Node 22 (133 total). Build, strict
-typecheck, installed-package CJS/ESM/declaration/CLI checks, real TLS/mTLS,
+Implementation verification update (2026-09-12): the original 103 tests plus
+43 new regression cases pass locally on Node 22 (146 total). Build, strict
+typecheck, lint/format, installed-package CJS/ESM/declaration/CLI and README
+example checks, real TLS/mTLS,
 and package-only `npm ci` also pass. See `TODO2.md` for the item-by-item
 implementation evidence and remaining performance/resource work. Checked
 items are not a claim that the Docker image or every CI runtime was executed;

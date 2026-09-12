@@ -376,6 +376,11 @@ The default resource limits are:
 | Commands per transaction | 1,024 / 8 MiB | Excess work aborts the transaction |
 | Watched keys / subscribed channels | 1,024 each per connection | Additional entries are rejected |
 | Connections | 1,024 | Additional connections are refused |
+| Aggregate retained network work | 64 MiB | Offending connections disconnect; not a hard RSS limit |
+| Allocated transactions per client | 64 | Additional transactions reject; slots release on finish |
+| SQL stored rows / payload bytes | 1,000,000 / 256 MiB | Separate aggregate SQL limits; writes reject atomically |
+| SQL result rows / payload bytes | 100,000 / 16 MiB | Oversized results reject |
+| SQL tables | 1,024 | Additional CREATE TABLE rejects |
 | Queued persistence operations | 64 | Additional operations are rejected; autosaves coalesce |
 | JSON depth / nodes | 128 / 1,000,000 | Deeper or wider values are rejected |
 | Persistence input file | 256 MiB | Larger files are rejected before reading |
@@ -392,9 +397,12 @@ additional operational controls. The first two are disabled by default;
 `shutdownDeadlineMs` defaults to 2 seconds. Client requests time out after 5
 seconds by default, and the command pool defaults to four connections (maximum
 1,024). TCP/TLS handshakes have a separate positive `connectTimeoutMs` deadline
-(default 5 seconds), and `signal` or `close()` cancels outstanding dials. Requests
-waiting for connections count toward the client's 1,024-command / 8 MiB budget.
-Transactions created by a client are closed when that client closes. SQL
+(default 5 seconds), including AUTH even with request timeouts disabled.
+Command deadlines include time waiting for a connection; expired commands are
+not sent later. `signal` or `close()` cancels outstanding dials. Requests waiting
+for connections count toward the client's 1,024-command / 8 MiB budget.
+Transactions created by a client are closed when that client closes, and
+`maxTransactions` bounds allocated dedicated transactions (default 64). SQL
 statements are limited to 4 MiB; SQL table storage is separate from KV limits.
 
 Durability is optional and cache data is not a source of truth:
@@ -529,10 +537,37 @@ reject it. Timed-out filesystem work may still finish. A closed server cannot be
 restarted; create another instance. `onSubscriptionState()` reports observed
 subscriber connection changes without promising reliable invalidation delivery.
 
-AOF-backed writes still capture O(cache-entry-count) rollback metadata, although
-resident JSON payloads are no longer deep-cloned for rollback. SQL PK checks and
-selective DELETE still have full-table costs. Benchmarks are smoke evidence, not
-production throughput or a capacity guarantee. See `TODO2.md` for remaining work.
+Rollback now journals touched keys and ordered-map links, including eviction
+victims and TTL/version changes, rather than copying the resident cache.
+SQL primary-key uniqueness has its own structural-identity index, independent
+of optional query indexes. Stable row IDs keep selective DELETE incremental.
+Mixed AND predicates can use an equality index with a residual filter; LIMIT
+can stop unordered scans early, and ordered LIMIT retains only top-k candidates.
+LIKE has an explicit work limit instead of unbounded regex backtracking.
+
+Background expiry visits at most 1,000 expiring keys and spends a target 2 ms per
+tick (one entry can overrun the time target); persistent keys are excluded.
+`KVCache.sweep()` still performs an explicit full sweep. For large embedded
+namespace maintenance, iterate `clearPrefixBatches(prefix, maxKeys)` and yield
+to the event loop between batches. Batches are weakly consistent under writes,
+not one atomic namespace clear. Existing `clearPrefix()` remains synchronous
+and atomic when invoked through a transaction or server facade.
+
+Tune SQL limits through `new YASD({ sql: { maxRows, maxBytes, maxResultRows,
+maxResultBytes, maxTables } })`; inspect `db.sqlStats()` for payload accounting.
+These counters exclude index/object overhead. `server.resourceStats()` and
+`INFO.resources` expose retained-work accounting, queue depth, process memory,
+active transactions and expiry lag. The server-wide budget uses
+`maxInflightBytes`, `--max-inflight-bytes` or `YASD_MAX_INFLIGHT_BYTES`.
+Application data, native buffers and allocator overhead still require headroom
+and external process/container memory limits.
+
+`npm run benchmark:scaling` measures 1k/10k/100k-row workloads and fragmented
+RESP decoding with runtime/machine metadata. These are local scaling
+observations, not production throughput or a capacity guarantee. Run
+`npm run lint`, `npm run format:check`, `npm test` and `npm run test:package`
+before release; `npm run format` applies the repository formatter. See
+`TODO2.md` for remaining work and unverified runtime/container checks.
 
 Protocol commands: `AUTH PING GET SET[M PX] CAS MGET MSET DEL CLEAR TTL EXPIRE
 PERSIST INCR[BY] DECR[BY] WATCH UNWATCH MULTI EXEC DISCARD
