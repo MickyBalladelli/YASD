@@ -14,6 +14,7 @@ const flags: Record<string, string> = {
   password: 'YASD_PASSWORD', requirepass: 'YASD_PASSWORD', 'tls-key': 'YASD_TLS_KEY',
   'tls-cert': 'YASD_TLS_CERT', 'tls-ca': 'YASD_TLS_CA', 'tls-min-version': 'YASD_TLS_MIN_VERSION',
   'tls-request-cert': 'YASD_TLS_REQUEST_CERT', 'tls-reject-unauthorized': 'YASD_TLS_REJECT_UNAUTHORIZED',
+  'max-inflight-bytes': 'YASD_MAX_INFLIGHT_BYTES',
   'max-connections': 'YASD_MAX_CONNECTIONS', 'max-queued-requests': 'YASD_MAX_QUEUED_REQUESTS',
   'max-transaction-commands': 'YASD_MAX_TRANSACTION_COMMANDS', 'max-transaction-bytes': 'YASD_MAX_TRANSACTION_BYTES',
   'max-watched-keys': 'YASD_MAX_WATCHED_KEYS', 'max-subscriptions': 'YASD_MAX_SUBSCRIPTIONS',

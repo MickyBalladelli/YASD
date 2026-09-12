@@ -406,7 +406,7 @@ export class KVCache {
    */
   set(key: string, value: Value, ttlMs?: number): Value {
     this.assertKeyFits(key);
-    const ownedValue = cloneJsonValue(value, 'cache value', this.maxValueBytes);
+    const ownedValue = cloneJsonValue(value, 'cache value (maxValueBytes)', this.maxValueBytes);
     const ttl = this.resolveTTLMs(key, ttlMs);
     const expiresAt = ttl === undefined ? undefined : Date.now() + ttl;
     return this.setOwned(key, ownedValue, expiresAt, value);
@@ -418,7 +418,7 @@ export class KVCache {
     if (expiresAt !== undefined && !Number.isFinite(expiresAt)) {
       throw new Error(`expiresAt must be a finite epoch ms, got ${String(expiresAt)}`);
     }
-    const ownedValue = cloneJsonValue(value, 'cache value', this.maxValueBytes);
+    const ownedValue = cloneJsonValue(value, 'cache value (maxValueBytes)', this.maxValueBytes);
     return this.setOwned(key, ownedValue, expiresAt, value);
   }
 
@@ -531,6 +531,26 @@ export class KVCache {
       }
     }
     return count;
+  }
+
+  /** Weakly consistent, bounded scan batches for embedded maintenance. Not one atomic CLEAR. */
+  *clearPrefixBatches(prefix: string, maxKeys = 1000): IterableIterator<{ scanned: number; removed: number }> {
+    this.assertKeyFits(prefix); validatePositiveSafeInteger(maxKeys, 'clear maxKeys');
+    const iterator = this.map.keys(); let done = false;
+    while (!done) {
+      let scanned = 0; let removed = 0;
+      this.atomic(() => {
+        while (scanned < maxKeys) {
+          const next = iterator.next(); if (next.done) { done = true; break; }
+          scanned++;
+          if (next.value === prefix || next.value.startsWith(prefix + ':')) {
+            const entry = this.map.get(next.value);
+            if (entry) { this.map.delete(next.value); this.bytes -= entry.size; this.bumpVersion(next.value); removed++; }
+          }
+        }
+      });
+      if (scanned) yield { scanned, removed };
+    }
   }
 
   clear(): void {

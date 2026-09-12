@@ -155,6 +155,8 @@ export interface YasdServerOptions {
   /** TLS identity and optional client-certificate settings. */
   tls?: YasdServerTlsOptions;
   /** Aggregate per-connection and server admission budgets. */
+  /** Aggregate retained network-work accounting budget. Default 64 MiB. */
+  maxInflightBytes?: number;
   maxConnections?: number;
   maxQueuedRequests?: number;
   maxTransactionCommands?: number;
@@ -200,6 +202,7 @@ export interface ServerInfo {
   slowCommandMs: number;
   /** Newest-first slow-command ring (capped at 100). */
   slowLog: SlowEntry[];
+  resources: ReturnType<YasdServer['resourceStats']>;
 }
 
 export interface HealthStatus {
@@ -235,6 +238,8 @@ interface ConnState {
   requestQueue: Deque<RespReply>;
   requestQueueBytes: number;
   processing: boolean;
+  accountedBytes: number;
+  activeRequestBytes: number;
   subs: Map<string, PubSubListener>; // active subscriptions (empty = normal mode, null = never-subscribed?)
   subMode: boolean;
   authed: boolean;
@@ -405,7 +410,7 @@ export function serverOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Yasd
     cache,
   };
   const budgets = {
-    YASD_MAX_CONNECTIONS: 'maxConnections', YASD_MAX_QUEUED_REQUESTS: 'maxQueuedRequests',
+    YASD_MAX_INFLIGHT_BYTES: 'maxInflightBytes', YASD_MAX_CONNECTIONS: 'maxConnections', YASD_MAX_QUEUED_REQUESTS: 'maxQueuedRequests',
     YASD_MAX_TRANSACTION_COMMANDS: 'maxTransactionCommands', YASD_MAX_TRANSACTION_BYTES: 'maxTransactionBytes',
     YASD_MAX_WATCHED_KEYS: 'maxWatchedKeys', YASD_MAX_SUBSCRIPTIONS: 'maxSubscriptions',
   } as const;
@@ -612,6 +617,34 @@ export class YasdServer {
   readonly authRequired: boolean;
   readonly tlsEnabled: boolean;
   readonly maxConnections: number;
+  readonly maxInflightBytes: number;
+  private inflightBytes = 0;
+  private inflightPeak = 0;
+  private connectionStates = new Set<ConnState>();
+
+  resourceStats() {
+    return { inflightBytes: this.inflightBytes, peakInflightBytes: this.inflightPeak,
+      maxInflightBytes: this.maxInflightBytes, process: process.memoryUsage(),
+      activeTransactions: [...this.connectionStates].filter(s => s.txQueue !== null).length,
+      persistenceDepth: this.persistenceDepth, maintenance: this.kv.maintenanceStats() };
+  }
+
+  private account(state: ConnState, extra = 0): boolean {
+    if (state.socket.destroyed) return false;
+    let names = 0;
+    for (const key of state.watchVersions?.keys() ?? []) names += Buffer.byteLength(key) * 2 + 64;
+    for (const key of state.subs.keys()) names += Buffer.byteLength(key) * 2 + 64;
+    const next = state.decoder.retainedBytes * 2 + (state.httpBuf?.length ?? 0)
+      + (state.requestQueueBytes + state.activeRequestBytes + state.txBytes) * 2
+      + (state.requestQueue.length + (state.txQueue?.length ?? 0)) * 128
+      + state.outputQueueBytes + state.socket.writableLength + names;
+    if (this.inflightBytes - state.accountedBytes + next + extra > this.maxInflightBytes) {
+      this.disconnectSocket(state); return false;
+    }
+    this.inflightBytes += next - state.accountedBytes; state.accountedBytes = next;
+    this.inflightPeak = Math.max(this.inflightPeak, this.inflightBytes + extra);
+    return true;
+  }
   readonly maxQueuedRequests: number;
   readonly maxTransactionCommands: number;
   readonly maxTransactionBytes: number;
@@ -645,6 +678,7 @@ export class YasdServer {
       throw new Error('server cache limits exceed the RESP wire limits (4 MiB values, 1 MiB keys)');
     }
     this.maxConnections = validatePositiveSafeInteger(options.maxConnections ?? 1024, 'maxConnections');
+    this.maxInflightBytes = validatePositiveSafeInteger(options.maxInflightBytes ?? 64 * 1024 * 1024, 'maxInflightBytes');
     this.maxQueuedRequests = validatePositiveSafeInteger(options.maxQueuedRequests ?? 1024, 'maxQueuedRequests');
     this.maxTransactionCommands = validatePositiveSafeInteger(options.maxTransactionCommands ?? 1024, 'maxTransactionCommands', 1024);
     this.maxTransactionBytes = validatePositiveSafeInteger(options.maxTransactionBytes ?? 8 * 1024 * 1024, 'maxTransactionBytes');
@@ -758,6 +792,7 @@ export class YasdServer {
       channels: this.hub.channelNames(),
       slowCommandMs: this.slow.threshold,
       slowLog: this.slow.list(),
+      resources: this.resourceStats(),
     };
   }
 
@@ -1056,6 +1091,7 @@ export class YasdServer {
       httpBuf: null,
       protocol: 'undecided',
       requestQueue: new Deque<RespReply>(), requestQueueBytes: 0, processing: false,
+      accountedBytes: 0, activeRequestBytes: 0,
       subs: new Map(),
       subMode: false,
       authed: !this.authRequired,
@@ -1067,9 +1103,10 @@ export class YasdServer {
       closeWhenDrained: false,
       outputClosed: false,
     };
+    this.connectionStates.add(state);
     socket.on('data', chunk => {
       try {
-        this.onData(state, Buffer.from(chunk));
+        this.onData(state, chunk);
       } catch {
         this.writeReply(state, { kind: 'error', message: wireError(new DatabaseError('protocol error', 'PROTOCOL_ERROR')) });
         this.endSocket(state);
@@ -1080,7 +1117,9 @@ export class YasdServer {
       socket.setTimeout(this.idleConnectionTimeoutMs, () => this.disconnectSocket(state));
     }
     const cleanup = (): void => {
-      this.sockets.delete(socket);
+      this.sockets.delete(socket); this.connectionStates.delete(state);
+      this.inflightBytes -= state.accountedBytes; state.accountedBytes = 0;
+      state.decoder.reset(); state.httpBuf = null;
       state.outputClosed = true;
       state.outputQueue.length = 0;
       state.outputQueueBytes = 0;
@@ -1098,6 +1137,7 @@ export class YasdServer {
   /** Write immediately until Node signals backpressure, then queue bounded output. */
   private writeSocket(state: ConnState, data: Buffer): boolean {
     if (state.outputClosed || state.closeWhenDrained || state.socket.destroyed) return false;
+    if (!this.account(state, data.length)) return false;
     if (state.outputQueueBytes + state.socket.writableLength + data.length > this.maxPendingOutputBytes) {
       this.disconnectSlowConsumer(state);
       return false;
@@ -1109,11 +1149,11 @@ export class YasdServer {
       }
       state.outputQueue.push(data);
       state.outputQueueBytes += data.length;
-      return true;
+      return this.account(state);
     }
     try {
-      state.outputBackpressured = !state.socket.write(data);
-      return true;
+      state.outputBackpressured = !state.socket.write(data, () => { this.account(state); });
+      return this.account(state);
     } catch {
       this.disconnectSocket(state);
       return false;
@@ -1132,6 +1172,7 @@ export class YasdServer {
       this.disconnectSlowConsumer(state);
       return false;
     }
+    if (!this.account(state, bytes)) return false;
     return this.writeSocket(state, encodeReply(reply));
   }
 
@@ -1142,7 +1183,7 @@ export class YasdServer {
       const data = state.outputQueue.shift() as Buffer;
       state.outputQueueBytes -= data.length;
       try {
-        if (!state.socket.write(data)) {
+        if (!state.socket.write(data, () => { this.account(state); })) {
           state.outputBackpressured = true;
           return;
         }
@@ -1193,6 +1234,7 @@ export class YasdServer {
 
   private onData(state: ConnState, chunk: Buffer): void {
     if (chunk.length === 0 || state.outputClosed || this.closing) return;
+    if (!this.account(state, chunk.length * 2)) return;
     if (state.protocol === 'undecided') {
       state.protocol = isHttpMethodStart(chunk) ? 'http' : 'resp';
       if (state.protocol === 'http') state.httpBuf = Buffer.alloc(0);
@@ -1210,22 +1252,28 @@ export class YasdServer {
       state.requestQueue.push(request);
       state.requestQueueBytes += bytes;
     }
+    if (!this.account(state)) return;
     if (!state.processing) void this.drainRequests(state);
   }
 
   private async drainRequests(state: ConnState): Promise<void> {
     state.processing = true;
     try {
-      while (state.requestQueue.length && !state.outputClosed) {
+      while (state.requestQueue.length && !state.outputClosed && !this.closing) {
         const request = state.requestQueue.shift() as RespReply;
-        state.requestQueueBytes -= replyByteLength(request);
-        if (await this.onRequest(state, request) === 'close') break;
+        state.activeRequestBytes = replyByteLength(request);
+        state.requestQueueBytes -= state.activeRequestBytes;
+        if (!this.account(state)) break;
+        const outcome = await this.onRequest(state, request);
+        state.activeRequestBytes = 0;
+        if (!this.account(state) || outcome === 'close') break;
       }
     } catch (error) {
       this.writeReply(state, { kind: 'error', message: wireError(error) });
       this.endSocket(state);
     } finally {
-      state.processing = false;
+      state.processing = false; state.activeRequestBytes = 0;
+      this.account(state);
     }
   }
 
@@ -1235,6 +1283,7 @@ export class YasdServer {
       return;
     }
     state.httpBuf = Buffer.concat([state.httpBuf ?? Buffer.alloc(0), chunk]);
+    if (!this.account(state)) return;
     const end = state.httpBuf.indexOf('\r\n\r\n');
     if (end === -1) {
       if (state.httpBuf.length > MAX_HTTP_HEADER_BYTES) this.disconnectSocket(state);

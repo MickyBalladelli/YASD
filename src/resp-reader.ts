@@ -15,6 +15,7 @@ export class RespReader {
   private arrays: Array<{ remaining: number; items: RespReply[] }> = [];
   constructor(private readonly limits: ReaderLimits) {}
   get bufferedBytes(): number { return this.frameBytes; }
+  get retainedBytes(): number { return this.frameBytes + (this.bulk ? this.bulk.buffer.length - this.bulk.read : 0) + this.line.length; }
   reset(): void {
     this.frameBytes = 0; this.prefix = undefined; this.lineLength = 0; this.lineCR = false;
     this.bulk = undefined; this.arrays = []; this.line = Buffer.allocUnsafe(128);

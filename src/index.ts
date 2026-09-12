@@ -175,6 +175,9 @@ export class YASD {
     return this.executor.explain(sql);
   }
 
+  /** SQL payload accounting and limits (separate from KV counters). */
+  sqlStats() { return this.executor.stats(); }
+
   /** Run a query and report timing + shape (plan, rows, duration). */
   profile(sql: string): QueryProfile {
     return this.executor.profile(sql);
