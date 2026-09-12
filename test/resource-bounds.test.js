@@ -132,7 +132,12 @@ test("S03: total request and AUTH deadlines settle silent TCP peers without late
   const traffic = [];
   const peer = net.createServer((socket) => {
     sockets.add(socket);
-    socket.on("data", (b) => traffic.push(b.toString()));
+    socket.on("data", (b) => {
+      traffic.push(b.toString());
+      if (b.toString().startsWith("GET /healthz")) {
+        socket.end("HTTP/1.1 200 OK\r\nContent-Length: 1100000\r\n\r\n" + "x".repeat(1100000));
+      }
+    });
     socket.on("close", () => sockets.delete(socket));
   });
   peer.listen(0, "127.0.0.1");
