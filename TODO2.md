@@ -49,11 +49,18 @@ These are local scaling observations, not deployment throughput promises.
 Still open: R05's full disk/runtime fault matrix, R10 Docker verification,
 Q07 hosted runtime matrix, Q08 complete legacy error classification, Q10's
 remaining signal/startup fault cases, S02 real slow-reader RSS evidence,
-S03 remaining queue-byte coverage, S06 operational SLO/partitioning evidence,
-P06 multiprocess performance baselines/gates, and Z03 streaming/versioned
-persistence/durability modes. S03 now has request/connect/AUTH deadlines and
-bounded transaction allocation; S06 now has SQL row/byte/result/table budgets
-and process/queue/transaction statistics. These are partial, not checked off.
+S06 operational SLO/partitioning evidence, P06 multiprocess performance
+baselines/gates, and Z03 streaming/versioned persistence/durability modes.
+S06 now has SQL row/byte/result/table budgets and process/queue/transaction
+statistics, but remains partial.
+
+S03 is now completed: request/connect/AUTH deadlines, bounded transaction
+allocation, transaction read/WATCH and subscription queue-byte accounting,
+bounded subscriber registries (1 MiB names / 1,024 channels / 64 handlers per
+channel), and at most eight bounded HTTP health requests. Health replies cap
+at 1 MiB and use absolute deadlines plus close cancellation. The resource
+suite verifies byte quotas, handler quotas, oversize health replies, silent
+AUTH peers, late-dispatch prevention and slot cleanup.
 
 ## Implementation update — 2026-09-11 (historical)
 
@@ -246,7 +253,7 @@ Numbers follow the order of checkbox entries in `TODO.md`. **Verified** means th
 
 ## Release-blocking corrections
 
-Priority P0 here means possible state loss or an unsafe recovery result; P1 means a serious protocol, correctness, or delivery defect. Descriptions preserve the original findings and acceptance criteria; checkboxes reflect current completion (29 completed, 10 open). See the current completion section above for evidence and outstanding verification.
+Priority P0 here means possible state loss or an unsafe recovery result; P1 means a serious protocol, correctness, or delivery defect. Descriptions preserve the original findings and acceptance criteria; checkboxes reflect current completion (30 completed, 9 open). See the current completion section above for evidence and outstanding verification.
 
 - [x] **R01 — P0 · Replay final state, not TTL-sensitive historical commands.** `src/server.ts:1350-1364,1400-1405,1673-1679`; `src/persistence.ts:227-268`. Confirmed with a server-written AOF and a controlled clock: SET an expiring counter to 10, INCR before expiry, then recover after the deadline. Recovery creates a persistent value of 1. SET a second expiring key and PERSIST it before the deadline: that key is lost during recovery. Replaying SET first drops the old value based on recovery time; later INCR/PERSIST/EXPIRE cannot reconstruct its original state. Log resulting value plus absolute deadline/tombstone, or use a replay model that correctly reconstructs historical state before expiry filtering. Acceptance: restart equivalence for INCR/DECR, PERSIST, TTL extension, TTL shortening, immediate expiry, and these operations inside transactions. Keep legacy relative-TTL records explicitly versioned rather than silently promising exact old-log recovery.
 
@@ -302,7 +309,7 @@ Priority P0 here means possible state loss or an unsafe recovery result; P1 mean
 
 - [ ] **S02 — P1 · Enforce compatible input/output limits end-to-end.** `src/server.ts:1003-1048,1104-1111,1615-1621`; `src/protocol.ts:79-118,234-258`. The first socket write bypasses the pending-output cap, large MGET/EXEC replies allocate completely before backpressure, and server replies can exceed the client's fixed 8 MiB frame/1,024-item limits. Cache value limits can be raised without changing either decoder. Confirmed: a complete 17 KB HTTP header receives 200 because the header limit is checked only while its terminator is absent. Include writableLength and encoded reply bytes in budgets, enforce the HTTP limit even on complete headers, and validate/chunk large requests or negotiate compatible limits. Acceptance: maximum valid writes remain readable; oversized batch replies fail predictably before large allocation; slow-reader tests observe bounded total memory.
 
-- [ ] **S03 — P1 · Bound client queues and connection establishment.** `src/client.ts:643-725,754-779,1128-1176,1374-1395`. Request timeouts begin only after dial, TCP/TLS establishment has no explicit deadline, and pending arrays/socket writes have no capacity or drain handling. Add connect/TLS/auth deadlines, AbortSignal support, maximum pending commands/bytes, bounded transaction connection allocation and jittered backoff. Prefer healthy connections by pending load rather than only round-robin. Acceptance: unreachable/blackholed endpoints and a slow server settle by a defined total deadline, close cancels outstanding dials, and memory remains bounded without automatically retrying non-idempotent writes.
+- [x] **S03 — P1 · Bound client queues and connection establishment.** `src/client.ts:643-725,754-779,1128-1176,1374-1395`. Request timeouts begin only after dial, TCP/TLS establishment has no explicit deadline, and pending arrays/socket writes have no capacity or drain handling. Add connect/TLS/auth deadlines, AbortSignal support, maximum pending commands/bytes, bounded transaction connection allocation and jittered backoff. Prefer healthy connections by pending load rather than only round-robin. Acceptance: unreachable/blackholed endpoints and a slow server settle by a defined total deadline, close cancels outstanding dials, and memory remains bounded without automatically retrying non-idempotent writes.
 
 - [x] **S04 — P2 · Budget expiry and namespace scans.** `src/cache.ts:544-557,858-867`. Both prefix clearing and sweeping allocate arrays over the full cache; the default sweeper scans persistent keys too. Start with a bounded cursor/time budget and direct safe iteration; consider an expiry heap/timing wheel and namespace membership index only after workload measurements. Acceptance: expiry lag, event-loop delay and peak allocation are measured at increasing cache sizes, with exact bytes/versions/invalidation semantics preserved.
 

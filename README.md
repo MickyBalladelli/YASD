@@ -402,7 +402,13 @@ Command deadlines include time waiting for a connection; expired commands are
 not sent later. `signal` or `close()` cancels outstanding dials. Requests waiting
 for connections count toward the client's 1,024-command / 8 MiB budget.
 Transactions created by a client are closed when that client closes, and
-`maxTransactions` bounds allocated dedicated transactions (default 64). SQL
+`maxTransactions` bounds allocated dedicated transactions (default 64).
+Transaction reads/WATCH and subscriber operations count toward their 8 MiB
+queue budgets. Subscribers retain at most 1,024 channels / 1 MiB of channel
+names and 64 handlers per channel. HTTP health requests are capped at eight
+concurrent calls, 1 MiB per response, and an absolute call deadline; client
+close cancels them. Setting a request timeout to zero explicitly disables
+that request deadline, not the positive connection/AUTH deadline. SQL
 statements are limited to 4 MiB; SQL table storage is separate from KV limits.
 
 Durability is optional and cache data is not a source of truth:

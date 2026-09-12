@@ -105,17 +105,29 @@ test("S03: dedicated transaction slots release on finish and parent close", asyn
     await b.close();
     await c.discard();
     const stops = [];
-    for (let i = 0; i < 64; i++) stops.push(await client.subscribe("bounded", () => {}));
-    await assert.rejects(client.subscribe("bounded", () => {}), e => e.code === "LIMIT_EXCEEDED");
+    for (let i = 0; i < 64; i++)
+      stops.push(await client.subscribe("bounded", () => {}));
+    await assert.rejects(
+      client.subscribe("bounded", () => {}),
+      (e) => e.code === "LIMIT_EXCEEDED",
+    );
     for (const stop of stops) await stop();
     const held = client.multi();
     let resume;
-    const gate = new Promise(resolve => { resume = resolve; });
+    const gate = new Promise((resolve) => {
+      resume = resolve;
+    });
     held.connect = () => gate;
     const key = "x".repeat(2 * 1024 * 1024);
-    const pending = [held.get(key), held.get(key), held.get(key)].map(p => p.then(() => false, () => true));
-    await assert.rejects(held.get(key), e => e.code === "LIMIT_EXCEEDED");
-    await held.close(); resume();
+    const pending = [held.get(key), held.get(key), held.get(key)].map((p) =>
+      p.then(
+        () => false,
+        () => true,
+      ),
+    );
+    await assert.rejects(held.get(key), (e) => e.code === "LIMIT_EXCEEDED");
+    await held.close();
+    resume();
     assert.ok((await Promise.all(pending)).every(Boolean));
     const d = client.multi();
     await d.get("missing");
@@ -132,10 +144,14 @@ test("S03: total request and AUTH deadlines settle silent TCP peers without late
   const traffic = [];
   const peer = net.createServer((socket) => {
     sockets.add(socket);
+    socket.on("error", () => {});
     socket.on("data", (b) => {
       traffic.push(b.toString());
       if (b.toString().startsWith("GET /healthz")) {
-        socket.end("HTTP/1.1 200 OK\r\nContent-Length: 1100000\r\n\r\n" + "x".repeat(1100000));
+        socket.end(
+          "HTTP/1.1 200 OK\r\nContent-Length: 1100000\r\n\r\n" +
+            "x".repeat(1100000),
+        );
       }
     });
     socket.on("close", () => sockets.delete(socket));
@@ -170,9 +186,18 @@ test("S03: total request and AUTH deadlines settle silent TCP peers without late
       (e) => e.code === "TIMEOUT",
     );
     const channel = "x".repeat(2 * 1024 * 1024);
-    const waiting = Array.from({ length: 3 }, () => noRequestTimer.subscribe(channel, () => {}).catch(e => e));
-    await assert.rejects(noRequestTimer.subscribe(channel, () => {}), e => e.code === "LIMIT_EXCEEDED");
+    const waiting = Array.from({ length: 3 }, () =>
+      noRequestTimer.subscribe(channel, () => {}).catch((e) => e),
+    );
+    await assert.rejects(
+      noRequestTimer.subscribe(channel, () => {}),
+      (e) => e.code === "LIMIT_EXCEEDED",
+    );
     await Promise.all(waiting);
+    await assert.rejects(
+      noRequestTimer.healthcheck(),
+      (e) => e.code === "LIMIT_EXCEEDED",
+    );
     await delay(150);
     assert.ok(traffic.every((text) => !text.includes("SET")));
   } finally {

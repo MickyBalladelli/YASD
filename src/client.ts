@@ -428,7 +428,10 @@ export class YasdClient {
   async close(): Promise<void> {
     this.closed = true;
     this.abortController.abort();
-    for (const request of this.healthRequests) request.destroy(new DatabaseError("client is closed", "CONNECTION_CLOSED"));
+    for (const request of this.healthRequests)
+      request.destroy(
+        new DatabaseError("client is closed", "CONNECTION_CLOSED"),
+      );
     await Promise.all([...this.transactions].map((tx) => tx.close()));
     this.closeSubSocket(
       new DatabaseError("client is closed", "CONNECTION_CLOSED"),
@@ -466,40 +469,94 @@ export class YasdClient {
   /** HTTP(S) `/healthz` against the server port. Returns redacted health by default. */
   async healthcheck(timeoutMs = 3000): Promise<HealthResponse> {
     const timeout = validateTimeout(timeoutMs, "healthcheck timeoutMs");
-    if (this.closed) throw new DatabaseError("client is closed", "CONNECTION_CLOSED");
-    if (this.healthRequests.size >= 8) throw new DatabaseError("health request limit exceeded", "LIMIT_EXCEEDED");
+    if (this.closed)
+      throw new DatabaseError("client is closed", "CONNECTION_CLOSED");
+    if (this.healthRequests.size >= 8)
+      throw new DatabaseError(
+        "health request limit exceeded",
+        "LIMIT_EXCEEDED",
+      );
     return new Promise<HealthResponse>((resolve, reject) => {
       const requestOptions: http.RequestOptions = {
-        host: this.host, port: this.port, path: "/healthz", agent: false,
-        maxHeaderSize: 16 * 1024, signal: this.abortController.signal,
-        ...(this.healthToken === undefined ? {} : { headers: { authorization: `Bearer ${this.healthToken}` } }),
+        host: this.host,
+        port: this.port,
+        path: "/healthz",
+        agent: false,
+        maxHeaderSize: 16 * 1024,
+        signal: this.abortController.signal,
+        ...(this.healthToken === undefined
+          ? {}
+          : { headers: { authorization: `Bearer ${this.healthToken}` } }),
       };
       const onResponse = (res: http.IncomingMessage): void => {
-        const parts: Buffer[] = []; let bytes = 0;
+        const parts: Buffer[] = [];
+        let bytes = 0;
         res.on("data", (chunk: Buffer) => {
           bytes += chunk.length;
           if (bytes > 1024 * 1024) {
-            const error = new DatabaseError("health response exceeds 1 MiB", "LIMIT_EXCEEDED");
-            reject(error); req.destroy(error); return;
+            const error = new DatabaseError(
+              "health response exceeds 1 MiB",
+              "LIMIT_EXCEEDED",
+            );
+            reject(error);
+            req.destroy(error);
+            return;
           }
           parts.push(chunk);
         });
         res.on("error", reject);
-        res.on("aborted", () => reject(new DatabaseError("health response aborted", "CONNECTION_CLOSED")));
+        res.on("aborted", () =>
+          reject(
+            new DatabaseError("health response aborted", "CONNECTION_CLOSED"),
+          ),
+        );
         res.on("end", () => {
-          if (res.statusCode !== 200) { reject(new DatabaseError(`healthcheck failed: HTTP ${res.statusCode}`, "PROTOCOL_ERROR")); return; }
-          try { resolve(JSON.parse(Buffer.concat(parts).toString("utf8")) as HealthResponse); }
-          catch (cause) { reject(new DatabaseError("invalid health response JSON", "PROTOCOL_ERROR", { cause })); }
+          if (res.statusCode !== 200) {
+            reject(
+              new DatabaseError(
+                `healthcheck failed: HTTP ${res.statusCode}`,
+                "PROTOCOL_ERROR",
+              ),
+            );
+            return;
+          }
+          try {
+            resolve(
+              JSON.parse(
+                Buffer.concat(parts).toString("utf8"),
+              ) as HealthResponse,
+            );
+          } catch (cause) {
+            reject(
+              new DatabaseError(
+                "invalid health response JSON",
+                "PROTOCOL_ERROR",
+                { cause },
+              ),
+            );
+          }
         });
       };
-      const req = this.tlsOptions === undefined ? http.get(requestOptions, onResponse)
-        : https.get({ ...this.tlsOptions, ...requestOptions }, onResponse);
+      const req =
+        this.tlsOptions === undefined
+          ? http.get(requestOptions, onResponse)
+          : https.get({ ...this.tlsOptions, ...requestOptions }, onResponse);
       this.healthRequests.add(req);
-      const timer = timeout > 0 ? setTimeout(() => {
-        const error = new DatabaseError("healthcheck deadline exceeded", "TIMEOUT");
-        reject(error); req.destroy(error);
-      }, timeout) : undefined;
-      req.once("close", () => { if (timer) clearTimeout(timer); this.healthRequests.delete(req); });
+      const timer =
+        timeout > 0
+          ? setTimeout(() => {
+              const error = new DatabaseError(
+                "healthcheck deadline exceeded",
+                "TIMEOUT",
+              );
+              reject(error);
+              req.destroy(error);
+            }, timeout)
+          : undefined;
+      req.once("close", () => {
+        if (timer) clearTimeout(timer);
+        this.healthRequests.delete(req);
+      });
       req.on("error", reject);
     });
   }
@@ -751,47 +808,62 @@ export class YasdClient {
     if (!channel) throw new Error("subscribe requires a channel");
     if (typeof handler !== "function")
       throw new Error("subscribe requires a handler");
-    return this.enqueueSubCommand(async () => {
-      await this.ensureSubConn();
-      let set = this.subHandlers.get(channel);
-      if (set && !set.has(handler) && set.size >= 64) throw new DatabaseError("subscription handler limit exceeded", "LIMIT_EXCEEDED");
-      if (!set) {
-        let nameBytes = Buffer.byteLength(channel);
-        for (const name of this.subHandlers.keys()) nameBytes += Buffer.byteLength(name);
-        if (this.subHandlers.size >= 1024 || nameBytes > 1024 * 1024) throw new DatabaseError("subscription registry limit exceeded", "LIMIT_EXCEEDED");
-        set = new Set();
-        this.subHandlers.set(channel, set);
-      }
-      const first = set.size === 0;
-      set.add(handler);
-      if (first) {
-        try {
-          await this.subRoundTrip("subscribe", channel);
-        } catch (err) {
-          set.delete(handler);
-          if (set.size === 0) this.subHandlers.delete(channel);
-          throw err;
-        }
-      }
-      let unsubscribed = false;
-      return async (): Promise<void> => {
-        if (unsubscribed) return;
-        await this.enqueueSubCommand(async () => {
-          if (unsubscribed) return;
-          unsubscribed = true;
-          const current = this.subHandlers.get(channel);
-          current?.delete(handler);
-          if (!current || current.size > 0) return;
-          this.subHandlers.delete(channel);
-          if (this.subSocket) {
-            await this.subRoundTrip("unsubscribe", channel).catch(
-              () => undefined,
+    return this.enqueueSubCommand(
+      async () => {
+        await this.ensureSubConn();
+        let set = this.subHandlers.get(channel);
+        if (set && !set.has(handler) && set.size >= 64)
+          throw new DatabaseError(
+            "subscription handler limit exceeded",
+            "LIMIT_EXCEEDED",
+          );
+        if (!set) {
+          let nameBytes = Buffer.byteLength(channel);
+          for (const name of this.subHandlers.keys())
+            nameBytes += Buffer.byteLength(name);
+          if (this.subHandlers.size >= 1024 || nameBytes > 1024 * 1024)
+            throw new DatabaseError(
+              "subscription registry limit exceeded",
+              "LIMIT_EXCEEDED",
             );
+          set = new Set();
+          this.subHandlers.set(channel, set);
+        }
+        const first = set.size === 0;
+        set.add(handler);
+        if (first) {
+          try {
+            await this.subRoundTrip("subscribe", channel);
+          } catch (err) {
+            set.delete(handler);
+            if (set.size === 0) this.subHandlers.delete(channel);
+            throw err;
           }
-          if (this.subHandlers.size === 0) this.closeSubSocket();
-        }, commandByteLength(["UNSUBSCRIBE", channel]));
-      };
-    }, commandByteLength(["SUBSCRIBE", channel]));
+        }
+        let unsubscribed = false;
+        return async (): Promise<void> => {
+          if (unsubscribed) return;
+          await this.enqueueSubCommand(
+            async () => {
+              if (unsubscribed) return;
+              unsubscribed = true;
+              const current = this.subHandlers.get(channel);
+              current?.delete(handler);
+              if (!current || current.size > 0) return;
+              this.subHandlers.delete(channel);
+              if (this.subSocket) {
+                await this.subRoundTrip("unsubscribe", channel).catch(
+                  () => undefined,
+                );
+              }
+              if (this.subHandlers.size === 0) this.closeSubSocket();
+            },
+            commandByteLength(["UNSUBSCRIBE", channel]),
+          );
+        };
+      },
+      commandByteLength(["SUBSCRIBE", channel]),
+    );
   }
 
   /** Reconnect the subscriber socket and restore all registered channels. */
@@ -1282,20 +1354,49 @@ export class YasdClient {
     }
   }
 
-  private enqueueSubCommand<T>(operation: () => Promise<T>, bytes = 0): Promise<T> {
-    if (this.subCommandDepth >= 1024 || this.subCommandBytes + bytes > 8 * 1024 * 1024) {
-      return Promise.reject(new DatabaseError("subscription queue limit exceeded", "LIMIT_EXCEEDED"));
+  private enqueueSubCommand<T>(
+    operation: () => Promise<T>,
+    bytes = 0,
+  ): Promise<T> {
+    if (
+      this.subCommandDepth >= 1024 ||
+      this.subCommandBytes + bytes > 8 * 1024 * 1024
+    ) {
+      return Promise.reject(
+        new DatabaseError(
+          "subscription queue limit exceeded",
+          "LIMIT_EXCEEDED",
+        ),
+      );
     }
-    this.subCommandDepth++; this.subCommandBytes += bytes;
-    let expired = false; let active = false;
-    const result = this.subCommandTail.then(() => {
-      if (expired || this.closed) throw new DatabaseError("subscription operation cancelled before dispatch", "CONNECTION_CLOSED");
-      active = true; return operation();
-    }).finally(() => { this.subCommandDepth--; this.subCommandBytes -= bytes; });
-    this.subCommandTail = result.then(() => undefined, () => undefined);
+    this.subCommandDepth++;
+    this.subCommandBytes += bytes;
+    let expired = false;
+    let active = false;
+    const result = this.subCommandTail
+      .then(() => {
+        if (expired || this.closed)
+          throw new DatabaseError(
+            "subscription operation cancelled before dispatch",
+            "CONNECTION_CLOSED",
+          );
+        active = true;
+        return operation();
+      })
+      .finally(() => {
+        this.subCommandDepth--;
+        this.subCommandBytes -= bytes;
+      });
+    this.subCommandTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
     return deadline(result, this.requestTimeoutMs, () => {
       expired = true;
-      if (active) this.closeSubSocket(new DatabaseError("subscription deadline exceeded", "TIMEOUT"));
+      if (active)
+        this.closeSubSocket(
+          new DatabaseError("subscription deadline exceeded", "TIMEOUT"),
+        );
     });
   }
 
@@ -1628,11 +1729,14 @@ export class YasdTransaction {
       throw new TransactionError("WATCH inside MULTI is not allowed");
     if (keys.length === 0)
       throw new TransactionError("WATCH requires at least one key");
-    return this.serialize(async () => {
-      if (this.begun)
-        throw new TransactionError("WATCH inside MULTI is not allowed");
-      return this.expectOk(["WATCH", ...keys]);
-    }, commandByteLength(["WATCH", ...keys]));
+    return this.serialize(
+      async () => {
+        if (this.begun)
+          throw new TransactionError("WATCH inside MULTI is not allowed");
+        return this.expectOk(["WATCH", ...keys]);
+      },
+      commandByteLength(["WATCH", ...keys]),
+    );
   }
 
   /** Forget watched versions (queued writes are kept). */
@@ -1644,11 +1748,14 @@ export class YasdTransaction {
   /** Immediate read (must precede MULTI — read first, then write). */
   async get(key: string): Promise<Value | undefined> {
     this.assertReadable("GET");
-    const reply = await this.serialize(async () => {
-      if (this.begun) throw new TransactionError("GET must precede MULTI");
-      await this.connect();
-      return this.send(["GET", key]);
-    }, commandByteLength(["GET", key]));
+    const reply = await this.serialize(
+      async () => {
+        if (this.begun) throw new TransactionError("GET must precede MULTI");
+        await this.connect();
+        return this.send(["GET", key]);
+      },
+      commandByteLength(["GET", key]),
+    );
     if (reply.kind === "bulk") {
       return reply.value === null
         ? undefined
@@ -1661,11 +1768,14 @@ export class YasdTransaction {
   async mget(keys: string[]): Promise<Array<Value | undefined>> {
     this.assertReadable("MGET");
     keys = [...keys];
-    const reply = await this.serialize(async () => {
-      if (this.begun) throw new TransactionError("MGET must precede MULTI");
-      await this.connect();
-      return this.send(["MGET", ...keys]);
-    }, commandByteLength(["MGET", ...keys]));
+    const reply = await this.serialize(
+      async () => {
+        if (this.begun) throw new TransactionError("MGET must precede MULTI");
+        await this.connect();
+        return this.send(["MGET", ...keys]);
+      },
+      commandByteLength(["MGET", ...keys]),
+    );
     if (reply.kind !== "array")
       throw new Error(`unexpected MGET reply: ${JSON.stringify(reply)}`);
     return reply.items.map((item) => {
@@ -1682,11 +1792,14 @@ export class YasdTransaction {
   /** Immediate TTL read (must precede MULTI). */
   async ttl(key: string): Promise<number> {
     this.assertReadable("TTL");
-    const reply = await this.serialize(async () => {
-      if (this.begun) throw new TransactionError("TTL must precede MULTI");
-      await this.connect();
-      return this.send(["TTL", key]);
-    }, commandByteLength(["TTL", key]));
+    const reply = await this.serialize(
+      async () => {
+        if (this.begun) throw new TransactionError("TTL must precede MULTI");
+        await this.connect();
+        return this.send(["TTL", key]);
+      },
+      commandByteLength(["TTL", key]),
+    );
     if (reply.kind === "int") return reply.value;
     throw new Error(`unexpected TTL reply: ${JSON.stringify(reply)}`);
   }
